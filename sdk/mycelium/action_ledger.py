@@ -6,8 +6,10 @@ import asyncio
 import functools
 import hashlib
 import json
+import logging
 import os
 import socket
+import threading
 import time
 import uuid
 import warnings
@@ -56,6 +58,11 @@ R = TypeVar("R")
 DEFAULT_LEASE_TTL = 3600.0
 DEFAULT_POLL_INTERVAL = 0.05
 DEFAULT_POLL_TIMEOUT = 300.0
+# Renew at 1/3 of lease TTL so a still-running owner stays HELD before peers see EXPIRED.
+DEFAULT_LEASE_RENEW_RATIO = 1.0 / 3.0
+MIN_LEASE_RENEW_INTERVAL = 0.01
+
+_logger = logging.getLogger(__name__)
 
 
 class LedgerError(Exception):
@@ -168,12 +175,12 @@ def record_external_operation(ref: str) -> None:
 def renew_lease(*, lease_ttl: float | None = None) -> None:
     """Extend the active transition's execution lease.
 
-    Call during long-running side-effecting work so a still-alive worker does
-    not look ``EXPIRED`` to a redispatched peer. This is the owner-side renew
-    half of ``REPAIR`` taxonomy (peers still ``POLL`` on a held lease; incomplete
-    durable fields are healed via ``ActionLedger.repair_transition``). Lease is
-    resolution metadata (not part of ``transition_key``); renewing keeps the
-    same transition ``IN_FLIGHT`` / ``POLL`` instead of opening a reclaim path.
+    ``@ledger`` / ``@ledger_sync`` already auto-renew while the tool body runs.
+    Call this for an extra mid-flight bump, or when driving
+    :meth:`ActionLedger.claim_side_effecting` yourself without the decorator.
+    Peers still ``POLL`` on a held lease; incomplete durable fields are healed
+    via ``ActionLedger.repair_transition``. Lease is resolution metadata (not
+    part of ``transition_key``).
 
     Outside a ledgered tool this is a no-op with a warning.
     """
@@ -185,6 +192,73 @@ def renew_lease(*, lease_ttl: float | None = None) -> None:
         )
         return
     active.ledger.renew_lease(active.request_id, lease_ttl=lease_ttl)
+
+
+def _resolve_lease_renew_interval(
+    lease_ttl: float,
+    lease_renew_interval: float | None,
+) -> float | None:
+    """Return seconds between auto-renew ticks, or ``None`` to disable.
+
+    ``lease_renew_interval <= 0`` disables auto-renew. ``None`` means
+    ``lease_ttl * DEFAULT_LEASE_RENEW_RATIO`` (floored at
+    :data:`MIN_LEASE_RENEW_INTERVAL`). Unbounded leases (``lease_ttl <= 0``)
+    never auto-renew.
+    """
+    if lease_ttl <= 0:
+        return None
+    if lease_renew_interval is not None:
+        if lease_renew_interval <= 0:
+            return None
+        return lease_renew_interval
+    return max(lease_ttl * DEFAULT_LEASE_RENEW_RATIO, MIN_LEASE_RENEW_INTERVAL)
+
+
+@contextmanager
+def _lease_auto_renew(ledger: ActionLedger, request_id: str) -> Iterator[None]:
+    """Background owner heartbeat while a ledgered tool body executes.
+
+    Keeps ``lease_until`` ahead of wall clock so redispatched peers stay on
+    ``POLL`` instead of treating a still-running worker as ``EXPIRED``.
+    """
+    interval = _resolve_lease_renew_interval(
+        ledger._lease_ttl,
+        ledger._lease_renew_interval,
+    )
+    if interval is None:
+        yield
+        return
+
+    stop = threading.Event()
+
+    def _loop() -> None:
+        while not stop.wait(interval):
+            try:
+                ledger.renew_lease(request_id, lease_ttl=ledger._lease_ttl)
+            except LedgerError as exc:
+                _logger.warning(
+                    "lease auto-renew stopped for %s: %s",
+                    request_id,
+                    exc,
+                )
+                return
+            except Exception:
+                _logger.exception(
+                    "lease auto-renew failed for %s; will retry",
+                    request_id,
+                )
+
+    thread = threading.Thread(
+        target=_loop,
+        name=f"mycelium-lease-renew:{request_id[:16]}",
+        daemon=True,
+    )
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(timeout=max(interval, MIN_LEASE_RENEW_INTERVAL) + 1.0)
 
 
 @contextmanager
@@ -426,6 +500,7 @@ class ActionLedger:
         storage: LedgerStorage | None = None,
         *,
         lease_ttl: float = DEFAULT_LEASE_TTL,
+        lease_renew_interval: float | None = None,
         poll_interval: float = DEFAULT_POLL_INTERVAL,
         poll_timeout: float | None = DEFAULT_POLL_TIMEOUT,
         reconciler: Reconciler | None = None,
@@ -433,6 +508,8 @@ class ActionLedger:
     ) -> None:
         self._storage = storage if storage is not None else InMemoryLedgerStorage()
         self._lease_ttl = lease_ttl
+        # None → renew at lease_ttl/3 while @ledger tool bodies run; <=0 disables.
+        self._lease_renew_interval = lease_renew_interval
         self._poll_interval = poll_interval
         self._poll_timeout = poll_timeout
         self._reconciler = reconciler
@@ -1490,7 +1567,8 @@ def _run_ledgered(
         _ActiveTransition(ledger, request_id, transition_binding)
     )
     try:
-        result = func(*args, **clean_kwargs)
+        with _lease_auto_renew(ledger, request_id):
+            result = func(*args, **clean_kwargs)
     except Exception as exc:
         _record_failure(ledger, request_id, exc)
         _emit_tool_receipt(audit_emitter, ledger, request_id)
@@ -1534,7 +1612,8 @@ async def _run_ledgered_async(
         _ActiveTransition(ledger, request_id, transition_binding)
     )
     try:
-        result = await func(*args, **clean_kwargs)
+        with _lease_auto_renew(ledger, request_id):
+            result = await func(*args, **clean_kwargs)
     except Exception as exc:
         _record_failure(ledger, request_id, exc)
         _emit_tool_receipt(audit_emitter, ledger, request_id)
@@ -1558,16 +1637,24 @@ def ledger(
     transition_binding: ToolTransitionBinding | None = None,
     *,
     lease_ttl: float | None = None,
+    lease_renew_interval: float | None = None,
     poll_interval: float | None = None,
     poll_timeout: float | None = None,
     reconciler: Reconciler | None = None,
     defer_read_only_unknown: bool = False,
 ) -> Callable[[Callable[P, Awaitable[R]]], Callable[P, Awaitable[R]]]:
-    """Decorator that records async tool invocations in an ActionLedger."""
+    """Decorator that records async tool invocations in an ActionLedger.
+
+    While the tool body runs, Mycelium auto-extends the execution lease
+    (default every ``lease_ttl / 3``). Pass ``lease_renew_interval=0`` to
+    disable; use :func:`renew_lease` for an extra manual bump.
+    """
 
     ledger_kwargs: dict[str, float | None] = {}
     if lease_ttl is not None:
         ledger_kwargs["lease_ttl"] = lease_ttl
+    if lease_renew_interval is not None:
+        ledger_kwargs["lease_renew_interval"] = lease_renew_interval
     if poll_interval is not None:
         ledger_kwargs["poll_interval"] = poll_interval
     if poll_timeout is not None:
@@ -1606,16 +1693,24 @@ def ledger_sync(
     transition_binding: ToolTransitionBinding | None = None,
     *,
     lease_ttl: float | None = None,
+    lease_renew_interval: float | None = None,
     poll_interval: float | None = None,
     poll_timeout: float | None = None,
     reconciler: Reconciler | None = None,
     defer_read_only_unknown: bool = False,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
-    """Decorator that records sync tool invocations in an ActionLedger."""
+    """Decorator that records sync tool invocations in an ActionLedger.
+
+    While the tool body runs, Mycelium auto-extends the execution lease
+    (default every ``lease_ttl / 3``). Pass ``lease_renew_interval=0`` to
+    disable; use :func:`renew_lease` for an extra manual bump.
+    """
 
     ledger_kwargs: dict[str, float | None] = {}
     if lease_ttl is not None:
         ledger_kwargs["lease_ttl"] = lease_ttl
+    if lease_renew_interval is not None:
+        ledger_kwargs["lease_renew_interval"] = lease_renew_interval
     if poll_interval is not None:
         ledger_kwargs["poll_interval"] = poll_interval
     if poll_timeout is not None:
@@ -1655,6 +1750,7 @@ def get_ledger(func: Callable[..., Any]) -> ActionLedger | None:
 
 __all__ = [
     "ActionLedger",
+    "DEFAULT_LEASE_RENEW_RATIO",
     "DEFAULT_LEASE_TTL",
     "DEFAULT_POLL_INTERVAL",
     "DEFAULT_POLL_TIMEOUT",
@@ -1666,6 +1762,7 @@ __all__ = [
     "LedgerPendingError",
     "LedgerPollTimeoutError",
     "LedgerStorage",
+    "MIN_LEASE_RENEW_INTERVAL",
     "TerminalOutcome",
     "get_ledger",
     "ledger",

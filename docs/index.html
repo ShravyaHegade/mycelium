@@ -382,7 +382,7 @@
 
     <h1>Mycelium: runtime guards for AI agents</h1>
     <p class="badges">
-      <a href="https://pypi.org/project/mycelium-runtime/"><img src="https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&amp;release=1.13.4" alt="PyPI version"></a>
+      <a href="https://pypi.org/project/mycelium-runtime/"><img src="https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&amp;release=1.14.0" alt="PyPI version"></a>
       <a href="https://pypi.org/project/mycelium-runtime/"><img src="https://img.shields.io/pypi/pyversions/mycelium-runtime.svg" alt="Python versions"></a>
       <a href="https://pepy.tech/project/mycelium-runtime"><img src="https://static.pepy.tech/badge/mycelium-runtime" alt="PyPI downloads"></a>
       <a href="https://github.com/mycelium-labs/mycelium"><img src="https://img.shields.io/github/license/mycelium-labs/mycelium.svg" alt="MIT license"></a>
@@ -396,7 +396,7 @@
       <strong>Opt-in:</strong> stale-context helpers and tool-boundary checks.
       YAML callable paths and <code>mycelium run</code> add the core path without
       editing each function. Framework-agnostic.
-      Early but API-stable (v1.13.4): breaking changes only at major versions.
+      Early but API-stable (v1.14.0): breaking changes only at major versions.
     </p>
 
     <section id="architecture">
@@ -431,7 +431,8 @@
         <li>
           <strong>Duplicate side effects on retry</strong> (core) — classify tools
           (<code>read</code>, <code>keyed_mutate</code>, <code>non_idempotent_mutate</code>, …),
-          hash a durable transition key, resolve by terminal state and gates
+          hash a durable transition key, hold a lease (auto-extended while ledgered tools
+          run), resolve by terminal state and gates
           (poll / repair / soft-block reads; hard-block or reconcile writes).
         </li>
         <li>
@@ -501,7 +502,7 @@ LedgerHardBlockError, LedgerPollTimeoutError
 LedgerSoftBlockError                                 # read-only UNKNOWN defer (v1.9.0)
 side_effect, mark_maybe_crossed, mark_crossed        # boundary markers (v1.5.0)
 record_external_operation                            # provider handle (v1.6.0)
-renew_lease, LeaseValidity, resolve_lease_validity   # lease window (v1.10.0)
+renew_lease, LeaseValidity, resolve_lease_validity   # lease window (v1.10.0); auto-renew in @ledger (v1.14.0)
 Reconciler, ReconcileResult, ReconcileStatus         # provider reconcile (v1.7.0)
 
 # Transition envelope (core)
@@ -659,7 +660,7 @@ HARD_BLOCK    ambiguous mutating transition      stop; reconcile if ref present<
       </p>
       <pre>Public          Mycelium internal                         Notes
 ALLOW           ALLOW                                     run / safe retry
-REPAIR          REPAIR                                    heal durable context; owner renew_lease for live lease
+REPAIR          REPAIR                                    heal durable context; owner auto-renew / renew_lease for live lease
 SOFT_BLOCK      SOFT_BLOCK                                read-only defer / safe retry
 HARD_BLOCK      HARD_BLOCK                                stop; reconcile if ref present
 (must not run)  RETURN / POLL                             already done, or wait on held lease
@@ -672,12 +673,15 @@ HARD_BLOCK      HARD_BLOCK                                stop; reconcile if ref
         debugging a ledgered tool.
       </p>
       <p>
-        <strong>Lease validity (v1.10.0):</strong> <code>lease_until</code> is resolution
+        <strong>Lease validity (v1.10.0) / auto-renew (v1.14.0):</strong> <code>lease_until</code> is resolution
         metadata — not part of <code>transition_key</code>. Resolution checks
         <code>LeaseValidity</code> (<code>HELD</code> → poll, <code>EXPIRED</code> →
-        reclaim / hard-block by class) before allowing another attempt. Call
-        <code>renew_lease()</code> inside long-running ledgered tools so peers keep
-        polling instead of reclaiming.
+        reclaim / hard-block by class) before allowing another attempt.
+        <code>@ledger</code> / <code>@ledger_sync</code> auto-extend the lease while the
+        tool body runs (default every <code>lease_ttl / 3</code>). Set
+        <code>lease_renew_interval: 0</code> to disable; call
+        <code>renew_lease()</code> for an extra bump or when claiming outside the
+        decorator.
       </p>
       <p>
         <strong>REPAIR (v1.13.0):</strong> when the durable record is incomplete but
@@ -781,6 +785,7 @@ EXPIRED + maybe_crossed / crossed            → hard-block</pre>
   agent_id: payment-agent
   policy_version: "2026.07.1"
   lease_ttl: 3600
+  # lease_renew_interval: 1200   # default = lease_ttl/3; 0 disables auto-renew
 
 action_ledger:
   storage: file          # memory | file | redis | postgres
@@ -922,7 +927,7 @@ with config.run(thread_id):
           <strong>~180s</strong> (aligned with <code>BG_JOB_HEARTBEAT</code> sweep) while
           the first is still in flight
           (<a href="https://github.com/langchain-ai/langgraph/issues/7417">langgraph#7417</a>);
-          Mycelium’s lease / poll / hard-block path is the operator-side guard for that
+          Mycelium’s lease / auto-renew / poll / hard-block path is the operator-side guard for that
           window. <code>pip install mycelium-runtime &amp;&amp; mycelium demo</code>
         </p>
       </div>

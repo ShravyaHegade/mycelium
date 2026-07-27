@@ -1,17 +1,17 @@
 # Mycelium runtime
 
-[![PyPI version](https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&release=1.13.4)](https://pypi.org/project/mycelium-runtime/)
+[![PyPI version](https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&release=1.14.0)](https://pypi.org/project/mycelium-runtime/)
 [![Python](https://img.shields.io/pypi/pyversions/mycelium-runtime.svg)](https://pypi.org/project/mycelium-runtime/)
 
-Current package: **mycelium-runtime v1.13.4** (`REPAIR` gate + command auto-instrumentation + transition envelope).
+Current package: **mycelium-runtime v1.14.0** (`REPAIR` gate + lease auto-renew + transition envelope).
 
 ## One painful bug → a few lines of config
 
 **LangGraph Cloud redispatches a long tool call while the first is still running.** Both complete. You pay twice. Side effects run twice. [langgraph#7417](https://github.com/langchain-ai/langgraph/issues/7417)
 
-Mycelium’s answer is a **transition envelope**, not “idempotency key + cached result” alone: classify the tool (**side-effect class**), hold an execution **lease** while work is in flight, record **terminal state** (`IN_FLIGHT` / `COMPLETED` / `UNKNOWN` / …), and **hard-block** (or reconcile) when a mutating redispatch would be unsafe. Same key while in-flight → poll; completed → return stored; ambiguous payment-class → stop.
+Mycelium’s answer is a **transition envelope**, not “idempotency key + cached result” alone: classify the tool (**side-effect class**), hold an execution **lease** while work is in flight (auto-extended for long `@ledger` tools), record **terminal state** (`IN_FLIGHT` / `COMPLETED` / `UNKNOWN` / …), and **hard-block** (or reconcile) when a mutating redispatch would be unsafe. Same key while in-flight → poll; completed → return stored; ambiguous payment-class → stop.
 
-On LangGraph Cloud, long tool calls can be redispatched on the order of **~180s**, aligned with the platform’s **`BG_JOB_HEARTBEAT`** sweep. Mycelium’s lease / poll / hard-block path is the operator-side guard for that window — see [Resolution gates](#resolution-gates).
+On LangGraph Cloud, long tool calls can be redispatched on the order of **~180s**, aligned with the platform’s **`BG_JOB_HEARTBEAT`** sweep. Mycelium’s lease / auto-renew / poll / hard-block path is the operator-side guard for that window — see [Resolution gates](#resolution-gates).
 
 ```bash
 pip install 'mycelium-runtime[langgraph]'  # Python 3.10+; automatic runtime IDs
@@ -49,7 +49,7 @@ Mycelium sits between your agent loop and your tools (after the LLM returns `too
 
 | | Problem | What Mycelium does |
 |---|---------|-------------------|
-| **Core** | **Duplicate side effects on retry** | Transition envelope: classify tools, durable transition key, lease, terminal state, resolution **gates** (`POLL` / `REPAIR` / `SOFT_BLOCK` / `HARD_BLOCK`), `external_operation_ref` + `Reconciler`, ledgers, signed receipts |
+| **Core** | **Duplicate side effects on retry** | Transition envelope: classify tools, durable transition key, lease (+ auto-renew while `@ledger` runs), terminal state, resolution **gates** (`POLL` / `REPAIR` / `SOFT_BLOCK` / `HARD_BLOCK`), `external_operation_ref` + `Reconciler`, ledgers, signed receipts |
 | **Core** | **Transition envelope fields** | `side_effect_class` → `spendability` → `side_effect_boundary` → `terminal_outcome` → `external_operation_ref` → `retry_permission` — same system as above; payment/write needs the heavier set |
 | **Opt-in** | **Stale or broken context** | TTL cache (`@protect` / `Session`); optional `MessageValidator` / `HistoryGuard` you call before the next LLM turn |
 | **Opt-in** | **Bad tool calls** | `@bounded` input/output/scope checks; optional `ToolRegistry` allowlist — block before the tool runs |
@@ -251,6 +251,7 @@ transition:
   agent_id: payment-agent
   policy_version: "2026.07.1"
   lease_ttl: 3600
+  # lease_renew_interval: 1200   # default = lease_ttl/3; 0 disables auto-renew
 
 action_ledger:
   storage: file
@@ -330,7 +331,7 @@ Each duplicate dispatch is classified to a gate. Read-only and side-effecting to
 | Public | Mycelium | Notes |
 |--------|----------|-------|
 | `ALLOW` | `ALLOW` | run / safe retry |
-| `REPAIR` | `REPAIR` | heal durable context; owner `renew_lease()` for a live lease |
+| `REPAIR` | `REPAIR` | heal durable context; owner auto-renew / `renew_lease()` for a live lease |
 | `SOFT_BLOCK` | `SOFT_BLOCK` | read-only defer / safe retry |
 | `HARD_BLOCK` / `BLOCK` | `HARD_BLOCK` | stop; reconcile if ref present |
 | *(must not run again)* | `RETURN` / `POLL` | already done, or wait on a held lease |
@@ -338,11 +339,11 @@ Each duplicate dispatch is classified to a gate. Read-only and side-effecting to
 
 Public `BLOCK` ≈ Mycelium `HARD_BLOCK`. `RETURN` and `POLL` are also “do not execute again” under the richer internal taxonomy — use the four public words with platforms; use the full table when implementing or debugging.
 
-**Lease validity (v1.10.0):** `lease_until` is resolution metadata — **not** part of `transition_key` (so renewals do not fork identity). Before reclaim/retry, resolution classifies the window via `LeaseValidity` (`HELD` → poll, `EXPIRED` → reclaim or hard-block by class, `UNBOUNDED` → no TTL). During long work call `renew_lease()` inside the ledgered tool to keep peers on `POLL`.
+**Lease validity (v1.10.0) / auto-renew (v1.14.0):** `lease_until` is resolution metadata — **not** part of `transition_key` (so renewals do not fork identity). Before reclaim/retry, resolution classifies the window via `LeaseValidity` (`HELD` → poll, `EXPIRED` → reclaim or hard-block by class, `UNBOUNDED` → no TTL). While a `@ledger` / `@ledger_sync` tool body runs, Mycelium **auto-extends** the lease (default every `lease_ttl / 3`). Set `lease_renew_interval: 0` to disable; call `renew_lease()` for an extra manual bump or when claiming outside the decorator.
 
 **Cloud-style proof (v1.13.4):** `mycelium demo --redis` (or `prove_two_worker_redis_redispatch()`) runs **two OS processes** against a **real Redis** ledger. Worker A claims and runs; worker B redispatches the same `request_id` while A is `IN_FLIGHT`. B polls and returns A's result — the side effect runs once. Set `MYCELIUM_TEST_REDIS_URL` or use `redis://127.0.0.1:6379/15`. This is the partner-facing #7417 proof beyond an in-process double call.
 
-**`REPAIR` (v1.13.0):** when the durable record is incomplete but healable (missing `idempotency_key`, invalid/missing `side_effect_boundary` or `terminal_outcome`, or status/terminal drift), claim loops call `repair_transition()` then re-resolve. A held in-flight lease is still `POLL` for peers; the owner extends via `renew_lease()` (not a second execute).
+**`REPAIR` (v1.13.0):** when the durable record is incomplete but healable (missing `idempotency_key`, invalid/missing `side_effect_boundary` or `terminal_outcome`, or status/terminal drift), claim loops call `repair_transition()` then re-resolve. A held in-flight lease is still `POLL` for peers; the owner keeps it held via auto-renew (or `renew_lease()`), not a second execute.
 
 **Read-only** (`side_effect_class: read`): poll, reclaim, retry failed-before-effect, soft-block on ambiguous `UNKNOWN`/`BLOCKED`.
 
@@ -591,6 +592,7 @@ transition:
   agent_id: payment-agent
   policy_version: "2026.07.1"
   lease_ttl: 3600
+  # lease_renew_interval: 1200   # default = lease_ttl/3; 0 disables auto-renew
 
 action_ledger:
   storage: file

@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.14.0 (2026-07-27)
+
+Minor: auto-renew execution leases while `@ledger` / `@ledger_sync` tool bodies run, so long work does not look `EXPIRED` to redispatched peers.
+
+### Behavior
+
+- While a ledgered tool executes, a daemon heartbeat extends `lease_until` (default interval `lease_ttl / 3`).
+- Opt out with `lease_renew_interval=0` (decorator / `ActionLedger` / YAML `transition.lease_renew_interval`).
+- Manual `renew_lease()` remains for extra bumps or claim-outside-decorator flows.
+
+### Docs / version
+
+- Root README, SDK README (PyPI long description), handbook, `docs/llms.txt`, and `mycelium init` template note lease auto-renew / `lease_renew_interval`.
+- Bust version banners to v1.14.0.
+
 ## 1.13.4 (2026-07-22)
 
 Docs/proof patch: real two-worker Redis Cloud-style #7417 redispatch proof. No new resolution policy.

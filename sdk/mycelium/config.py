@@ -515,6 +515,8 @@ class MyceliumConfig:
         kwargs: dict[str, float] = {}
         if self.transition.lease_ttl is not None:
             kwargs["lease_ttl"] = self.transition.lease_ttl
+        if self.transition.lease_renew_interval is not None:
+            kwargs["lease_renew_interval"] = self.transition.lease_renew_interval
         if self.transition.poll_interval is not None:
             kwargs["poll_interval"] = self.transition.poll_interval
         if self.transition.poll_timeout is not None:
@@ -997,6 +999,30 @@ def _parse_optional_positive_float(
     return parsed
 
 
+def _parse_optional_non_negative_float(
+    raw: dict[str, Any],
+    key: str,
+    *,
+    section: str,
+    allow_null: bool = False,
+) -> float | None:
+    """Like positive float, but ``0`` is allowed (e.g. disable lease auto-renew)."""
+    if key not in raw:
+        return None
+    value = raw[key]
+    if value is None:
+        if allow_null:
+            return None
+        raise ConfigError(f"'{section}.{key}' cannot be null")
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"'{section}.{key}' must be a number") from exc
+    if parsed < 0:
+        raise ConfigError(f"'{section}.{key}' must be greater than or equal to zero")
+    return parsed
+
+
 def _parse_transition_config(raw: Any) -> TransitionConfig | None:
     if raw is None:
         return None
@@ -1018,6 +1044,9 @@ def _parse_transition_config(raw: Any) -> TransitionConfig | None:
     lease_ttl = _parse_optional_positive_float(
         raw, "lease_ttl", section="transition"
     )
+    lease_renew_interval = _parse_optional_non_negative_float(
+        raw, "lease_renew_interval", section="transition"
+    )
     poll_interval = _parse_optional_positive_float(
         raw, "poll_interval", section="transition"
     )
@@ -1030,6 +1059,7 @@ def _parse_transition_config(raw: Any) -> TransitionConfig | None:
         policy_version=str(policy_version),
         scope_from=scope_from,
         lease_ttl=lease_ttl,
+        lease_renew_interval=lease_renew_interval,
         poll_interval=poll_interval,
         poll_timeout=poll_timeout,
     )

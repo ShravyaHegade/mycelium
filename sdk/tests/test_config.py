@@ -399,6 +399,32 @@ audit_receipt:
     assert audit.agent_id == "payment-agent"
 
 
+def test_transition_lease_renew_interval_parsed() -> None:
+    yaml_text = """
+transition:
+  agent_id: payment-agent
+  policy_version: "2026.07.1"
+  lease_ttl: 3600
+  lease_renew_interval: 0
+"""
+    config = load_config_from_string(yaml_text)
+    assert config.transition is not None
+    assert config.transition.lease_ttl == 3600.0
+    assert config.transition.lease_renew_interval == 0.0
+    assert config._ledger_timing_kwargs()["lease_renew_interval"] == 0.0
+
+
+def test_transition_lease_renew_interval_rejects_negative() -> None:
+    yaml_text = """
+transition:
+  agent_id: payment-agent
+  policy_version: "2026.07.1"
+  lease_renew_interval: -1
+"""
+    with pytest.raises(ConfigError, match="lease_renew_interval"):
+        load_config_from_string(yaml_text)
+
+
 def test_apply_tool_with_audit_receipt_from_yaml() -> None:
     yaml_text = """
 transition:

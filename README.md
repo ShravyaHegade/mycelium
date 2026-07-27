@@ -1,6 +1,6 @@
 # Mycelium
 
-[![PyPI version](https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&release=1.13.4)](https://pypi.org/project/mycelium-runtime/)
+[![PyPI version](https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&release=1.14.0)](https://pypi.org/project/mycelium-runtime/)
 [![Python](https://img.shields.io/pypi/pyversions/mycelium-runtime.svg)](https://pypi.org/project/mycelium-runtime/)
 [![Downloads](https://static.pepy.tech/badge/mycelium-runtime)](https://pepy.tech/project/mycelium-runtime)
 
@@ -8,7 +8,7 @@
 
 Stops duplicate side effects on retry/redispatch, blocks bad tool args and out-of-scope calls, and keeps tool data fresh. Not recovery after. Not tracing or dashboards.
 
-*Early but API-stable (**v1.13.4**): breaking changes only at major versions. More guards planned.*
+*Early but API-stable (**v1.14.0**): breaking changes only at major versions. More guards planned.*
 
 ## Who it's for
 
@@ -16,7 +16,7 @@ Developers running **agents with side-effect tools** in production (payments, em
 
 Python 3.10+. Framework-agnostic.
 
-## What it does (v1.13.x)
+## What it does (v1.14.x)
 
 These aren't reasoning failures. They're runtime failures. Mycelium sits between your agent loop and your tools (after the LLM returns `tool_calls`):
 
@@ -26,7 +26,8 @@ These aren't reasoning failures. They're runtime failures. Mycelium sits between
   - **Read tools:** poll in-flight, reclaim expired leases, **soft-block** ambiguous `UNKNOWN` (safe retry by default)
   - **Mutating tools:** hard-block ambiguity; **reconcile** via `external_operation_ref` when a provider lookup can prove run-or-not (`COMPLETED` / `NOT_EXECUTED` / still blocked)
   - **Stale lease (`EXPIRED`):** strict classes reclaim only when reconcile proves `NOT_EXECUTED` (fail-closed without a ref)
-  - **LangGraph Cloud:** long tools may be redispatched around **~180s** (`BG_JOB_HEARTBEAT` sweep); Mycelium’s lease/poll/hard-block guards that window ([langgraph#7417](https://github.com/langchain-ai/langgraph/issues/7417))
+  - **Lease auto-renew (v1.14.0):** while a `@ledger` / `@ledger_sync` tool runs, Mycelium extends `lease_until` automatically (default every `lease_ttl / 3`) so long work does not look dead to a redispatched peer. Set `lease_renew_interval: 0` to disable; call `renew_lease()` for a manual bump or when claiming outside the decorator.
+  - **LangGraph Cloud:** long tools may be redispatched around **~180s** (`BG_JOB_HEARTBEAT` sweep); Mycelium’s lease/poll/hard-block (with auto-renew) guards that window ([langgraph#7417](https://github.com/langchain-ai/langgraph/issues/7417))
 - **Transition envelope fields** (priority order): `side_effect_class` → `spendability` → `side_effect_boundary` → `terminal_outcome` → `external_operation_ref` → `retry_permission` — payment/write needs the heavier set; without it, redispatch is an unsupported second transition, not a retry
 
 **Opt-in** (configure or call explicitly):
@@ -60,6 +61,8 @@ integrations:
 transition:
   agent_id: my-agent
   policy_version: "2026.07.1"
+  # lease_ttl: 3600
+  # lease_renew_interval: 1200   # default = lease_ttl/3; 0 disables auto-renew
 
 action_ledger:
   storage: file

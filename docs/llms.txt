@@ -6,7 +6,7 @@
 
 Core (default on-ramp via `mycelium init` / `mycelium run`):
 
-- **Duplicate side effects on retry:** classify each tool (`read`, `keyed_mutate`, `non_idempotent_mutate`, etc.), hash a durable transition key, hold a lease, and resolve duplicates by terminal state — poll reads, hard-block or reconcile ambiguous writes.
+- **Duplicate side effects on retry:** classify each tool (`read`, `keyed_mutate`, `non_idempotent_mutate`, etc.), hash a durable transition key, hold a lease (auto-extended while `@ledger` / `@ledger_sync` tools run; default every `lease_ttl / 3`), and resolve duplicates by terminal state — poll reads, hard-block or reconcile ambiguous writes. Disable auto-renew with `lease_renew_interval: 0`.
 - **Transition envelope fields:** `side_effect_class` → `spendability` → `side_effect_boundary` → `terminal_outcome` → `external_operation_ref` → `retry_permission` — the identity/policy stack for that ledger (not a separate product).
 
 Opt-in (configure or call explicitly):

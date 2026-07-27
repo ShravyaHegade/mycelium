@@ -327,6 +327,7 @@ class TransitionConfig:
     policy_version: str
     scope_from: dict[str, str] = field(default_factory=dict)
     lease_ttl: float | None = None
+    lease_renew_interval: float | None = None
     poll_interval: float | None = None
     poll_timeout: float | None = None
 

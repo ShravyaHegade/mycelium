@@ -63,6 +63,7 @@ transition:
   agent_id: "<TODO: your agent id — used in transition keys and receipts>"
   policy_version: "<TODO: policy version string, e.g. 2026.07.1>"
   lease_ttl: 3600
+  # lease_renew_interval: 1200   # default = lease_ttl/3; set 0 to disable auto-renew (v1.14.0)
   poll_interval: 0.05
   poll_timeout: 300
   # left = Mycelium field; right = kwarg name your tools receive (change/drop as needed)
