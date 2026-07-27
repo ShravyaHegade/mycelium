@@ -5,6 +5,7 @@ from __future__ import annotations
 import functools
 import inspect
 import re
+import warnings
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -14,6 +15,7 @@ from typing import Any
 import yaml
 
 from mycelium.action_ledger import (
+    UNCLASSIFIED_POLICY_WARN,
     FileLedgerStorage,
     InMemoryLedgerStorage,
     LedgerStorage,
@@ -267,6 +269,10 @@ class MyceliumConfig:
             audit_emitter = self._tool_audit_emitter(tool_config)
             transition_binding = self.tool_transition_binding(tool_config)
             ledger_kwargs = self._ledger_timing_kwargs()
+            unclassified_policy = (self.action_ledger or {}).get(
+                "unclassified_policy", UNCLASSIFIED_POLICY_WARN
+            )
+            ledger_kwargs["unclassified_policy"] = unclassified_policy
             if is_async:
                 func = ledger(
                     storage=storage,
@@ -1079,6 +1085,41 @@ def _validate_transition_tools(
             )
 
 
+def _warn_memory_storage_for_side_effecting(
+    tools: dict[str, ToolConfig],
+    transition: TransitionConfig | None,
+) -> None:
+    """Warn once per tool when transition config + memory storage + side effects.
+
+    Memory is fine for dev/demo, but the duplicate-side-effect guard only holds
+    within the process. Emit a one-time warning at YAML load time so the
+    operator knows to switch to file/redis/postgres for production.
+    """
+    if transition is None:
+        return
+    warned: set[str] = set()
+    for name, tool in tools.items():
+        if name in warned:
+            continue
+        if tool.ledger is None:
+            continue
+        if tool.side_effect_class is None:
+            continue
+        if tool.side_effect_class == SideEffectClass.READ:
+            continue
+        storage_type = tool.ledger.get("storage", "memory")
+        if storage_type != "memory":
+            continue
+        warned.add(name)
+        warnings.warn(
+            f"tool {name!r} is side-effecting ({tool.side_effect_class.value}) "
+            "but its ledger uses memory storage; the duplicate-side-effect "
+            "guard only holds within this process. Use file/redis/postgres "
+            "for production deployments.",
+            stacklevel=1,
+        )
+
+
 def _validate_callable_targets(
     tools: dict[str, ToolConfig],
     tasks: dict[str, TaskConfig],
@@ -1174,6 +1215,7 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
         _apply_action_ledger_tools(tools, action_ledger_raw, audit_auto=audit_auto)
 
     _validate_transition_tools(tools, transition)
+    _warn_memory_storage_for_side_effecting(tools, transition)
 
     tasks_raw = data.get("tasks", {})
     if not isinstance(tasks_raw, dict):

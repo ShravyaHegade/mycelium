@@ -78,6 +78,8 @@ transition:
 action_ledger:
   storage: file            # <TODO: memory | file | redis | postgres>
   path: ./mycelium-ledger.json
+  # unclassified_policy: warn   # warn (default): one-time warning on failed retry
+                                # strict: hard-block unclassified failed retries
   # url_env: MYCELIUM_REDIS_URL          # redis
   # dsn_env: MYCELIUM_POSTGRES_DSN       # postgres
   # <TODO step 1: copy ledgered tool names from tools: keys below>

@@ -107,9 +107,36 @@ class LedgerAlreadyResolvedError(LedgerError):
     """
 
 
+class LedgerStorageUnavailableError(LedgerError):
+    """Raised when the durable storage backend fails mid-operation.
+
+    Fail-closed contract: storage down during a claim means the tool never
+    runs; storage down after the effect (``complete`` / failure recording)
+    propagates and leaves the entry ``IN_FLIGHT``, which later resolves via
+    lease expiry → ``EXPIRED`` → hard-block/reconcile. The original backend
+    exception is preserved as ``__cause__``.
+    """
+
+
 # Verified outcomes accepted by ActionLedger.release().
 OPERATOR_RESOLUTION_COMPLETED = "completed"
 OPERATOR_RESOLUTION_NOT_EXECUTED = "not_executed"
+
+# Policies for tools ledgered without a transition_binding (unclassified).
+# "warn": legacy behavior + a one-time warning when a failed entry is
+# reclaimed. "strict": route the claim through claim_side_effecting with a
+# conservative synthesized binding so failed retries hard-block.
+UNCLASSIFIED_POLICY_WARN = "warn"
+UNCLASSIFIED_POLICY_STRICT = "strict"
+
+# Conservative binding synthesized for "strict" unclassified claims:
+# NON_IDEMPOTENT_MUTATE yields MANUAL_RECONCILIATION_REQUIRED + SINGLE_USE
+# from the existing class defaults. Request-id derivation stays legacy.
+_UNCLASSIFIED_BINDING = ToolTransitionBinding.for_tool(
+    agent_id="unclassified",
+    policy_version="unclassified",
+    side_effect_class=SideEffectClass.NON_IDEMPOTENT_MUTATE,
+)
 
 
 def _ledger_owner() -> str:
@@ -147,6 +174,26 @@ def _is_stuck_transition(
     if resolved == TerminalOutcome.IN_FLIGHT and in_flight_stuck_after > 0:
         return now - entry.started_at > in_flight_stuck_after
     return False
+
+
+@contextmanager
+def _storage_errors(operation: str) -> Iterator[None]:
+    """Re-raise backend storage failures as :class:`LedgerStorageUnavailableError`.
+
+    Only wraps exceptions raised by the storage layer itself — ``LedgerError``
+    subclasses (policy refusals, hard blocks) pass through unchanged, and tool
+    exceptions never reach this boundary (the claim path never runs tool code).
+    The backend exception is preserved as ``__cause__``.
+    """
+    try:
+        yield
+    except LedgerError:
+        raise
+    except Exception as exc:
+        raise LedgerStorageUnavailableError(
+            f"ledger storage unavailable during {operation}: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
 
 
 @dataclass(frozen=True)
@@ -569,6 +616,7 @@ class ActionLedger:
         reconciler: Reconciler | None = None,
         defer_read_only_unknown: bool = False,
         audit_emitter: AuditReceiptEmitter | None = None,
+        unclassified_policy: str = UNCLASSIFIED_POLICY_WARN,
     ) -> None:
         self._storage = storage if storage is not None else InMemoryLedgerStorage()
         self._lease_ttl = lease_ttl
@@ -583,11 +631,100 @@ class ActionLedger:
         self._defer_read_only_unknown = defer_read_only_unknown
         # Optional receipt sink for operator releases (release() emits here).
         self._audit_emitter = audit_emitter
+        if unclassified_policy not in (
+            UNCLASSIFIED_POLICY_WARN,
+            UNCLASSIFIED_POLICY_STRICT,
+        ):
+            raise ValueError(
+                f"unclassified_policy must be {UNCLASSIFIED_POLICY_WARN!r} or "
+                f"{UNCLASSIFIED_POLICY_STRICT!r}, got {unclassified_policy!r}"
+            )
+        # Policy for claims without a transition_binding (unclassified tools).
+        self._unclassified_policy = unclassified_policy
+        self._memory_warned_tools: set[str] = set()
+        self._unclassified_warned_tools: set[str] = set()
+
+    # --- storage boundary (fail-closed; see LedgerStorageUnavailableError) ---
+
+    def _get_entry(self, request_id: str) -> LedgerEntry | None:
+        with _storage_errors("get"):
+            return self._storage.get(request_id)
+
+    def _set_entry(self, entry: LedgerEntry) -> None:
+        with _storage_errors("set"):
+            self._storage.set(entry)
+
+    def _try_claim_inflight(
+        self,
+        entry: LedgerEntry,
+        *,
+        lease_ttl: float,
+    ) -> tuple[str, LedgerEntry | None]:
+        with _storage_errors("try_claim_inflight"):
+            return self._storage.try_claim_inflight(entry, lease_ttl=lease_ttl)
+
+    def _list_all_entries(self) -> list[LedgerEntry]:
+        with _storage_errors("list_all"):
+            return self._storage.list_all()
+
+    # --- one-time operator warnings ---
+
+    def _warn_if_volatile_side_effect_storage(
+        self,
+        tool: str,
+        binding: ToolTransitionBinding,
+    ) -> None:
+        """Warn once per (ledger, tool) when a side-effecting claim uses memory.
+
+        Memory is the legitimate dev/demo backend, so this is a warning, not
+        an error — but the no-duplicate-side-effects guarantee only holds
+        within the process while claims live in ``InMemoryLedgerStorage``.
+        """
+        if binding.side_effect_class == SideEffectClass.READ:
+            return
+        if not isinstance(self._storage, InMemoryLedgerStorage):
+            return
+        if tool in self._memory_warned_tools:
+            return
+        self._memory_warned_tools.add(tool)
+        warnings.warn(
+            f"Tool {tool!r} is side-effecting ({binding.side_effect_class.value}) "
+            "but its ActionLedger uses InMemoryLedgerStorage: claims are not "
+            "durable across processes or restarts, so the duplicate-side-effect "
+            "guard only holds within this process. Use file/redis/postgres "
+            "storage beyond local dev/demo.",
+            stacklevel=3,
+        )
+
+    def _warn_unclassified_retry(self, tool: str, existing: LedgerEntry | None) -> None:
+        """Warn once per tool before a binding-less claim reclaims a failed entry.
+
+        Without a ``transition_binding`` Mycelium cannot know whether the tool
+        has side effects, so the legacy claim path reclaims failed entries —
+        which may duplicate an external effect. Set
+        ``unclassified_policy="strict"`` to hard-block these retries instead.
+        """
+        if existing is None or tool in self._unclassified_warned_tools:
+            return
+        if existing.resolved_terminal_outcome() not in (
+            TerminalOutcome.FAILED_BEFORE_EFFECT,
+            TerminalOutcome.FAILED_AFTER_EFFECT,
+        ):
+            return
+        self._unclassified_warned_tools.add(tool)
+        warnings.warn(
+            f"Tool {tool!r} was ledgered without a transition_binding, so "
+            "Mycelium cannot know whether it has side effects — retrying its "
+            "previously-failed claim may duplicate an external effect. Declare "
+            "side_effect_class / a transition_binding, or set "
+            "unclassified_policy='strict' to hard-block failed retries.",
+            stacklevel=4,
+        )
 
     # --- public API ---
 
     def get(self, request_id: str) -> LedgerEntry | None:
-        return self._storage.get(request_id)
+        return self._get_entry(request_id)
 
     def list_transitions(
         self,
@@ -609,7 +746,7 @@ class ActionLedger:
         """
         now = time.time()
         entries: list[LedgerEntry] = []
-        for entry in self._storage.list_all():
+        for entry in self._list_all_entries():
             if tool is not None and entry.tool != tool:
                 continue
             resolved = entry.resolved_terminal_outcome(now=now)
@@ -667,7 +804,7 @@ class ActionLedger:
             raise LedgerReleaseRefusedError("release requires an operator identity ('by')")
         if not reason:
             raise LedgerReleaseRefusedError("release requires a reason")
-        existing = self._storage.get(request_id)
+        existing = self._get_entry(request_id)
         if existing is None:
             raise LedgerReleaseRefusedError(
                 f"Cannot release unknown request {request_id!r}"
@@ -711,7 +848,7 @@ class ActionLedger:
                 resolved_at=now,
                 released_from_outcome=outcome.value,
             )
-        self._storage.set(entry)
+        self._set_entry(entry)
         if self._audit_emitter is not None:
             receipt = self._audit_emitter.emit_release_receipt(
                 entry,
@@ -768,10 +905,31 @@ class ActionLedger:
 
         Returns the existing completed entry if the request already succeeded.
         Raises LedgerPendingError if the request is currently in-flight.
+
+        This is the legacy *unclassified* path (no ``transition_binding``), so
+        Mycelium cannot know whether the tool has side effects. With
+        ``unclassified_policy="warn"`` (default) a reclaim of a
+        previously-failed entry proceeds but emits a one-time warning per
+        tool. With ``unclassified_policy="strict"`` the claim is routed
+        through :meth:`claim_side_effecting` with a conservative synthesized
+        binding (``non_idempotent_mutate``): failed retries hard-block and an
+        in-flight request polls instead of raising ``LedgerPendingError``.
+        Request-id derivation stays legacy either way — only the resolution
+        gate changes.
         """
+        if self._unclassified_policy == UNCLASSIFIED_POLICY_STRICT:
+            return self.claim_side_effecting(
+                request_id,
+                tool,
+                args,
+                kwargs,
+                _UNCLASSIFIED_BINDING,
+                lease_ttl=lease_ttl,
+            )
         ttl = self._lease_ttl if lease_ttl is None else lease_ttl
+        self._warn_unclassified_retry(tool, self._get_entry(request_id))
         entry = self._new_inflight_entry(request_id, tool, args, kwargs)
-        outcome, existing = self._storage.try_claim_inflight(entry, lease_ttl=ttl)
+        outcome, existing = self._try_claim_inflight(entry, lease_ttl=ttl)
         if outcome == "completed" and existing is not None:
             return existing
         if outcome == "in_flight":
@@ -818,7 +976,7 @@ class ActionLedger:
                     )
 
             entry = self._new_inflight_entry(request_id, tool, args, kwargs)
-            outcome, existing = self._storage.try_claim_inflight(entry, lease_ttl=ttl)
+            outcome, existing = self._try_claim_inflight(entry, lease_ttl=ttl)
             if outcome == "completed" and existing is not None:
                 return existing
             if outcome == "claimed":
@@ -856,7 +1014,7 @@ class ActionLedger:
                 soft_block_message(existing, tool=tool, request_id=request_id)
             )
         fresh = self._new_inflight_entry(request_id, tool, args, kwargs)
-        self._storage.set(fresh)
+        self._set_entry(fresh)
         return fresh
 
     def _poll_read_only(
@@ -920,7 +1078,7 @@ class ActionLedger:
                     )
 
             entry = self._new_inflight_entry(request_id, tool, args, kwargs)
-            outcome, existing = self._storage.try_claim_inflight(entry, lease_ttl=ttl)
+            outcome, existing = self._try_claim_inflight(entry, lease_ttl=ttl)
             if outcome == "completed" and existing is not None:
                 return existing
             if outcome == "claimed":
@@ -1013,7 +1171,7 @@ class ActionLedger:
             fresh = self._new_inflight_entry(
                 request_id, tool, args, kwargs, binding=binding
             )
-            self._storage.set(fresh)
+            self._set_entry(fresh)
             return fresh
         return None
 
@@ -1107,7 +1265,7 @@ class ActionLedger:
             resolved_at=existing.resolved_at,
             released_from_outcome=existing.released_from_outcome,
         )
-        self._storage.set(stamped)
+        self._set_entry(stamped)
         return stamped
 
     def _reconcile_or_hard_block(
@@ -1167,6 +1325,7 @@ class ActionLedger:
         poll_timeout: float | None = None,
     ) -> LedgerEntry:
         """Claim or resolve a side-effecting tool transition."""
+        self._warn_if_volatile_side_effect_storage(tool, binding)
         ttl = self._lease_ttl if lease_ttl is None else lease_ttl
         interval = self._poll_interval if poll_interval is None else poll_interval
         timeout = self._poll_timeout if poll_timeout is None else poll_timeout
@@ -1202,7 +1361,7 @@ class ActionLedger:
             entry = self._new_inflight_entry(
                 request_id, tool, args, kwargs, binding=binding
             )
-            outcome, existing = self._storage.try_claim_inflight(entry, lease_ttl=ttl)
+            outcome, existing = self._try_claim_inflight(entry, lease_ttl=ttl)
             if outcome == "completed" and existing is not None:
                 return existing
             if outcome == "in_flight" and existing is not None:
@@ -1298,6 +1457,7 @@ class ActionLedger:
         poll_timeout: float | None = None,
     ) -> LedgerEntry:
         """Async variant of :meth:`claim_side_effecting`."""
+        self._warn_if_volatile_side_effect_storage(tool, binding)
         ttl = self._lease_ttl if lease_ttl is None else lease_ttl
         interval = self._poll_interval if poll_interval is None else poll_interval
         timeout = self._poll_timeout if poll_timeout is None else poll_timeout
@@ -1333,7 +1493,7 @@ class ActionLedger:
             entry = self._new_inflight_entry(
                 request_id, tool, args, kwargs, binding=binding
             )
-            outcome, existing = self._storage.try_claim_inflight(entry, lease_ttl=ttl)
+            outcome, existing = self._try_claim_inflight(entry, lease_ttl=ttl)
             if outcome == "completed" and existing is not None:
                 return existing
             if outcome == "in_flight" and existing is not None:
@@ -1412,7 +1572,7 @@ class ActionLedger:
                 return
 
     def complete(self, request_id: str, result: Any) -> LedgerEntry:
-        existing = self._storage.get(request_id)
+        existing = self._get_entry(request_id)
         if existing is None:
             raise LedgerError(f"Cannot complete unknown request {request_id!r}")
         entry = replace(
@@ -1424,7 +1584,7 @@ class ActionLedger:
             lease_until=None,
             side_effect_boundary=SideEffectBoundary.CROSSED.value,
         )
-        self._storage.set(entry)
+        self._set_entry(entry)
         return entry
 
     def fail(
@@ -1434,7 +1594,7 @@ class ActionLedger:
         *,
         failed_after_effect: bool = False,
     ) -> LedgerEntry:
-        existing = self._storage.get(request_id)
+        existing = self._get_entry(request_id)
         if existing is None:
             raise LedgerError(f"Cannot fail unknown request {request_id!r}")
         terminal = (
@@ -1456,15 +1616,15 @@ class ActionLedger:
             lease_until=None,
             side_effect_boundary=boundary,
         )
-        self._storage.set(entry)
+        self._set_entry(entry)
         return entry
 
     def attach_receipt_ref(self, request_id: str, receipt_ref: str) -> LedgerEntry:
-        existing = self._storage.get(request_id)
+        existing = self._get_entry(request_id)
         if existing is None:
             raise LedgerError(f"Cannot attach receipt to unknown request {request_id!r}")
         entry = replace(existing, receipt_ref=receipt_ref)
-        self._storage.set(entry)
+        self._set_entry(entry)
         return entry
 
     def attach_external_operation_ref(
@@ -1475,13 +1635,13 @@ class ActionLedger:
         Durable and used later for reconciliation. Backs
         :func:`record_external_operation`.
         """
-        existing = self._storage.get(request_id)
+        existing = self._get_entry(request_id)
         if existing is None:
             raise LedgerError(
                 f"Cannot attach external operation ref to unknown request {request_id!r}"
             )
         entry = replace(existing, external_operation_ref=ref)
-        self._storage.set(entry)
+        self._set_entry(entry)
         return entry
 
     def renew_lease(
@@ -1503,7 +1663,7 @@ class ActionLedger:
 
         Backs :func:`renew_lease`.
         """
-        existing = self._storage.get(request_id)
+        existing = self._get_entry(request_id)
         if existing is None:
             raise LedgerError(f"Cannot renew lease for unknown request {request_id!r}")
         now = now if now is not None else time.time()
@@ -1527,7 +1687,7 @@ class ActionLedger:
         if ttl <= 0:
             raise LedgerError("lease_ttl must be positive to renew")
         entry = replace(existing, lease_until=now + ttl)
-        self._storage.set(entry)
+        self._set_entry(entry)
         return entry
 
     def repair_transition(self, request_id: str) -> LedgerEntry:
@@ -1537,7 +1697,7 @@ class ActionLedger:
         alignment. Does not renew a peer lease and does not execute the tool.
         Claim loops call this when the gate is ``REPAIR``, then re-resolve.
         """
-        existing = self._storage.get(request_id)
+        existing = self._get_entry(request_id)
         if existing is None:
             raise LedgerError(f"Cannot repair unknown request {request_id!r}")
         updates = repair_transition_fields(existing)
@@ -1554,11 +1714,11 @@ class ActionLedger:
                 f"Cannot repair request {request_id!r}: still incomplete after "
                 "safe field updates"
             )
-        self._storage.set(entry)
+        self._set_entry(entry)
         return entry
 
     def mark_blocked(self, request_id: str, *, error: str | None = None) -> LedgerEntry:
-        existing = self._storage.get(request_id)
+        existing = self._get_entry(request_id)
         if existing is None:
             raise LedgerError(f"Cannot block unknown request {request_id!r}")
         entry = replace(
@@ -1569,11 +1729,11 @@ class ActionLedger:
             finished_at=time.time(),
             lease_until=None,
         )
-        self._storage.set(entry)
+        self._set_entry(entry)
         return entry
 
     def mark_unknown(self, request_id: str, *, error: str | None = None) -> LedgerEntry:
-        existing = self._storage.get(request_id)
+        existing = self._get_entry(request_id)
         if existing is None:
             raise LedgerError(f"Cannot mark unknown request {request_id!r}")
         entry = replace(
@@ -1584,7 +1744,7 @@ class ActionLedger:
             finished_at=time.time(),
             lease_until=None,
         )
-        self._storage.set(entry)
+        self._set_entry(entry)
         return entry
 
     def advance_boundary(
@@ -1596,7 +1756,7 @@ class ActionLedger:
         out-of-order markers cannot weaken a stronger recorded boundary. Backs
         the :func:`side_effect` marker used by side-effecting tools.
         """
-        existing = self._storage.get(request_id)
+        existing = self._get_entry(request_id)
         if existing is None:
             raise LedgerError(
                 f"Cannot advance boundary for unknown request {request_id!r}"
@@ -1605,7 +1765,7 @@ class ActionLedger:
         if _BOUNDARY_RANK[boundary] <= _BOUNDARY_RANK[current]:
             return existing
         entry = replace(existing, side_effect_boundary=boundary.value)
-        self._storage.set(entry)
+        self._set_entry(entry)
         return entry
 
     # --- request id derivation ---
@@ -1820,8 +1980,17 @@ def _run_ledgered(
         with _lease_auto_renew(ledger, request_id):
             result = func(*args, **clean_kwargs)
     except Exception as exc:
-        _record_failure(ledger, request_id, exc)
-        _emit_tool_receipt(audit_emitter, ledger, request_id)
+        # A storage failure while recording the failure must not mask the
+        # original tool exception — log it, then re-raise the tool's own error.
+        try:
+            _record_failure(ledger, request_id, exc)
+            _emit_tool_receipt(audit_emitter, ledger, request_id)
+        except Exception:
+            _logger.exception(
+                "could not record failure for %s (storage down?); "
+                "original tool error follows",
+                request_id,
+            )
         raise
     finally:
         _active_transition_var.reset(token)
@@ -1865,8 +2034,17 @@ async def _run_ledgered_async(
         with _lease_auto_renew(ledger, request_id):
             result = await func(*args, **clean_kwargs)
     except Exception as exc:
-        _record_failure(ledger, request_id, exc)
-        _emit_tool_receipt(audit_emitter, ledger, request_id)
+        # A storage failure while recording the failure must not mask the
+        # original tool exception — log it, then re-raise the tool's own error.
+        try:
+            _record_failure(ledger, request_id, exc)
+            _emit_tool_receipt(audit_emitter, ledger, request_id)
+        except Exception:
+            _logger.exception(
+                "could not record failure for %s (storage down?); "
+                "original tool error follows",
+                request_id,
+            )
         raise
     finally:
         _active_transition_var.reset(token)
@@ -1892,6 +2070,7 @@ def ledger(
     poll_timeout: float | None = None,
     reconciler: Reconciler | None = None,
     defer_read_only_unknown: bool = False,
+    unclassified_policy: str = UNCLASSIFIED_POLICY_WARN,
 ) -> Callable[[Callable[P, Awaitable[R]]], Callable[P, Awaitable[R]]]:
     """Decorator that records async tool invocations in an ActionLedger.
 
@@ -1914,6 +2093,7 @@ def ledger(
         reconciler=reconciler,
         defer_read_only_unknown=defer_read_only_unknown,
         audit_emitter=audit_emitter,
+        unclassified_policy=unclassified_policy,
         **ledger_kwargs,
     )
 
@@ -1949,6 +2129,7 @@ def ledger_sync(
     poll_timeout: float | None = None,
     reconciler: Reconciler | None = None,
     defer_read_only_unknown: bool = False,
+    unclassified_policy: str = UNCLASSIFIED_POLICY_WARN,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """Decorator that records sync tool invocations in an ActionLedger.
 
@@ -1971,6 +2152,7 @@ def ledger_sync(
         reconciler=reconciler,
         defer_read_only_unknown=defer_read_only_unknown,
         audit_emitter=audit_emitter,
+        unclassified_policy=unclassified_policy,
         **ledger_kwargs,
     )
 
@@ -2008,6 +2190,8 @@ __all__ = [
     "DEFAULT_POLL_TIMEOUT",
     "OPERATOR_RESOLUTION_COMPLETED",
     "OPERATOR_RESOLUTION_NOT_EXECUTED",
+    "UNCLASSIFIED_POLICY_WARN",
+    "UNCLASSIFIED_POLICY_STRICT",
     "FileLedgerStorage",
     "InMemoryLedgerStorage",
     "LedgerAlreadyResolvedError",
@@ -2018,6 +2202,7 @@ __all__ = [
     "LedgerPollTimeoutError",
     "LedgerReleaseRefusedError",
     "LedgerStorage",
+    "LedgerStorageUnavailableError",
     "MIN_LEASE_RENEW_INTERVAL",
     "TerminalOutcome",
     "get_ledger",

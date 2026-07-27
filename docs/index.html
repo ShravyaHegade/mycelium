@@ -810,6 +810,7 @@ mycelium transitions release &lt;request_id&gt; --verified not-executed \
 action_ledger:
   storage: file          # memory | file | redis | postgres
   path: ./mycelium-ledger.json
+  unclassified_policy: strict   # warn (default) or strict
   tools: [send_payment, delete_file, search_docs]
 
 task_ledger:

@@ -13,10 +13,23 @@ Minor: operator release workflow for hard-blocked transitions — a recorded hum
 - New durable `LedgerEntry` fields: `operator_resolution`, `resolved_by`, `resolution_reason`, `resolved_at`, `released_from_outcome` (old serialized entries load unchanged).
 - New exceptions: `LedgerReleaseRefusedError`, `LedgerAlreadyResolvedError` (both subclass `LedgerError`); signed release receipts via `AuditReceiptEmitter.emit_release_receipt` when an emitter is configured.
 
+### Unclassified tool policy
+
+- New `unclassified_policy` parameter on `@ledger` / `@ledger_sync` and `ActionLedger` constructor (`"warn"` default, `"strict"` optional). Tools without a `transition_binding` (unclassified) have unknown side-effect semantics — `warn` emits a one-time `UserWarning` on failed retry (legacy behavior); `strict` routes through `claim_side_effecting` with a conservative binding (`non_idempotent_mutate`) so failed retries hard-block instead of re-executing.
+- YAML key: `action_ledger.unclassified_policy: warn|strict` (template updated).
+- `ActionLedger.__init__` validates the value and raises `ValueError` on unknown policies.
+
+### Storage warnings
+
+- `claim_side_effecting()` and `claim_side_effecting_async()` now call `_warn_if_volatile_side_effect_storage()` — a one-time per-tool `UserWarning` when a side-effecting tool uses `InMemoryLedgerStorage` (claims are not durable across processes).
+- `_warn_memory_storage_for_side_effecting()` in `config.py` warns at YAML load time when transition config + memory storage + side-effecting tool are combined.
+
 ### Docs / tests
 
 - SDK README gains an operator runbook ("your agent hard-blocked") with the warning that backend access = release authority (`--by` is an audit stamp, not authentication).
+- SDK README gains "What happens when storage is down" (fail-closed contract table) and "Unclassified tools" subsections.
 - `tests/test_operator_release.py`: per-backend (memory / file / Redis / Postgres) release round-trips, one-shot and lease rules, keyed_mutate provider-key enforcement after release, old-entry deserialization, CLI round-trip.
+- `tests/test_fail_closed_storage.py`: fail-closed storage contract, unclassified policy warn/strict, YAML passthrough, decorator parameter forwarding.
 
 ## 1.14.0 (2026-07-27)
 

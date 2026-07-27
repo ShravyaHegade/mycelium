@@ -596,6 +596,41 @@ ledger = ActionLedger(storage=PostgresLedgerStorage("postgresql://localhost/myce
 
 Optional extras: `pip install 'mycelium-runtime[redis]'` or `pip install 'mycelium-runtime[postgres]'`.
 
+### What happens when storage is down
+
+Mycelium follows a **fail-closed** contract when the durable storage backend fails:
+
+| Scenario | Behavior | Entry state |
+|----------|----------|-------------|
+| Storage fails during `claim()` | `LedgerStorageUnavailableError` raised; tool **never runs** | no entry |
+| Storage fails during `complete()` / failure recording | Error propagates; entry stays `IN_FLIGHT` → lease expires → `EXPIRED` → hard-block/reconcile | `IN_FLIGHT` |
+| Storage fails during `_record_failure` (tool already raised) | Original tool exception re-raised (storage error logged, **not** masked) | unchanged |
+
+The original backend exception is preserved as `__cause__` on `LedgerStorageUnavailableError` for debugging. Storage errors never masquerade as tool errors and never allow silent data loss.
+
+### Unclassified tools
+
+Tools without a `transition_binding` (unclassified) have unknown side-effect semantics. The `unclassified_policy` controls how retries of failed entries are handled:
+
+| Policy | Default | Behavior |
+|--------|---------|----------|
+| `warn` | yes | One-time `UserWarning` per tool when a failed entry is reclaimed; legacy behavior (re-execute) |
+| `strict` | no | Routes through `claim_side_effecting` with a conservative binding (`non_idempotent_mutate`); failed retries **hard-block** instead of re-executing |
+
+```python
+# Decorator
+@ledger_sync(unclassified_policy="strict")
+def my_tool(...): ...
+
+# YAML
+action_ledger:
+  storage: redis
+  url_env: MYCELIUM_REDIS_URL
+  unclassified_policy: strict
+```
+
+When `transition:` is configured and a side-effecting tool uses memory storage, a one-time warning is emitted at YAML load time — the duplicate-side-effect guard only holds within the process.
+
 ## Quickstart: task-level idempotency
 
 Stop entire tasks from re-running on framework-level retries:
@@ -653,6 +688,7 @@ transition:
 action_ledger:
   storage: file
   path: ./mycelium-ledger.json
+  unclassified_policy: strict   # warn (default) or strict
   tools: [send_payment, search_docs]
 
 task_ledger:

@@ -1,6 +1,10 @@
 """Mycelium runtime: failure prevention for AI agents."""
 
 from mycelium.action_ledger import (
+    OPERATOR_RESOLUTION_COMPLETED,
+    OPERATOR_RESOLUTION_NOT_EXECUTED,
+    UNCLASSIFIED_POLICY_STRICT,
+    UNCLASSIFIED_POLICY_WARN,
     ActionLedger,
     FileLedgerStorage,
     InMemoryLedgerStorage,
@@ -13,6 +17,7 @@ from mycelium.action_ledger import (
     LedgerReleaseRefusedError,
     LedgerSoftBlockError,
     LedgerStorage,
+    LedgerStorageUnavailableError,
     get_ledger,
     ledger,
     ledger_sync,
@@ -107,6 +112,11 @@ __all__ = [
     "LedgerReleaseRefusedError",
     "LedgerSoftBlockError",
     "LedgerStorage",
+    "LedgerStorageUnavailableError",
+    "OPERATOR_RESOLUTION_COMPLETED",
+    "OPERATOR_RESOLUTION_NOT_EXECUTED",
+    "UNCLASSIFIED_POLICY_WARN",
+    "UNCLASSIFIED_POLICY_STRICT",
     "get_ledger",
     "ledger",
     "ledger_sync",
