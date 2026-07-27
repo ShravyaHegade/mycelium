@@ -396,7 +396,7 @@
       <strong>Opt-in:</strong> stale-context helpers and tool-boundary checks.
       YAML callable paths and <code>mycelium run</code> add the core path without
       editing each function. Framework-agnostic.
-      Early but API-stable (v1.14.0): breaking changes only at major versions.
+      Early but API-stable (v1.15.0): breaking changes only at major versions.
     </p>
 
     <section id="architecture">
@@ -504,6 +504,8 @@ side_effect, mark_maybe_crossed, mark_crossed        # boundary markers (v1.5.0)
 record_external_operation                            # provider handle (v1.6.0)
 renew_lease, LeaseValidity, resolve_lease_validity   # lease window (v1.10.0); auto-renew in @ledger (v1.14.0)
 Reconciler, ReconcileResult, ReconcileStatus         # provider reconcile (v1.7.0)
+ActionLedger.list_transitions, ActionLedger.release  # operator release (v1.15.0)
+LedgerReleaseRefusedError, LedgerAlreadyResolvedError
 
 # Transition envelope (core)
 TransitionConfig, SideEffectClass, SideEffectBoundary, RetryPermission
@@ -515,7 +517,8 @@ load_config, load_config_from_string, MyceliumConfig
 MyceliumConfig.apply_tool, apply_named_task             # explicit names (v1.12.0)
 
 # CLI
-mycelium run --config PATH -- python ...                 # auto-instrumentation (v1.12.0)</pre>
+mycelium run --config PATH -- python ...                 # auto-instrumentation (v1.12.0)
+mycelium transitions list|show|release                   # operator triage + release (v1.15.0)</pre>
     </section>
 
     <section id="context">
@@ -746,6 +749,23 @@ crossed                 FAILED_AFTER_EFFECT     hard-block
 EXPIRED + not_crossed + ref + NOT_EXECUTED   → reclaim (v1.9.2)
 EXPIRED + not_crossed, no ref                → hard-block (not provable)
 EXPIRED + maybe_crossed / crossed            → hard-block</pre>
+      <p>
+        <strong>Operator release (v1.15.0):</strong> when no <code>Reconciler</code>
+        can settle a hard-block, a human verifies with the provider and records
+        the outcome — <code>release(verified="completed", result=...)</code>
+        returns the recorded result on redispatch;
+        <code>release(verified="not_executed")</code> grants exactly one
+        re-execution, consumed through the same machinery as a reconciler
+        <code>NOT_EXECUTED</code>. One-shot (never overwritten), fail-closed
+        (unknown id / already <code>COMPLETED</code> / held lease refused),
+        audit-stamped on the durable entry — backend access is release
+        authority. Triage with <code>list_transitions(stuck=True)</code> or the
+        CLI:
+      </p>
+      <pre>mycelium transitions list --stuck --config mycelium.yaml
+mycelium transitions show &lt;request_id&gt;
+mycelium transitions release &lt;request_id&gt; --verified not-executed \
+  --by ops@example.com --reason "provider shows no charge"</pre>
     </section>
 
     <section id="envelope">

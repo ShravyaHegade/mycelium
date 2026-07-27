@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.15.0 (2026-07-27)
+
+Minor: operator release workflow for hard-blocked transitions — a recorded human verification (`completed` / `not_executed`) that lets a stuck side-effecting transition recover instead of raising `LedgerHardBlockError` forever.
+
+### Behavior
+
+- `ActionLedger.release(request_id, verified=..., result=..., by=..., reason=...)`: fail-closed (unknown id, already-`COMPLETED`, `IN_FLIGHT` with a held lease are refused), one-shot (a second release raises `LedgerAlreadyResolvedError`), and never deletes the entry — the resolution is stamped on the durable record so `provider_idempotency_key` enforcement and audit history survive.
+- `verified="completed"` marks the transition done with the operator-supplied result; `verified="not_executed"` is consumed by the next claim via the existing `_apply_reconcile_result()` machinery and grants exactly one re-execution (the fresh claim has `operator_resolution=None` but carries the audit fields forward).
+- `ActionLedger.list_transitions(stuck=, tool=, outcome=)` for triage: `BLOCKED` / `UNKNOWN` / `FAILED_AFTER_EFFECT` / `EXPIRED`, plus aged `IN_FLIGHT` entries.
+- New CLI: `mycelium transitions list [--stuck] [--tool] [--json]`, `show`, `release --verified {completed,not-executed}` — reads storage from the config's `ledger:` sections or direct `--file` / `--redis-url` / `--postgres-dsn` flags (env fallback) for operator machines; never executes tools.
+- New durable `LedgerEntry` fields: `operator_resolution`, `resolved_by`, `resolution_reason`, `resolved_at`, `released_from_outcome` (old serialized entries load unchanged).
+- New exceptions: `LedgerReleaseRefusedError`, `LedgerAlreadyResolvedError` (both subclass `LedgerError`); signed release receipts via `AuditReceiptEmitter.emit_release_receipt` when an emitter is configured.
+
+### Docs / tests
+
+- SDK README gains an operator runbook ("your agent hard-blocked") with the warning that backend access = release authority (`--by` is an audit stamp, not authentication).
+- `tests/test_operator_release.py`: per-backend (memory / file / Redis / Postgres) release round-trips, one-shot and lease rules, keyed_mutate provider-key enforcement after release, old-entry deserialization, CLI round-trip.
+
 ## 1.14.0 (2026-07-27)
 
 Minor: auto-renew execution leases while `@ledger` / `@ledger_sync` tool bodies run, so long work does not look `EXPIRED` to redispatched peers.

@@ -20,7 +20,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar
 
-from mycelium.reconcile import Reconciler, ReconcileStatus
+from mycelium.reconcile import Reconciler, ReconcileResult, ReconcileStatus
 from mycelium.session import Session, _session_var
 from mycelium.storage._helpers import claim_inflight_outcome, default_try_claim_inflight, with_lease
 from mycelium.storage.json_file import LockedJsonDictFile
@@ -91,6 +91,27 @@ class LedgerSoftBlockError(LedgerError):
     """
 
 
+class LedgerReleaseRefusedError(LedgerError):
+    """Raised when an operator release is rejected (fail-closed).
+
+    Covers unknown request ids, releasing a ``COMPLETED`` transition, and
+    releasing an ``IN_FLIGHT`` transition whose lease is still held (a worker
+    may be alive).
+    """
+
+
+class LedgerAlreadyResolvedError(LedgerError):
+    """Raised when releasing a transition that already has an operator resolution.
+
+    Release is one-shot: a recorded human verification is never overwritten.
+    """
+
+
+# Verified outcomes accepted by ActionLedger.release().
+OPERATOR_RESOLUTION_COMPLETED = "completed"
+OPERATOR_RESOLUTION_NOT_EXECUTED = "not_executed"
+
+
 def _ledger_owner() -> str:
     return f"{socket.gethostname()}:{os.getpid()}"
 
@@ -101,6 +122,31 @@ _BOUNDARY_RANK: dict[SideEffectBoundary, int] = {
     SideEffectBoundary.MAYBE_CROSSED: 1,
     SideEffectBoundary.CROSSED: 2,
 }
+
+# Resolved outcomes that park a transition until a human releases it.
+_STUCK_OUTCOMES = frozenset(
+    {
+        TerminalOutcome.BLOCKED,
+        TerminalOutcome.UNKNOWN,
+        TerminalOutcome.FAILED_AFTER_EFFECT,
+        TerminalOutcome.EXPIRED,
+    }
+)
+
+
+def _is_stuck_transition(
+    entry: LedgerEntry,
+    resolved: TerminalOutcome,
+    *,
+    now: float,
+    in_flight_stuck_after: float,
+) -> bool:
+    """Whether a transition needs operator attention (see list_transitions)."""
+    if resolved in _STUCK_OUTCOMES:
+        return True
+    if resolved == TerminalOutcome.IN_FLIGHT and in_flight_stuck_after > 0:
+        return now - entry.started_at > in_flight_stuck_after
+    return False
 
 
 @dataclass(frozen=True)
@@ -301,6 +347,13 @@ class LedgerEntry:
     side_effect_boundary: str = SideEffectBoundary.NOT_CROSSED.value
     external_operation_ref: str | None = None
     provider_idempotency_key: str | None = None
+    # Operator release (manual reconciliation) audit fields. Set once by
+    # ActionLedger.release(); "not_executed" is consumed by the next claim.
+    operator_resolution: str | None = None  # "completed" | "not_executed"
+    resolved_by: str | None = None
+    resolution_reason: str | None = None
+    resolved_at: float | None = None
+    released_from_outcome: str | None = None
 
     def __post_init__(self) -> None:
         # Match from_dict / claim: durable key defaults to request_id.
@@ -348,6 +401,11 @@ class LedgerEntry:
             "side_effect_boundary": self.side_effect_boundary,
             "external_operation_ref": self.external_operation_ref,
             "provider_idempotency_key": self.provider_idempotency_key,
+            "operator_resolution": self.operator_resolution,
+            "resolved_by": self.resolved_by,
+            "resolution_reason": self.resolution_reason,
+            "resolved_at": self.resolved_at,
+            "released_from_outcome": self.released_from_outcome,
         }
 
     @classmethod
@@ -387,6 +445,11 @@ class LedgerEntry:
             ),
             external_operation_ref=data.get("external_operation_ref"),
             provider_idempotency_key=data.get("provider_idempotency_key"),
+            operator_resolution=data.get("operator_resolution"),
+            resolved_by=data.get("resolved_by"),
+            resolution_reason=data.get("resolution_reason"),
+            resolved_at=data.get("resolved_at"),
+            released_from_outcome=data.get("released_from_outcome"),
         )
 
 
@@ -505,6 +568,7 @@ class ActionLedger:
         poll_timeout: float | None = DEFAULT_POLL_TIMEOUT,
         reconciler: Reconciler | None = None,
         defer_read_only_unknown: bool = False,
+        audit_emitter: AuditReceiptEmitter | None = None,
     ) -> None:
         self._storage = storage if storage is not None else InMemoryLedgerStorage()
         self._lease_ttl = lease_ttl
@@ -517,11 +581,146 @@ class ActionLedger:
         # ambiguous state is safely re-run (SOFT_BLOCK -> retry); when True the
         # claim raises LedgerSoftBlockError so the caller can defer the retry.
         self._defer_read_only_unknown = defer_read_only_unknown
+        # Optional receipt sink for operator releases (release() emits here).
+        self._audit_emitter = audit_emitter
 
     # --- public API ---
 
     def get(self, request_id: str) -> LedgerEntry | None:
         return self._storage.get(request_id)
+
+    def list_transitions(
+        self,
+        *,
+        stuck: bool = False,
+        tool: str | None = None,
+        outcome: TerminalOutcome | None = None,
+        in_flight_stuck_after: float = DEFAULT_LEASE_TTL,
+    ) -> list[LedgerEntry]:
+        """List ledger entries for operator triage (read-only).
+
+        ``stuck=True`` keeps transitions that need a human: resolved terminal
+        outcome ``BLOCKED`` / ``UNKNOWN`` / ``FAILED_AFTER_EFFECT`` /
+        ``EXPIRED``, plus ``IN_FLIGHT`` entries older than
+        ``in_flight_stuck_after`` seconds (an in-flight entry whose lease can
+        never expire — e.g. unbounded — would otherwise be invisible forever).
+        ``tool`` filters by tool name; ``outcome`` filters by the resolved
+        terminal outcome (lease validity applied). Sorted oldest first.
+        """
+        now = time.time()
+        entries: list[LedgerEntry] = []
+        for entry in self._storage.list_all():
+            if tool is not None and entry.tool != tool:
+                continue
+            resolved = entry.resolved_terminal_outcome(now=now)
+            if outcome is not None and resolved != outcome:
+                continue
+            if stuck and not _is_stuck_transition(
+                entry,
+                resolved,
+                now=now,
+                in_flight_stuck_after=in_flight_stuck_after,
+            ):
+                continue
+            entries.append(entry)
+        entries.sort(key=lambda entry: entry.started_at)
+        return entries
+
+    def release(
+        self,
+        request_id: str,
+        *,
+        verified: str,
+        result: Any = None,
+        by: str,
+        reason: str,
+    ) -> LedgerEntry:
+        """Record a human verification that releases a hard-blocked transition.
+
+        This is a *recorded verification*, not an unblock: the operator must
+        first check the external provider (via ``external_operation_ref`` /
+        ``provider_idempotency_key`` on the entry) and attest to one of two
+        verified outcomes:
+
+        - ``verified="completed"`` — the effect happened. The transition is
+          marked completed with ``result``; the next redispatch returns it
+          without re-executing.
+        - ``verified="not_executed"`` — the effect provably never happened.
+          Only the resolution is stamped here; the next claim consumes it and
+          grants exactly one re-execution (one-shot).
+
+        Fail-closed (typed exceptions): unknown request, already-resolved
+        entry (one-shot, never overwritten), already-``COMPLETED`` transition,
+        and ``IN_FLIGHT`` with a still-held lease are all refused. Entries are
+        never deleted — the release is stamped on the durable record so
+        ``provider_idempotency_key`` enforcement and audit history survive.
+        """
+        if verified not in (
+            OPERATOR_RESOLUTION_COMPLETED,
+            OPERATOR_RESOLUTION_NOT_EXECUTED,
+        ):
+            raise LedgerReleaseRefusedError(
+                f"verified must be {OPERATOR_RESOLUTION_COMPLETED!r} or "
+                f"{OPERATOR_RESOLUTION_NOT_EXECUTED!r}, got {verified!r}"
+            )
+        if not by:
+            raise LedgerReleaseRefusedError("release requires an operator identity ('by')")
+        if not reason:
+            raise LedgerReleaseRefusedError("release requires a reason")
+        existing = self._storage.get(request_id)
+        if existing is None:
+            raise LedgerReleaseRefusedError(
+                f"Cannot release unknown request {request_id!r}"
+            )
+        if existing.operator_resolution is not None:
+            raise LedgerAlreadyResolvedError(
+                f"Request {request_id!r} already has an operator resolution "
+                f"({existing.operator_resolution!r} by {existing.resolved_by!r}); "
+                "release is one-shot"
+            )
+        now = time.time()
+        outcome = existing.resolved_terminal_outcome(now=now)
+        if outcome == TerminalOutcome.COMPLETED:
+            raise LedgerReleaseRefusedError(
+                f"Cannot release request {request_id!r}: already COMPLETED"
+            )
+        if outcome == TerminalOutcome.IN_FLIGHT:
+            # Resolved IN_FLIGHT means the lease is HELD or UNBOUNDED (an
+            # expired lease resolves to EXPIRED). A worker may still be alive.
+            raise LedgerReleaseRefusedError(
+                f"Cannot release request {request_id!r}: IN_FLIGHT with a "
+                f"{existing.lease_validity(now=now).value} lease — wait for "
+                "the lease to expire (EXPIRED is releasable)"
+            )
+        if verified == OPERATOR_RESOLUTION_COMPLETED:
+            completed = self.complete(request_id, result)
+            entry = replace(
+                completed,
+                operator_resolution=OPERATOR_RESOLUTION_COMPLETED,
+                resolved_by=by,
+                resolution_reason=reason,
+                resolved_at=now,
+                released_from_outcome=outcome.value,
+            )
+        else:
+            entry = replace(
+                existing,
+                operator_resolution=OPERATOR_RESOLUTION_NOT_EXECUTED,
+                resolved_by=by,
+                resolution_reason=reason,
+                resolved_at=now,
+                released_from_outcome=outcome.value,
+            )
+        self._storage.set(entry)
+        if self._audit_emitter is not None:
+            receipt = self._audit_emitter.emit_release_receipt(
+                entry,
+                verified=verified,
+                by=by,
+                reason=reason,
+            )
+            entry = self.attach_receipt_ref(request_id, receipt.receipt_id)
+        return entry
 
     def _new_inflight_entry(
         self,
@@ -870,6 +1069,47 @@ class ActionLedger:
             request_id, tool, args, kwargs, binding, result
         )
 
+    def _consume_operator_resolution(
+        self,
+        request_id: str,
+        tool: str,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        existing: LedgerEntry,
+        binding: ToolTransitionBinding,
+    ) -> LedgerEntry | None:
+        """Consume an unconsumed operator ``not_executed`` release, if present.
+
+        An operator release is the human-issued, durably stored equivalent of
+        ``ReconcileResult.not_executed()``, so it reuses the same machinery:
+        the entry resets to a fresh in-flight claim and the tool may execute
+        exactly once. The fresh entry has ``operator_resolution=None`` (the
+        release is one-shot) but carries the audit fields forward. Race
+        characteristics match the Reconciler NOT_EXECUTED path (plain
+        ``storage.set``).
+        """
+        if existing.operator_resolution != OPERATOR_RESOLUTION_NOT_EXECUTED:
+            return None
+        fresh = self._apply_reconcile_result(
+            request_id,
+            tool,
+            args,
+            kwargs,
+            binding,
+            ReconcileResult.not_executed(),
+        )
+        if fresh is None:
+            return None
+        stamped = replace(
+            fresh,
+            resolved_by=existing.resolved_by,
+            resolution_reason=existing.resolution_reason,
+            resolved_at=existing.resolved_at,
+            released_from_outcome=existing.released_from_outcome,
+        )
+        self._storage.set(stamped)
+        return stamped
+
     def _reconcile_or_hard_block(
         self,
         request_id: str,
@@ -879,6 +1119,11 @@ class ActionLedger:
         existing: LedgerEntry,
         binding: ToolTransitionBinding,
     ) -> LedgerEntry:
+        released = self._consume_operator_resolution(
+            request_id, tool, args, kwargs, existing, binding
+        )
+        if released is not None:
+            return released
         resolved = self._attempt_reconcile(
             request_id, tool, args, kwargs, existing, binding
         )
@@ -896,6 +1141,11 @@ class ActionLedger:
         existing: LedgerEntry,
         binding: ToolTransitionBinding,
     ) -> LedgerEntry:
+        released = self._consume_operator_resolution(
+            request_id, tool, args, kwargs, existing, binding
+        )
+        if released is not None:
+            return released
         resolved = await self._attempt_reconcile_async(
             request_id, tool, args, kwargs, existing, binding
         )
@@ -1663,6 +1913,7 @@ def ledger(
         storage=storage,
         reconciler=reconciler,
         defer_read_only_unknown=defer_read_only_unknown,
+        audit_emitter=audit_emitter,
         **ledger_kwargs,
     )
 
@@ -1719,6 +1970,7 @@ def ledger_sync(
         storage=storage,
         reconciler=reconciler,
         defer_read_only_unknown=defer_read_only_unknown,
+        audit_emitter=audit_emitter,
         **ledger_kwargs,
     )
 
@@ -1754,13 +2006,17 @@ __all__ = [
     "DEFAULT_LEASE_TTL",
     "DEFAULT_POLL_INTERVAL",
     "DEFAULT_POLL_TIMEOUT",
+    "OPERATOR_RESOLUTION_COMPLETED",
+    "OPERATOR_RESOLUTION_NOT_EXECUTED",
     "FileLedgerStorage",
     "InMemoryLedgerStorage",
+    "LedgerAlreadyResolvedError",
     "LedgerEntry",
     "LedgerError",
     "LedgerHardBlockError",
     "LedgerPendingError",
     "LedgerPollTimeoutError",
+    "LedgerReleaseRefusedError",
     "LedgerStorage",
     "MIN_LEASE_RENEW_INTERVAL",
     "TerminalOutcome",

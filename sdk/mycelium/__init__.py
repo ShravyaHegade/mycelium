@@ -4,11 +4,13 @@ from mycelium.action_ledger import (
     ActionLedger,
     FileLedgerStorage,
     InMemoryLedgerStorage,
+    LedgerAlreadyResolvedError,
     LedgerEntry,
     LedgerError,
     LedgerHardBlockError,
     LedgerPendingError,
     LedgerPollTimeoutError,
+    LedgerReleaseRefusedError,
     LedgerSoftBlockError,
     LedgerStorage,
     get_ledger,
@@ -90,17 +92,19 @@ from mycelium.transition_resolution import (
     transition_needs_repair,
 )
 
-__version__ = "1.14.0"
+__version__ = "1.15.0"
 
 __all__ = [
     "ActionLedger",
     "FileLedgerStorage",
     "InMemoryLedgerStorage",
+    "LedgerAlreadyResolvedError",
     "LedgerEntry",
     "LedgerError",
     "LedgerHardBlockError",
     "LedgerPendingError",
     "LedgerPollTimeoutError",
+    "LedgerReleaseRefusedError",
     "LedgerSoftBlockError",
     "LedgerStorage",
     "get_ledger",

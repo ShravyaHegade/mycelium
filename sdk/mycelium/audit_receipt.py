@@ -192,6 +192,39 @@ class AuditReceiptEmitter:
             error=entry.error,
         )
 
+    def emit_release_receipt(
+        self,
+        entry: LedgerEntry,
+        *,
+        verified: str,
+        by: str,
+        reason: str,
+    ) -> AuditReceiptRecord:
+        """Emit a signed receipt for an operator release of ``entry``.
+
+        The receipt captures *who* verified what against the provider and
+        *why*, so a released transition keeps a tamper-evident audit trail.
+        Status follows the verified outcome (``completed`` / ``failed``), not
+        the entry's legacy status, so releasing an ``EXPIRED`` (in-flight
+        legacy status) transition still produces a valid receipt.
+        """
+        return self._emit(
+            action=entry.tool,
+            action_kind="tool",
+            request_id=entry.request_id,
+            inputs={"args": entry.args, "kwargs": entry.kwargs},
+            outputs={
+                "operator_release": True,
+                "verified": verified,
+                "resolved_by": by,
+                "resolution_reason": reason,
+                "released_from_outcome": entry.released_from_outcome,
+                "result": entry.result,
+            },
+            status="completed" if verified == "completed" else "failed",
+            error=entry.error,
+        )
+
     def _emit(
         self,
         *,

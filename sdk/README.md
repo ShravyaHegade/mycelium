@@ -3,7 +3,7 @@
 [![PyPI version](https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&release=1.14.0)](https://pypi.org/project/mycelium-runtime/)
 [![Python](https://img.shields.io/pypi/pyversions/mycelium-runtime.svg)](https://pypi.org/project/mycelium-runtime/)
 
-Current package: **mycelium-runtime v1.14.0** (`REPAIR` gate + lease auto-renew + transition envelope).
+Current package: **mycelium-runtime v1.15.0** (operator release + `REPAIR` gate + lease auto-renew + transition envelope).
 
 ## One painful bug → a few lines of config
 
@@ -518,6 +518,62 @@ With it declared, on a retry of a transition that failed before the effect:
 | missing on either side | `HARD_BLOCK` |
 
 The declared key is excluded from the transition-key fingerprint, so a retry that swaps the key still resolves to the *same* transition and is caught rather than silently starting a new one. This is **opt-in**: tools that don't declare the param keep the previous cooperative behavior.
+
+### Operator runbook: your agent hard-blocked
+
+When a side-effecting transition ends ambiguous (`BLOCKED` / `UNKNOWN` / `FAILED_AFTER_EFFECT`, or `EXPIRED` past the side-effect boundary) and no `Reconciler` can settle it, every redispatch raises `LedgerHardBlockError` forever. The release workflow is the recovery path: an operator verifies against the external provider what *actually* happened, records that verification, and the next agent redispatch consumes it. **Release is a recorded human verification, not an unblock** — and the CLI never executes tools itself.
+
+**1. Triage what's stuck:**
+
+```bash
+mycelium transitions list --stuck --config mycelium.yaml
+# or without the app's config, straight at the backend:
+mycelium transitions list --stuck --redis-url redis://localhost:6379/0
+```
+
+Each row shows the request id, tool, resolved outcome, age, and a next-action hint. `--json` gives machine-readable output; `--tool NAME` filters.
+
+**2. Inspect and verify with the provider:**
+
+```bash
+mycelium transitions show <request_id> --config mycelium.yaml
+```
+
+This prints everything needed for the provider lookup: tool + args, resolved outcome, `side_effect_boundary`, `lease_until`/`owner`, `error`, and crucially `external_operation_ref` (e.g. the Stripe `pi_...`) and `provider_idempotency_key`. Check the provider: did this operation actually complete?
+
+**3. Record the verification:**
+
+```bash
+# Effect HAPPENED at the provider → record the result; redispatch returns it.
+mycelium transitions release <request_id> --verified completed \
+  --result-json '{"charged": true, "id": "pi_..."}' \
+  --by ops@example.com --reason "pi_... succeeded in Stripe dashboard"
+
+# Effect provably NEVER happened → the next redispatch re-executes exactly once.
+mycelium transitions release <request_id> --verified not-executed \
+  --by ops@example.com --reason "no charge for pi_... in Stripe; worker OOM-killed"
+```
+
+| `--verified` | Meaning | Next redispatch |
+|--------------|---------|-----------------|
+| `completed` | the effect happened; you supply the result | returns the recorded result — the tool body does **not** run again |
+| `not-executed` | the effect provably never ran | consumes the release and runs the tool **exactly once** |
+
+Release is **one-shot** (a recorded verification is never overwritten — a second release fails) and **fail-closed**: unknown request ids, already-`COMPLETED` transitions, and `IN_FLIGHT` transitions with a still-held lease (a worker may be alive) are all refused. Entries are never deleted — the resolution (`operator_resolution`, `resolved_by`, `resolution_reason`, `resolved_at`, `released_from_outcome`) is stamped onto the durable record, so `provider_idempotency_key` enforcement and audit history survive. When an `AuditReceiptEmitter` is configured on the ledger, releases also emit signed receipts.
+
+Storage resolution: `--config` reads each tool's `ledger:` section (deduplicated); `--file PATH` / `--redis-url` / `--postgres-dsn` (env: `MYCELIUM_LEDGER_FILE` / `MYCELIUM_REDIS_URL` / `MYCELIUM_POSTGRES_DSN`) point the CLI at a backend directly for operator machines without the app's config. `storage: memory` can't be reached from the CLI — it lives inside the agent process; use the Python API there.
+
+The same workflow exists in Python (e.g. from a runbook script or an admin console):
+
+```python
+ledger = ActionLedger(storage=RedisLedgerStorage("redis://localhost:6379/0"))
+for entry in ledger.list_transitions(stuck=True):
+    print(entry.request_id, entry.tool, entry.resolved_terminal_outcome())
+ledger.release(request_id, verified="not_executed",
+               by="ops@example.com", reason="provider shows no charge")
+```
+
+> **Warning: backend access = release authority.** Anyone who can write to the ledger backend can release transitions — `--by` is an audit stamp, not authentication. Protect Redis/Postgres/file access like you protect production credentials, and prefer signed audit receipts (`audit_receipt:`) so releases are tamper-evident.
 
 Storage backends:
 

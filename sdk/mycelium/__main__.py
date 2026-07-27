@@ -1,17 +1,26 @@
-"""CLI entrypoint: init, demo, and command auto-instrumentation."""
+"""CLI entrypoint: init, demo, command auto-instrumentation, and operator transitions."""
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import sys
+import time
 from importlib import resources
 from pathlib import Path
+from typing import Any
 
 _TEMPLATE_QUICKSTART = "mycelium.quickstart.yaml"
 _TEMPLATE_FULL = "mycelium.template.yaml"
 _TEMPLATE_MINIMAL = "mycelium.minimal.yaml"
+
+# Direct operator-storage flags fall back to these environment variables, so
+# operator machines without the app's mycelium.yaml can still reach the ledger.
+_ENV_LEDGER_FILE = "MYCELIUM_LEDGER_FILE"
+_ENV_REDIS_URL = "MYCELIUM_REDIS_URL"
+_ENV_POSTGRES_DSN = "MYCELIUM_POSTGRES_DSN"
 
 
 def _load_template(*, full: bool, minimal: bool) -> tuple[str, str]:
@@ -113,6 +122,279 @@ def cmd_run(config_path: Path, command: list[str]) -> int:
     return 127
 
 
+def _add_operator_storage_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "-c",
+        "--config",
+        type=Path,
+        default=None,
+        help="mycelium.yaml to read ledger storage from (default: ./mycelium.yaml)",
+    )
+    parser.add_argument(
+        "--file",
+        dest="file_path",
+        type=Path,
+        default=None,
+        help=f"JSON file ledger path (or ${_ENV_LEDGER_FILE}); overrides --config",
+    )
+    parser.add_argument(
+        "--redis-url",
+        default=None,
+        help=f"Redis ledger URL (or ${_ENV_REDIS_URL}); overrides --config",
+    )
+    parser.add_argument(
+        "--postgres-dsn",
+        default=None,
+        help=f"Postgres ledger DSN (or ${_ENV_POSTGRES_DSN}); overrides --config",
+    )
+
+
+def _operator_storage_configs(args: argparse.Namespace) -> list[dict[str, Any]]:
+    """Resolve normalized ledger-storage config dicts from flags/env or config.
+
+    Direct flags (--file/--redis-url/--postgres-dsn, with env fallback) win
+    over --config. Config mode reuses each tool's normalized ``ledger:``
+    section, deduplicating tools that share one backend.
+    """
+    from mycelium.config import ConfigError, load_config
+
+    file_path = args.file_path or os.environ.get(_ENV_LEDGER_FILE)
+    redis_url = args.redis_url or os.environ.get(_ENV_REDIS_URL)
+    postgres_dsn = args.postgres_dsn or os.environ.get(_ENV_POSTGRES_DSN)
+    direct: list[dict[str, Any]] = []
+    if file_path:
+        direct.append({"storage": "file", "path": str(file_path)})
+    if redis_url:
+        direct.append({"storage": "redis", "url": redis_url})
+    if postgres_dsn:
+        direct.append({"storage": "postgres", "dsn": postgres_dsn})
+    if direct:
+        return direct
+
+    config_path = args.config if args.config is not None else Path("mycelium.yaml")
+    if not config_path.is_file():
+        raise ConfigError(
+            f"no ledger storage specified and config not found: {config_path} "
+            "(pass --config, or --file/--redis-url/--postgres-dsn)"
+        )
+    config = load_config(config_path)
+    raws: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for tool in config.tools.values():
+        if tool.ledger is None:
+            continue
+        key = json.dumps(tool.ledger, sort_keys=True, default=str)
+        if key in seen:
+            continue
+        seen.add(key)
+        raws.append(tool.ledger)
+    if not raws:
+        raise ConfigError(f"{config_path} declares no tool ledger storage")
+    return raws
+
+
+def _operator_ledgers(args: argparse.Namespace) -> list[Any]:
+    """Build ActionLedgers over the resolved operator storage backends."""
+    from mycelium.action_ledger import ActionLedger
+    from mycelium.config import ConfigError, MyceliumConfig
+
+    ledgers: list[Any] = []
+    for raw in _operator_storage_configs(args):
+        storage_type = raw.get("storage", "memory")
+        if storage_type == "memory":
+            raise ConfigError(
+                "ledger storage is 'memory', which lives inside the agent "
+                "process — the CLI cannot reach it. Use the Python API "
+                "(ActionLedger.list_transitions() / ActionLedger.release(...)) "
+                "from a process sharing that storage, or point the CLI at a "
+                "durable backend with --file/--redis-url/--postgres-dsn"
+            )
+        ledgers.append(ActionLedger(storage=MyceliumConfig._build_ledger_storage(raw)))
+    return ledgers
+
+
+def _find_operator_entry(args: argparse.Namespace, request_id: str) -> tuple[Any, Any]:
+    """Return (ledger, entry) for request_id across the resolved backends."""
+    from mycelium.config import ConfigError
+
+    ledgers = _operator_ledgers(args)
+    for ledger in ledgers:
+        entry = ledger.get(request_id)
+        if entry is not None:
+            return ledger, entry
+    raise ConfigError(f"no ledger entry found for request {request_id!r}")
+
+
+def _format_age(age_seconds: float) -> str:
+    if age_seconds < 0:
+        age_seconds = 0
+    if age_seconds < 60:
+        return f"{int(age_seconds)}s"
+    if age_seconds < 3600:
+        return f"{int(age_seconds // 60)}m"
+    if age_seconds < 86400:
+        return f"{int(age_seconds // 3600)}h"
+    return f"{int(age_seconds // 86400)}d"
+
+
+def _format_ts(timestamp: float | None) -> str:
+    if timestamp is None:
+        return "-"
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(timestamp))
+
+
+def _next_action_hint(entry: Any, resolved: Any) -> str:
+    from mycelium.transition import TerminalOutcome
+
+    rid = entry.request_id
+    if resolved in (
+        TerminalOutcome.BLOCKED,
+        TerminalOutcome.UNKNOWN,
+        TerminalOutcome.FAILED_AFTER_EFFECT,
+    ):
+        ref = f" (ref {entry.external_operation_ref})" if entry.external_operation_ref else ""
+        return (
+            f"verify effect with provider{ref}, then: mycelium transitions release "
+            f"{rid} --verified completed|not-executed --by ... --reason ..."
+        )
+    if resolved == TerminalOutcome.EXPIRED:
+        return (
+            f"worker died mid-flight; verify with provider, then release {rid} "
+            "--verified completed|not-executed"
+        )
+    # Stuck IN_FLIGHT: old but lease still held/unbounded.
+    return (
+        f"lease still held; confirm the worker ({entry.owner}) is dead and the "
+        f"effect never ran before releasing {rid}"
+    )
+
+
+def _entry_row(entry: Any, now: float) -> dict[str, Any]:
+    resolved = entry.resolved_terminal_outcome(now=now)
+    row = entry.to_dict()
+    row["resolved_outcome"] = resolved.value
+    row["age_seconds"] = max(0.0, now - entry.started_at)
+    return row
+
+
+def cmd_transitions_list(args: argparse.Namespace) -> int:
+    from mycelium.config import ConfigError
+
+    try:
+        ledgers = _operator_ledgers(args)
+    except ConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    now = time.time()
+    entries = []
+    for ledger in ledgers:
+        entries.extend(ledger.list_transitions(stuck=args.stuck, tool=args.tool))
+    entries.sort(key=lambda entry: entry.started_at)
+    if args.json:
+        print(json.dumps([_entry_row(entry, now) for entry in entries], indent=2, default=str))
+        return 0
+    if not entries:
+        print("no transitions found" + (" (stuck only)" if args.stuck else ""))
+        return 0
+    for entry in entries:
+        resolved = entry.resolved_terminal_outcome(now=now)
+        age = _format_age(now - entry.started_at)
+        line = f"{entry.request_id}  {entry.tool}  {resolved.value}  age={age}"
+        if entry.operator_resolution is not None:
+            line += f"  [released: {entry.operator_resolution} by {entry.resolved_by}]"
+        print(line)
+        if args.stuck:
+            print(f"    next: {_next_action_hint(entry, resolved)}")
+    return 0
+
+
+def cmd_transitions_show(args: argparse.Namespace) -> int:
+    from mycelium.config import ConfigError
+
+    try:
+        _, entry = _find_operator_entry(args, args.request_id)
+    except ConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    resolved = entry.resolved_terminal_outcome()
+    print(f"request_id: {entry.request_id}")
+    print(f"tool: {entry.tool}")
+    print(f"args: {json.dumps(entry.args, default=str)}")
+    print(f"kwargs: {json.dumps(entry.kwargs, default=str)}")
+    print(f"status: {entry.status}")
+    print(f"resolved_outcome: {resolved.value}")
+    print(f"side_effect_boundary: {entry.side_effect_boundary}")
+    print(f"started_at: {_format_ts(entry.started_at)}")
+    print(f"finished_at: {_format_ts(entry.finished_at)}")
+    print(f"lease_until: {_format_ts(entry.lease_until)}")
+    print(f"owner: {entry.owner or '-'}")
+    print(f"idempotency_key: {entry.idempotency_key}")
+    print(f"provider_idempotency_key: {entry.provider_idempotency_key or '-'}")
+    print(f"external_operation_ref: {entry.external_operation_ref or '-'}")
+    print(f"error: {entry.error or '-'}")
+    print(f"result: {json.dumps(entry.result, default=str)}")
+    print(f"receipt_ref: {entry.receipt_ref or '-'}")
+    print(f"operator_resolution: {entry.operator_resolution or '-'}")
+    print(f"resolved_by: {entry.resolved_by or '-'}")
+    print(f"resolution_reason: {entry.resolution_reason or '-'}")
+    print(f"resolved_at: {_format_ts(entry.resolved_at)}")
+    print(f"released_from_outcome: {entry.released_from_outcome or '-'}")
+    return 0
+
+
+def cmd_transitions_release(args: argparse.Namespace) -> int:
+    from mycelium.action_ledger import (
+        OPERATOR_RESOLUTION_COMPLETED,
+        OPERATOR_RESOLUTION_NOT_EXECUTED,
+        LedgerError,
+    )
+    from mycelium.config import ConfigError
+
+    verified = (
+        OPERATOR_RESOLUTION_COMPLETED
+        if args.verified == "completed"
+        else OPERATOR_RESOLUTION_NOT_EXECUTED
+    )
+    result = None
+    if args.result_json is not None:
+        if verified != OPERATOR_RESOLUTION_COMPLETED:
+            print(
+                "error: --result-json only applies to --verified completed",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            result = json.loads(args.result_json)
+        except json.JSONDecodeError as exc:
+            print(f"error: invalid --result-json: {exc}", file=sys.stderr)
+            return 2
+    try:
+        ledger, _ = _find_operator_entry(args, args.request_id)
+    except ConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    try:
+        entry = ledger.release(
+            args.request_id,
+            verified=verified,
+            result=result,
+            by=args.by,
+            reason=args.reason,
+        )
+    except LedgerError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(
+        f"released {entry.request_id} ({entry.tool}): verified={verified} "
+        f"by={args.by} from={entry.released_from_outcome}"
+    )
+    if verified == OPERATOR_RESOLUTION_COMPLETED:
+        print("next redispatch returns the recorded result without re-executing")
+    else:
+        print("next agent redispatch re-executes exactly once (release consumed)")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="mycelium",
@@ -173,6 +455,59 @@ def main(argv: list[str] | None = None) -> int:
         help="Python command after '--'",
     )
 
+    transitions_parser = sub.add_parser(
+        "transitions",
+        help="Operator triage and release of stuck (hard-blocked) transitions",
+    )
+    transitions_sub = transitions_parser.add_subparsers(
+        dest="transitions_command", required=True
+    )
+
+    list_parser = transitions_sub.add_parser(
+        "list", help="List ledger transitions (optionally only stuck ones)"
+    )
+    _add_operator_storage_args(list_parser)
+    list_parser.add_argument(
+        "--stuck",
+        action="store_true",
+        help="Only transitions that need operator attention, with next-action hints",
+    )
+    list_parser.add_argument("--tool", default=None, help="Filter by tool name")
+    list_parser.add_argument(
+        "--json", action="store_true", help="Machine-readable JSON output"
+    )
+
+    show_parser = transitions_sub.add_parser(
+        "show", help="Show one transition with provider-verification fields"
+    )
+    _add_operator_storage_args(show_parser)
+    show_parser.add_argument("request_id")
+
+    release_parser = transitions_sub.add_parser(
+        "release",
+        help="Record a human verification releasing a hard-blocked transition",
+    )
+    _add_operator_storage_args(release_parser)
+    release_parser.add_argument("request_id")
+    release_parser.add_argument(
+        "--verified",
+        required=True,
+        choices=["completed", "not-executed"],
+        help="completed: effect happened (supply --result-json); "
+        "not-executed: effect provably never ran (grants one re-execution)",
+    )
+    release_parser.add_argument(
+        "--result-json",
+        default=None,
+        help="JSON result recorded for --verified completed",
+    )
+    release_parser.add_argument(
+        "--by", required=True, help="Operator identity (audit stamp)"
+    )
+    release_parser.add_argument(
+        "--reason", required=True, help="Why the release is justified"
+    )
+
     args = parser.parse_args(argv)
     if args.command == "init":
         return cmd_init(args.output, full=args.full, minimal=args.minimal, force=args.force)
@@ -180,6 +515,13 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_demo(redis=args.redis)
     if args.command == "run":
         return cmd_run(args.config, args.child_command)
+    if args.command == "transitions":
+        if args.transitions_command == "list":
+            return cmd_transitions_list(args)
+        if args.transitions_command == "show":
+            return cmd_transitions_show(args)
+        if args.transitions_command == "release":
+            return cmd_transitions_release(args)
     return 1
 
 
