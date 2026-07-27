@@ -1,6 +1,6 @@
 # Mycelium
 
-[![PyPI version](https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&release=1.14.0)](https://pypi.org/project/mycelium-runtime/)
+[![PyPI version](https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&release=1.15.0)](https://pypi.org/project/mycelium-runtime/)
 [![Python](https://img.shields.io/pypi/pyversions/mycelium-runtime.svg)](https://pypi.org/project/mycelium-runtime/)
 [![Downloads](https://static.pepy.tech/badge/mycelium-runtime)](https://pepy.tech/project/mycelium-runtime)
 
@@ -46,7 +46,8 @@ pip install mycelium-runtime
 pip install 'mycelium-runtime[langgraph]'  # automatic LangGraph runtime IDs
 pip install 'mycelium-runtime[redis]'      # multi-worker / cloud ledger
 pip install 'mycelium-runtime[postgres]'   # Postgres ledger backend
-mycelium demo              # see the bug and the fix
+mycelium demo --slow       # feature tour, paced for screen recording
+mycelium demo              # same tour, fast
 mycelium init              # on-ramp: transition + one ledgered tool → mycelium.yaml
 mycelium init --full       # reference: all guards (fill TODOs; not the default)
 mycelium init --minimal    # smaller multi-guard scaffold

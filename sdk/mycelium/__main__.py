@@ -55,10 +55,10 @@ def cmd_init(output: Path, *, full: bool, minimal: bool, force: bool) -> int:
     return 0
 
 
-def cmd_demo(*, redis: bool = False) -> int:
+def cmd_demo(*, redis: bool = False, slow: bool = False) -> int:
     from mycelium.quickstart import run_demo
 
-    return run_demo(redis=redis)
+    return run_demo(redis=redis, slow=slow)
 
 
 def _validated_python_command(command: list[str]) -> list[str]:
@@ -428,7 +428,7 @@ def main(argv: list[str] | None = None) -> int:
 
     demo_parser = sub.add_parser(
         "demo",
-        help="Show LangGraph duplicate-tool bug and the v1.3 transition fix",
+        help="Feature tour: without/with Mycelium + gates, repair, reconcile, release",
     )
     demo_parser.add_argument(
         "--redis",
@@ -437,6 +437,11 @@ def main(argv: list[str] | None = None) -> int:
             "Also run the two-worker real-Redis Cloud-style redispatch proof "
             "(requires Redis; MYCELIUM_TEST_REDIS_URL or localhost db 15)"
         ),
+    )
+    demo_parser.add_argument(
+        "--slow",
+        action="store_true",
+        help="Pause between lines/sections for screen recording (~30–40s total)",
     )
     run_parser = sub.add_parser(
         "run",
@@ -512,7 +517,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "init":
         return cmd_init(args.output, full=args.full, minimal=args.minimal, force=args.force)
     if args.command == "demo":
-        return cmd_demo(redis=args.redis)
+        return cmd_demo(redis=args.redis, slow=args.slow)
     if args.command == "run":
         return cmd_run(args.config, args.child_command)
     if args.command == "transitions":

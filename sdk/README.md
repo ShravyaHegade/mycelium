@@ -1,6 +1,6 @@
 # Mycelium runtime
 
-[![PyPI version](https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&release=1.14.0)](https://pypi.org/project/mycelium-runtime/)
+[![PyPI version](https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&release=1.15.0)](https://pypi.org/project/mycelium-runtime/)
 [![Python](https://img.shields.io/pypi/pyversions/mycelium-runtime.svg)](https://pypi.org/project/mycelium-runtime/)
 
 Current package: **mycelium-runtime v1.15.0** (operator release + `REPAIR` gate + lease auto-renew + transition envelope).
@@ -17,7 +17,8 @@ On LangGraph Cloud, long tool calls can be redispatched on the order of **~180s*
 pip install 'mycelium-runtime[langgraph]'  # Python 3.10+; automatic runtime IDs
 mycelium init                  # on-ramp scaffold (transition + one ledgered tool)
 mycelium init --full           # reference scaffold (all guards; fill TODOs)
-mycelium demo                  # see the bug and the fix (no LangGraph required)
+mycelium demo                  # feature tour (envelope, lease, repair, reconcile, release)
+mycelium demo --redis          # optional 2-worker Redis proof
 ```
 
 
@@ -68,7 +69,8 @@ pip install 'mycelium-runtime[langgraph]'  # optional automatic LangGraph IDs
 mycelium init              # on-ramp: duplicate-tool fix → ./mycelium.yaml
 mycelium init --full       # reference: every guard section (not the default)
 mycelium init --minimal    # smaller multi-guard scaffold
-mycelium demo              # terminal demo of langgraph#7417
+mycelium demo              # feature tour: without/with Mycelium + gates / release
+mycelium demo --redis      # optional Cloud-style 2-worker Redis proof
 ```
 
 ## Quickstart: stale context & broken transcripts (opt-in)

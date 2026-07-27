@@ -382,7 +382,7 @@
 
     <h1>Mycelium: runtime guards for AI agents</h1>
     <p class="badges">
-      <a href="https://pypi.org/project/mycelium-runtime/"><img src="https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&amp;release=1.14.0" alt="PyPI version"></a>
+      <a href="https://pypi.org/project/mycelium-runtime/"><img src="https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&amp;release=1.15.0" alt="PyPI version"></a>
       <a href="https://pypi.org/project/mycelium-runtime/"><img src="https://img.shields.io/pypi/pyversions/mycelium-runtime.svg" alt="Python versions"></a>
       <a href="https://pepy.tech/project/mycelium-runtime"><img src="https://static.pepy.tech/badge/mycelium-runtime" alt="PyPI downloads"></a>
       <a href="https://github.com/mycelium-labs/mycelium"><img src="https://img.shields.io/github/license/mycelium-labs/mycelium.svg" alt="MIT license"></a>
@@ -466,7 +466,8 @@ pip install 'mycelium-runtime[postgres]'
 mycelium init              # on-ramp (transition + one ledgered tool)
 mycelium init --full       # reference: all guards (fill TODOs; not default)
 mycelium init --minimal    # smaller multi-guard scaffold
-mycelium demo              # langgraph#7417 bug and fix
+mycelium demo              # feature tour: without/with Mycelium + gates / release
+mycelium demo --redis      # optional Cloud-style 2-worker Redis proof
 mycelium run --config mycelium.yaml -- python -m my_agent</pre>
       <p>
         <strong>Zero-touch command mode:</strong> add a unique

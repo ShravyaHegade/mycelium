@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Docs / proofs
+
+- Expand `mycelium demo` into a full feature tour: unguarded duplicate, transition envelope, lease auto-renew, REPAIR, provider reconcile, class-aware READ retry, operator release, plus optional `--redis` two-worker proof. New proofs in `mycelium.proofs.feature_demo` and `tests/test_feature_demo.py`.
+- `mycelium demo --slow` pauses between lines/sections for screen recording.
+- `mycelium demo` uses ANSI colors on a TTY (red = without/bug, green = PASS, yellow = EXECUTING). Set ``NO_COLOR=1`` to disable.
+
+### Fixes
+
+- `_get_entry` / `_set_entry` storage wrappers call `self._storage.get` / `set` (they previously recursed into themselves).
+
 ## 1.15.0 (2026-07-27)
 
 Minor: operator release workflow for hard-blocked transitions — a recorded human verification (`completed` / `not_executed`) that lets a stuck side-effecting transition recover instead of raising `LedgerHardBlockError` forever.

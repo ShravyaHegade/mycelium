@@ -72,7 +72,7 @@ def prove_ledger_deduplication(
 ) -> dict[str, Any]:
     """Real proof: same tool_call_id redispatched → executes only once.
 
-    Uses the v1.3 transition envelope (``transition:`` + ``side_effect_class``),
+    Uses the transition envelope (``transition:`` + ``side_effect_class``),
     matching what ``mycelium init`` scaffolds.
 
     Raises ``AssertionError`` if the guard fails (same assertions as proof/ test).
