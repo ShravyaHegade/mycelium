@@ -18,6 +18,13 @@ Minor: worker-death / stream-loss signal — reclaim requires affirmative death 
 
 ## Unreleased
 
+## 1.16.1 (2026-07-28)
+
+### CI / release automation
+
+- New `release.yml` workflow triggered on push to main: reads version from `sdk/pyproject.toml`, creates annotated tag `v{version}`, extracts changelog section for GitHub Release notes, and publishes to PyPI via the existing publish workflow. Idempotent — merges that don't bump the version release nothing.
+- `publish.yml` converted to a reusable workflow (`workflow_call`) so the release automation can trigger it directly, bypassing the `GITHUB_TOKEN` restriction on tag-push-triggered runs.
+
 ### Docs / proofs
 
 - Expand `mycelium demo` into a full feature tour: unguarded duplicate, transition envelope, lease auto-renew, REPAIR, provider reconcile, class-aware READ retry, operator release, plus optional `--redis` two-worker proof. New proofs in `mycelium.proofs.feature_demo` and `tests/test_feature_demo.py`.
