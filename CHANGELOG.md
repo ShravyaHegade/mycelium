@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.16.0 (2026-07-27)
+
+Minor: worker-death / stream-loss signal — reclaim requires affirmative death evidence when opted in.
+
+- New `reclaim_requires_death_signal` flag (default `False`) on `ActionLedger` and YAML `transition:` section. When on, EXPIRED entries cannot be reclaimed or released without affirmative death evidence — prevents reclaiming from a worker that is merely paused (GC, storage partition, failing auto-renew).
+- Death evidence: `worker_dead_asserted_at` is set (via `mark_worker_dead()` / `mark_worker_dead_for()`), OR `last_heartbeat_at` (or `started_at` fallback) is older than the grace window (`presumed_dead_after`, default `2 × lease_ttl`).
+- `mark_worker_dead_for(request_id, by=..., reason=..., override_heartbeat=False)` on ActionLedger: refuses when the entry has a recent heartbeat within the grace window (worker may still be alive). Pass `override_heartbeat=True` to bypass the liveness check when the operator has direct evidence of death (appends `" (heartbeat overridden)"` to the audit reason).
+- New CLI: `mycelium transitions mark-dead <request_id> --by ... --reason ... [--override-heartbeat]`. `show` now includes `last_heartbeat_at`, `worker_dead_asserted_by`, `worker_dead_asserted_at`. `list --stuck` hints at `mark-dead` for EXPIRED entries without death evidence.
+- Release strengthening: when `reclaim_requires_death_signal` is on, `release()` on EXPIRED entries without death evidence raises `LedgerWorkerAliveError`. When off (default), release proceeds unchanged.
+- `presumed_dead_after` on `ActionLedger` and YAML `transition:` section: override the default grace window (seconds since last heartbeat / started_at).
+- Redis TTL floor: in-flight keys now expire at `max(in_flight_ttl, lease_ttl * 4)` to prevent premature eviction before the death question can be answered. Default `in_flight_ttl` bumped from 3600 to 604800 (7 days). **Behavior change:** existing Redis deployments that relied on 1-hour in-flight key expiry will now retain in-flight entries for up to 7 days — this is intentional (death evidence must be answerable) but changes Redis memory usage. Override via `in_flight_ttl` on `RedisLedgerStorage` if you need shorter TTLs and accept the trade-off.
+- New `LedgerEntry` fields: `last_heartbeat_at`, `worker_dead_asserted_by`, `worker_dead_asserted_at` (old serialized entries load unchanged).
+- New exception: `LedgerWorkerAliveError` (subclasses `LedgerError`).
+- `reclaim_requires_death_signal` and `presumed_dead_after` wired through `ledger()` / `ledger_sync()` decorators and `config.py` `_ledger_timing_kwargs()`.
+- 26 tests in `tests/test_worker_death_signal.py` covering field serialization, `has_worker_death_evidence()`, gate behavior (on/off), `mark_worker_dead` with heartbeat guard and override, release strengthening, `presumed_dead_after` defaults, claim-path gating (read-only RECLAIM, side-effecting ALLOW), heartbeat maintenance on claim/renew, Redis TTL floor, and CLI mark-dead + release round-trip.
+
 ## Unreleased
 
 ### Docs / proofs

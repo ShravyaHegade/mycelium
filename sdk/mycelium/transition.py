@@ -97,6 +97,41 @@ def resolve_lease_validity(
     return LeaseValidity.HELD
 
 
+def has_worker_death_evidence(
+    entry: Any,
+    *,
+    now: float | None = None,
+    presumed_dead_after: float,
+) -> bool:
+    """Classify whether there is affirmative evidence a worker is gone.
+
+    Returns ``True`` when any of:
+
+    * ``worker_dead_asserted_at`` is set (explicit death signal from an
+      orchestrator or human), **or**
+    * the last heartbeat (``last_heartbeat_at``, falling back to ``started_at``
+      when absent) is older than ``presumed_dead_after`` seconds ago.
+
+    Call this *before* deciding whether an EXPIRED entry may be reclaimed or
+    released.  It is a pure function so gates and tests share the same logic.
+    """
+    now = now if now is not None else time.time()
+
+    # Explicit death assertion always counts.
+    if getattr(entry, "worker_dead_asserted_at", None) is not None:
+        return True
+
+    # Heartbeat-based: fall back to started_at when no heartbeat recorded.
+    reference = getattr(entry, "last_heartbeat_at", None)
+    if reference is None:
+        reference = getattr(entry, "started_at", None)
+    if reference is None:
+        # No timestamp at all — treat as evidence-less.
+        return False
+
+    return (now - reference) >= presumed_dead_after
+
+
 class SideEffectBoundary(StrEnum):
     """Whether an external side-effect boundary was crossed."""
 
@@ -330,6 +365,8 @@ class TransitionConfig:
     lease_renew_interval: float | None = None
     poll_interval: float | None = None
     poll_timeout: float | None = None
+    reclaim_requires_death_signal: bool = False
+    presumed_dead_after: float | None = None
 
 
 @dataclass(frozen=True)

@@ -32,7 +32,7 @@ class RedisEntryStorage:
         *,
         prefix: str,
         from_dict: Callable[[dict[str, Any]], E],
-        in_flight_ttl: float | None = 3600.0,
+        in_flight_ttl: float | None = 604800.0,
     ) -> None:
         redis = _require_redis()
         self._client = redis.Redis.from_url(url, decode_responses=True)
@@ -68,7 +68,7 @@ class RedisEntryStorage:
         from mycelium.storage._helpers import claim_inflight_outcome, with_lease
 
         key = self._key(entry.request_id)
-        ttl = int(self._in_flight_ttl or lease_ttl or 0)
+        ttl = int(max(self._in_flight_ttl or lease_ttl or 0, lease_ttl * 4))
 
         for _ in range(32):
             existing_raw = self._client.get(key)
@@ -125,7 +125,7 @@ class RedisLedgerStorage:
         url: str,
         *,
         prefix: str = "mycelium:action:",
-        in_flight_ttl: float | None = 3600.0,
+        in_flight_ttl: float | None = 604800.0,
     ) -> None:
         from mycelium.action_ledger import LedgerEntry
 
@@ -162,7 +162,7 @@ class RedisTaskLedgerStorage:
         url: str,
         *,
         prefix: str = "mycelium:task:",
-        in_flight_ttl: float | None = 3600.0,
+        in_flight_ttl: float | None = 604800.0,
     ) -> None:
         from mycelium.task_ledger import TaskLedgerEntry
 

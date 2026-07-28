@@ -1,9 +1,9 @@
 # Mycelium runtime
 
-[![PyPI version](https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&release=1.15.0)](https://pypi.org/project/mycelium-runtime/)
+[![PyPI version](https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&release=1.16.0)](https://pypi.org/project/mycelium-runtime/)
 [![Python](https://img.shields.io/pypi/pyversions/mycelium-runtime.svg)](https://pypi.org/project/mycelium-runtime/)
 
-Current package: **mycelium-runtime v1.15.0** (operator release + `REPAIR` gate + lease auto-renew + transition envelope).
+Current package: **mycelium-runtime v1.16.0** (worker-death signal + operator release + `REPAIR` gate + lease auto-renew + transition envelope).
 
 ## One painful bug → a few lines of config
 
@@ -577,6 +577,36 @@ ledger.release(request_id, verified="not_executed",
 
 > **Warning: backend access = release authority.** Anyone who can write to the ledger backend can release transitions — `--by` is an audit stamp, not authentication. Protect Redis/Postgres/file access like you protect production credentials, and prefer signed audit receipts (`audit_receipt:`) so releases are tamper-evident.
 
+**4. (When `reclaim_requires_death_signal: true`) Assert worker death:**
+
+When the death-signal gate is on, EXPIRED entries cannot be reclaimed or released until the operator asserts the worker is dead. This prevents reclaiming a transition from a worker that is merely paused (GC, storage partition, failing auto-renew).
+
+```bash
+# Assert the worker is dead so reclaim/release can proceed:
+mycelium transitions mark-dead <request_id> \
+  --by ops@example.com --reason "worker pod restarted, confirmed no heartbeat"
+```
+
+| Field | Description |
+|-------|-------------|
+| `last_heartbeat_at` | Auto-set on claim/renew; shows when the worker last checked in |
+| `worker_dead_asserted_by` | Operator who asserted death (audit stamp) |
+| `worker_dead_asserted_at` | Timestamp of the death assertion |
+
+The `mark-dead` command refuses if the entry has a recent heartbeat within the grace window (`presumed_dead_after`) — the worker may still be alive. Add `--override-heartbeat` to bypass this check when the operator has direct evidence of death (e.g. they killed the pod). After asserting death, `release` proceeds normally. `show` includes heartbeat/death fields; `list --stuck` hints at `mark-dead` when needed.
+
+> **Note:** the alive-worker release protection and claim-path gating only apply when `reclaim_requires_death_signal: true`. When off (the default), `release` and `claim` proceed exactly as they did in v1.15 — the heartbeat fields are tracked but not enforced. We recommend enabling the gate in production.
+
+Python API:
+
+```python
+entry = ledger.mark_worker_dead_for(request_id,
+    by="ops@example.com", reason="confirmed dead")
+# now release can proceed
+ledger.release(request_id, verified="not_executed",
+               by="ops@example.com", reason="worker died before effect")
+```
+
 Storage backends:
 
 | Backend | Use case | YAML `storage` |
@@ -686,6 +716,8 @@ transition:
   policy_version: "2026.07.1"
   lease_ttl: 3600
   # lease_renew_interval: 1200   # default = lease_ttl/3; 0 disables auto-renew
+  # reclaim_requires_death_signal: false   # default; true = require mark-dead before reclaim
+  # presumed_dead_after: 7200             # default = 2 × lease_ttl; grace window for heartbeat
 
 action_ledger:
   storage: file

@@ -514,11 +514,11 @@ class MyceliumConfig:
             ),
         )
 
-    def _ledger_timing_kwargs(self) -> dict[str, float]:
-        """Return ActionLedger timing overrides from ``transition`` config."""
+    def _ledger_timing_kwargs(self) -> dict[str, float | bool]:
+        """Return ActionLedger timing and death-signal overrides from ``transition`` config."""
         if self.transition is None:
             return {}
-        kwargs: dict[str, float] = {}
+        kwargs: dict[str, float | bool] = {}
         if self.transition.lease_ttl is not None:
             kwargs["lease_ttl"] = self.transition.lease_ttl
         if self.transition.lease_renew_interval is not None:
@@ -527,6 +527,10 @@ class MyceliumConfig:
             kwargs["poll_interval"] = self.transition.poll_interval
         if self.transition.poll_timeout is not None:
             kwargs["poll_timeout"] = self.transition.poll_timeout
+        if self.transition.reclaim_requires_death_signal:
+            kwargs["reclaim_requires_death_signal"] = True
+        if self.transition.presumed_dead_after is not None:
+            kwargs["presumed_dead_after"] = self.transition.presumed_dead_after
         return kwargs
 
     def _tool_audit_emitter(self, tool_config: ToolConfig) -> AuditReceiptEmitter | None:
@@ -1060,6 +1064,11 @@ def _parse_transition_config(raw: Any) -> TransitionConfig | None:
         raw, "poll_timeout", section="transition"
     )
 
+    reclaim_requires_death_signal = bool(raw.get("reclaim_requires_death_signal", False))
+    presumed_dead_after = _parse_optional_positive_float(
+        raw, "presumed_dead_after", section="transition"
+    )
+
     return TransitionConfig(
         agent_id=str(agent_id),
         policy_version=str(policy_version),
@@ -1068,6 +1077,8 @@ def _parse_transition_config(raw: Any) -> TransitionConfig | None:
         lease_renew_interval=lease_renew_interval,
         poll_interval=poll_interval,
         poll_timeout=poll_timeout,
+        reclaim_requires_death_signal=reclaim_requires_death_signal,
+        presumed_dead_after=presumed_dead_after,
     )
 
 

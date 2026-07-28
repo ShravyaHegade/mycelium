@@ -34,6 +34,7 @@ from mycelium.transition import (
     derive_transition_key_for_call,
     extract_provider_idempotency_key,
     get_active_dispatch_id,
+    has_worker_death_evidence,
     legacy_status_from_terminal,
     resolve_lease_validity,
     resolve_terminal_outcome,
@@ -61,6 +62,8 @@ DEFAULT_POLL_TIMEOUT = 300.0
 # Renew at 1/3 of lease TTL so a still-running owner stays HELD before peers see EXPIRED.
 DEFAULT_LEASE_RENEW_RATIO = 1.0 / 3.0
 MIN_LEASE_RENEW_INTERVAL = 0.01
+# Default grace window for worker-death evidence: 2x the lease TTL.
+DEFAULT_PRESUMED_DEAD_AFTER_RATIO = 2.0
 
 _logger = logging.getLogger(__name__)
 
@@ -104,6 +107,15 @@ class LedgerAlreadyResolvedError(LedgerError):
     """Raised when releasing a transition that already has an operator resolution.
 
     Release is one-shot: a recorded human verification is never overwritten.
+    """
+
+
+class LedgerWorkerAliveError(LedgerError):
+    """Raised when a worker-death assertion is refused because the worker appears alive.
+
+    Covers ``mark_worker_dead`` on an entry whose ``last_heartbeat_at`` is
+    within the grace window, and ``release()`` of an EXPIRED entry whose
+    heartbeat is still recent.
     """
 
 
@@ -159,6 +171,35 @@ _STUCK_OUTCOMES = frozenset(
         TerminalOutcome.EXPIRED,
     }
 )
+
+
+def _format_heartbeat_age(entry: LedgerEntry, *, now: float) -> str:
+    """Human-readable age of the last heartbeat (or started_at fallback)."""
+    ref = entry.last_heartbeat_at if entry.last_heartbeat_at is not None else entry.started_at
+    age = now - ref
+    if age < 60:
+        return f"{int(age)}s ago"
+    if age < 3600:
+        return f"{int(age // 60)}m ago"
+    return f"{int(age // 3600)}h ago"
+
+
+def _grace_remaining(
+    entry: LedgerEntry,
+    *,
+    now: float,
+    presumed_dead_after: float,
+) -> str:
+    """Human-readable time until the grace window elapses."""
+    ref = entry.last_heartbeat_at if entry.last_heartbeat_at is not None else entry.started_at
+    remaining = presumed_dead_after - (now - ref)
+    if remaining <= 0:
+        return "now"
+    if remaining < 60:
+        return f"{int(remaining)}s"
+    if remaining < 3600:
+        return f"{int(remaining // 60)}m"
+    return f"{int(remaining // 3600)}h"
 
 
 def _is_stuck_transition(
@@ -396,6 +437,18 @@ class LedgerEntry:
     provider_idempotency_key: str | None = None
     # Operator release (manual reconciliation) audit fields. Set once by
     # ActionLedger.release(); "not_executed" is consumed by the next claim.
+    # Worker-death signal fields. ``last_heartbeat_at`` is set on claim and
+    # updated by ``renew_lease()``; the auto-renew loop maintains it with no
+    # further changes.  ``worker_dead_asserted_*`` is stamped by
+    # ``mark_worker_dead()`` / ``mark_worker_dead_for()`` — the channel for
+    # orchestrator death events (k8s OOM-kill hooks, LangGraph redispatch
+    # sweeps) and humans.
+    last_heartbeat_at: float | None = None
+    worker_dead_asserted_by: str | None = None
+    worker_dead_asserted_at: float | None = None
+
+    # Operator release (manual reconciliation) audit fields. Set once by
+    # ActionLedger.release(); "not_executed" is consumed by the next claim.
     operator_resolution: str | None = None  # "completed" | "not_executed"
     resolved_by: str | None = None
     resolution_reason: str | None = None
@@ -448,6 +501,9 @@ class LedgerEntry:
             "side_effect_boundary": self.side_effect_boundary,
             "external_operation_ref": self.external_operation_ref,
             "provider_idempotency_key": self.provider_idempotency_key,
+            "last_heartbeat_at": self.last_heartbeat_at,
+            "worker_dead_asserted_by": self.worker_dead_asserted_by,
+            "worker_dead_asserted_at": self.worker_dead_asserted_at,
             "operator_resolution": self.operator_resolution,
             "resolved_by": self.resolved_by,
             "resolution_reason": self.resolution_reason,
@@ -492,6 +548,9 @@ class LedgerEntry:
             ),
             external_operation_ref=data.get("external_operation_ref"),
             provider_idempotency_key=data.get("provider_idempotency_key"),
+            last_heartbeat_at=data.get("last_heartbeat_at"),
+            worker_dead_asserted_by=data.get("worker_dead_asserted_by"),
+            worker_dead_asserted_at=data.get("worker_dead_asserted_at"),
             operator_resolution=data.get("operator_resolution"),
             resolved_by=data.get("resolved_by"),
             resolution_reason=data.get("resolution_reason"),
@@ -617,6 +676,8 @@ class ActionLedger:
         defer_read_only_unknown: bool = False,
         audit_emitter: AuditReceiptEmitter | None = None,
         unclassified_policy: str = UNCLASSIFIED_POLICY_WARN,
+        reclaim_requires_death_signal: bool = False,
+        presumed_dead_after: float | None = None,
     ) -> None:
         self._storage = storage if storage is not None else InMemoryLedgerStorage()
         self._lease_ttl = lease_ttl
@@ -643,6 +704,18 @@ class ActionLedger:
         self._unclassified_policy = unclassified_policy
         self._memory_warned_tools: set[str] = set()
         self._unclassified_warned_tools: set[str] = set()
+        # Worker-death signal: when True, EXPIRED entries cannot be reclaimed
+        # without affirmative death evidence (mark_worker_dead or heartbeat
+        # older than presumed_dead_after). Default False preserves existing
+        # behavior exactly.
+        self._reclaim_requires_death_signal = reclaim_requires_death_signal
+        # Grace window: seconds since last heartbeat (or started_at) after
+        # which a worker is presumed dead. Default 2x lease_ttl.
+        self._presumed_dead_after = (
+            presumed_dead_after
+            if presumed_dead_after is not None
+            else lease_ttl * DEFAULT_PRESUMED_DEAD_AFTER_RATIO
+        )
 
     # --- storage boundary (fail-closed; see LedgerStorageUnavailableError) ---
 
@@ -829,6 +902,29 @@ class ActionLedger:
                 f"{existing.lease_validity(now=now).value} lease — wait for "
                 "the lease to expire (EXPIRED is releasable)"
             )
+        if outcome == TerminalOutcome.EXPIRED:
+            # EXPIRED with a recent heartbeat means the worker may still be
+            # alive (GC pause, storage partition, silently failing auto-renew).
+            # When reclaim_requires_death_signal is on, refuse until the grace
+            # window elapses or death is asserted.
+            if (
+                self._reclaim_requires_death_signal
+                and not has_worker_death_evidence(
+                    existing, now=now,
+                    presumed_dead_after=self._presumed_dead_after,
+                )
+            ):
+                grace = _grace_remaining(
+                    existing, now=now,
+                    presumed_dead_after=self._presumed_dead_after,
+                )
+                raise LedgerWorkerAliveError(
+                    f"Cannot release request {request_id!r}: EXPIRED but "
+                    f"worker appears alive "
+                    f"({_format_heartbeat_age(existing, now=now)}) — "
+                    f"grace window elapses in {grace}. "
+                    "Use mark_worker_dead() first, or wait for the grace window."
+                )
         if verified == OPERATOR_RESOLUTION_COMPLETED:
             completed = self.complete(request_id, result)
             entry = replace(
@@ -970,6 +1066,18 @@ class ActionLedger:
                 if gate == TransitionGate.REPAIR:
                     self.repair_transition(request_id)
                     continue
+                if gate == TransitionGate.RECLAIM and self._reclaim_requires_death_signal:
+                    if not has_worker_death_evidence(
+                        existing,
+                        now=time.time(),
+                        presumed_dead_after=self._presumed_dead_after,
+                    ):
+                        self._poll_read_only(
+                            request_id,
+                            interval=interval,
+                            poll_deadline=poll_deadline,
+                        )
+                        continue
                 if gate == TransitionGate.SOFT_BLOCK:
                     return self._resolve_read_only_soft_block(
                         request_id, tool, args, kwargs, existing
@@ -1072,6 +1180,18 @@ class ActionLedger:
                 if gate == TransitionGate.REPAIR:
                     self.repair_transition(request_id)
                     continue
+                if gate == TransitionGate.RECLAIM and self._reclaim_requires_death_signal:
+                    if not has_worker_death_evidence(
+                        existing,
+                        now=time.time(),
+                        presumed_dead_after=self._presumed_dead_after,
+                    ):
+                        await self._poll_read_only_async(
+                            request_id,
+                            interval=interval,
+                            poll_deadline=poll_deadline,
+                        )
+                        continue
                 if gate == TransitionGate.SOFT_BLOCK:
                     return self._resolve_read_only_soft_block(
                         request_id, tool, args, kwargs, existing
@@ -1357,6 +1477,19 @@ class ActionLedger:
                         poll_deadline=poll_deadline,
                     )
                     continue
+                if gate == TransitionGate.ALLOW and self._reclaim_requires_death_signal:
+                    if not has_worker_death_evidence(
+                        existing,
+                        now=time.time(),
+                        presumed_dead_after=self._presumed_dead_after,
+                    ):
+                        self._poll_side_effecting(
+                            request_id,
+                            tool=tool,
+                            interval=interval,
+                            poll_deadline=poll_deadline,
+                        )
+                        continue
 
             entry = self._new_inflight_entry(
                 request_id, tool, args, kwargs, binding=binding
@@ -1379,6 +1512,19 @@ class ActionLedger:
                     return self._reconcile_or_hard_block(
                         request_id, tool, args, kwargs, existing, binding
                     )
+                if gate == TransitionGate.ALLOW and self._reclaim_requires_death_signal:
+                    if not has_worker_death_evidence(
+                        existing,
+                        now=time.time(),
+                        presumed_dead_after=self._presumed_dead_after,
+                    ):
+                        self._poll_side_effecting(
+                            request_id,
+                            tool=tool,
+                            interval=interval,
+                            poll_deadline=poll_deadline,
+                        )
+                        continue
                 self._poll_side_effecting(
                     request_id,
                     tool=tool,
@@ -1489,6 +1635,19 @@ class ActionLedger:
                         poll_deadline=poll_deadline,
                     )
                     continue
+                if gate == TransitionGate.ALLOW and self._reclaim_requires_death_signal:
+                    if not has_worker_death_evidence(
+                        existing,
+                        now=time.time(),
+                        presumed_dead_after=self._presumed_dead_after,
+                    ):
+                        await self._poll_side_effecting_async(
+                            request_id,
+                            tool=tool,
+                            interval=interval,
+                            poll_deadline=poll_deadline,
+                        )
+                        continue
 
             entry = self._new_inflight_entry(
                 request_id, tool, args, kwargs, binding=binding
@@ -1511,6 +1670,19 @@ class ActionLedger:
                     return await self._reconcile_or_hard_block_async(
                         request_id, tool, args, kwargs, existing, binding
                     )
+                if gate == TransitionGate.ALLOW and self._reclaim_requires_death_signal:
+                    if not has_worker_death_evidence(
+                        existing,
+                        now=time.time(),
+                        presumed_dead_after=self._presumed_dead_after,
+                    ):
+                        await self._poll_side_effecting_async(
+                            request_id,
+                            tool=tool,
+                            interval=interval,
+                            poll_deadline=poll_deadline,
+                        )
+                        continue
                 await self._poll_side_effecting_async(
                     request_id,
                     tool=tool,
@@ -1686,7 +1858,7 @@ class ActionLedger:
         ttl = self._lease_ttl if lease_ttl is None else lease_ttl
         if ttl <= 0:
             raise LedgerError("lease_ttl must be positive to renew")
-        entry = replace(existing, lease_until=now + ttl)
+        entry = replace(existing, lease_until=now + ttl, last_heartbeat_at=now)
         self._set_entry(entry)
         return entry
 
@@ -1743,6 +1915,139 @@ class ActionLedger:
             error=error,
             finished_at=time.time(),
             lease_until=None,
+        )
+        self._set_entry(entry)
+        return entry
+
+    def mark_worker_dead(
+        self,
+        owner: str,
+        *,
+        by: str,
+        reason: str,
+        now: float | None = None,
+        override_heartbeat: bool = False,
+    ) -> list[LedgerEntry]:
+        """Assert that all transitions owned by *owner* are from a dead worker.
+
+        Scans ``list_all()`` and stamps ``worker_dead_asserted_by`` /
+        ``worker_dead_asserted_at`` on every entry whose ``owner`` matches and
+        whose resolved outcome is ``IN_FLIGHT`` or ``EXPIRED``.  Entries whose
+        ``last_heartbeat_at`` (falling back to ``started_at``) is within the
+        grace window (``presumed_dead_after``) are **refused** — you cannot
+        declare a currently-heartbeating worker dead.  Pass
+        ``override_heartbeat=True`` to bypass this check when the operator has
+        direct evidence of death (e.g. they killed the pod).  Bypassing may
+        cause a duplicate effect if the worker is still alive.
+
+        This is the channel for orchestrator events (k8s OOM-kill hooks,
+        LangGraph redispatch sweeps) and humans.
+
+        Returns the list of stamped entries (may be empty if no matching entries
+        exist).
+        """
+        if not by:
+            raise LedgerReleaseRefusedError(
+                "mark_worker_dead requires an operator identity ('by')"
+            )
+        if not reason:
+            raise LedgerReleaseRefusedError("mark_worker_dead requires a reason")
+        now = now if now is not None else time.time()
+        stamped: list[LedgerEntry] = []
+        for entry in self._storage.list_all():
+            if entry.owner != owner:
+                continue
+            resolved = entry.resolved_terminal_outcome(now=now)
+            if resolved not in (TerminalOutcome.IN_FLIGHT, TerminalOutcome.EXPIRED):
+                continue
+            # Refuse if the worker appears alive (recent heartbeat).
+            if not override_heartbeat and not has_worker_death_evidence(
+                entry, now=now, presumed_dead_after=self._presumed_dead_after
+            ):
+                grace = _grace_remaining(
+                    entry, now=now, presumed_dead_after=self._presumed_dead_after,
+                )
+                raise LedgerWorkerAliveError(
+                    f"Cannot mark worker dead for owner {owner!r}: request "
+                    f"{entry.request_id!r} has recent heartbeat "
+                    f"({_format_heartbeat_age(entry, now=now)}) — "
+                    f"grace window elapses in {grace}"
+                )
+            stored_reason = (
+                f"{reason} (heartbeat overridden)" if override_heartbeat else reason
+            )
+            dead_entry = replace(
+                entry,
+                worker_dead_asserted_by=by,
+                worker_dead_asserted_at=now,
+                resolution_reason=stored_reason,
+            )
+            self._set_entry(dead_entry)
+            stamped.append(dead_entry)
+        return stamped
+
+    def mark_worker_dead_for(
+        self,
+        request_id: str,
+        *,
+        by: str,
+        reason: str,
+        now: float | None = None,
+        override_heartbeat: bool = False,
+    ) -> LedgerEntry:
+        """Assert that a specific transition's worker is dead.
+
+        Per-entry variant of :meth:`mark_worker_dead`.  Stamps
+        ``worker_dead_asserted_by`` / ``worker_dead_asserted_at`` on the named
+        entry.  Refuses if the entry's ``last_heartbeat_at`` (or
+        ``started_at`` fallback) is within the grace window
+        (``presumed_dead_after``) **unless** ``override_heartbeat=True``.
+
+        When ``override_heartbeat=True``, the liveness check is bypassed and
+        ``" (heartbeat overridden)`` is appended to *reason* in the stored
+        audit trail.  Use this only when the operator has direct evidence the
+        worker is dead (e.g. they killed the pod themselves).  Bypassing the
+        check may cause a duplicate effect if the worker is still alive.
+        """
+        if not by:
+            raise LedgerReleaseRefusedError(
+                "mark_worker_dead_for requires an operator identity ('by')"
+            )
+        if not reason:
+            raise LedgerReleaseRefusedError("mark_worker_dead_for requires a reason")
+        now = now if now is not None else time.time()
+        existing = self._get_entry(request_id)
+        if existing is None:
+            raise LedgerError(f"Cannot mark worker dead for unknown request {request_id!r}")
+        resolved = existing.resolved_terminal_outcome(now=now)
+        if resolved not in (TerminalOutcome.IN_FLIGHT, TerminalOutcome.EXPIRED):
+            raise LedgerReleaseRefusedError(
+                f"Cannot mark worker dead for request {request_id!r}: "
+                f"resolved outcome is {resolved.value}, not IN_FLIGHT or EXPIRED"
+            )
+        if not override_heartbeat and not has_worker_death_evidence(
+            existing, now=now, presumed_dead_after=self._presumed_dead_after
+        ):
+            grace = _grace_remaining(
+                existing, now=now, presumed_dead_after=self._presumed_dead_after,
+            )
+            raise LedgerWorkerAliveError(
+                f"Cannot mark worker dead for request {request_id!r}: "
+                f"worker appears alive "
+                f"({_format_heartbeat_age(entry=existing, now=now)}) — "
+                f"grace window elapses in {grace}. "
+                "Use --override-heartbeat if the operator has direct evidence "
+                "of death (bypasses liveness check; may cause a duplicate "
+                "effect if the worker is alive)."
+            )
+        stored_reason = (
+            f"{reason} (heartbeat overridden)" if override_heartbeat else reason
+        )
+        entry = replace(
+            existing,
+            worker_dead_asserted_by=by,
+            worker_dead_asserted_at=now,
+            resolution_reason=stored_reason,
         )
         self._set_entry(entry)
         return entry
@@ -2071,6 +2376,8 @@ def ledger(
     reconciler: Reconciler | None = None,
     defer_read_only_unknown: bool = False,
     unclassified_policy: str = UNCLASSIFIED_POLICY_WARN,
+    reclaim_requires_death_signal: bool = False,
+    presumed_dead_after: float | None = None,
 ) -> Callable[[Callable[P, Awaitable[R]]], Callable[P, Awaitable[R]]]:
     """Decorator that records async tool invocations in an ActionLedger.
 
@@ -2079,7 +2386,7 @@ def ledger(
     disable; use :func:`renew_lease` for an extra manual bump.
     """
 
-    ledger_kwargs: dict[str, float | None] = {}
+    ledger_kwargs: dict[str, float | bool | None] = {}
     if lease_ttl is not None:
         ledger_kwargs["lease_ttl"] = lease_ttl
     if lease_renew_interval is not None:
@@ -2088,6 +2395,10 @@ def ledger(
         ledger_kwargs["poll_interval"] = poll_interval
     if poll_timeout is not None:
         ledger_kwargs["poll_timeout"] = poll_timeout
+    if reclaim_requires_death_signal:
+        ledger_kwargs["reclaim_requires_death_signal"] = True
+    if presumed_dead_after is not None:
+        ledger_kwargs["presumed_dead_after"] = presumed_dead_after
     action_ledger = ActionLedger(
         storage=storage,
         reconciler=reconciler,
@@ -2130,6 +2441,8 @@ def ledger_sync(
     reconciler: Reconciler | None = None,
     defer_read_only_unknown: bool = False,
     unclassified_policy: str = UNCLASSIFIED_POLICY_WARN,
+    reclaim_requires_death_signal: bool = False,
+    presumed_dead_after: float | None = None,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """Decorator that records sync tool invocations in an ActionLedger.
 
@@ -2138,7 +2451,7 @@ def ledger_sync(
     disable; use :func:`renew_lease` for an extra manual bump.
     """
 
-    ledger_kwargs: dict[str, float | None] = {}
+    ledger_kwargs: dict[str, float | bool | None] = {}
     if lease_ttl is not None:
         ledger_kwargs["lease_ttl"] = lease_ttl
     if lease_renew_interval is not None:
@@ -2147,6 +2460,10 @@ def ledger_sync(
         ledger_kwargs["poll_interval"] = poll_interval
     if poll_timeout is not None:
         ledger_kwargs["poll_timeout"] = poll_timeout
+    if reclaim_requires_death_signal:
+        ledger_kwargs["reclaim_requires_death_signal"] = True
+    if presumed_dead_after is not None:
+        ledger_kwargs["presumed_dead_after"] = presumed_dead_after
     action_ledger = ActionLedger(
         storage=storage,
         reconciler=reconciler,
@@ -2188,6 +2505,7 @@ __all__ = [
     "DEFAULT_LEASE_TTL",
     "DEFAULT_POLL_INTERVAL",
     "DEFAULT_POLL_TIMEOUT",
+    "DEFAULT_PRESUMED_DEAD_AFTER_RATIO",
     "OPERATOR_RESOLUTION_COMPLETED",
     "OPERATOR_RESOLUTION_NOT_EXECUTED",
     "UNCLASSIFIED_POLICY_WARN",
@@ -2203,6 +2521,7 @@ __all__ = [
     "LedgerReleaseRefusedError",
     "LedgerStorage",
     "LedgerStorageUnavailableError",
+    "LedgerWorkerAliveError",
     "MIN_LEASE_RENEW_INTERVAL",
     "TerminalOutcome",
     "get_ledger",

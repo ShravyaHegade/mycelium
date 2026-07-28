@@ -97,7 +97,7 @@ from mycelium.transition_resolution import (
     transition_needs_repair,
 )
 
-__version__ = "1.15.0"
+__version__ = "1.16.0"
 
 __all__ = [
     "ActionLedger",

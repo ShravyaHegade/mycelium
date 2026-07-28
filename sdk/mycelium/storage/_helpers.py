@@ -35,6 +35,8 @@ def with_lease(
     if "lease_until" not in fields:
         return entry
     updates: dict[str, Any] = {"lease_until": lease_until}
+    if "last_heartbeat_at" in fields:
+        updates["last_heartbeat_at"] = now
     if "terminal_outcome" in fields:
         updates["terminal_outcome"] = TerminalOutcome.IN_FLIGHT.value
     if "status" in fields:

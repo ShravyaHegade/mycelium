@@ -258,6 +258,12 @@ def _next_action_hint(entry: Any, resolved: Any) -> str:
             f"{rid} --verified completed|not-executed --by ... --reason ..."
         )
     if resolved == TerminalOutcome.EXPIRED:
+        if entry.worker_dead_asserted_at is None:
+            return (
+                f"worker died mid-flight; if reclaim_requires_death_signal is on, "
+                f"mark dead first: mycelium transitions mark-dead {rid} --by ... --reason ...; "
+                f"otherwise release {rid} --verified completed|not-executed"
+            )
         return (
             f"worker died mid-flight; verify with provider, then release {rid} "
             "--verified completed|not-executed"
@@ -274,6 +280,9 @@ def _entry_row(entry: Any, now: float) -> dict[str, Any]:
     row = entry.to_dict()
     row["resolved_outcome"] = resolved.value
     row["age_seconds"] = max(0.0, now - entry.started_at)
+    row["last_heartbeat_at"] = entry.last_heartbeat_at
+    row["worker_dead_asserted_by"] = entry.worker_dead_asserted_by
+    row["worker_dead_asserted_at"] = entry.worker_dead_asserted_at
     return row
 
 
@@ -339,6 +348,9 @@ def cmd_transitions_show(args: argparse.Namespace) -> int:
     print(f"resolution_reason: {entry.resolution_reason or '-'}")
     print(f"resolved_at: {_format_ts(entry.resolved_at)}")
     print(f"released_from_outcome: {entry.released_from_outcome or '-'}")
+    print(f"last_heartbeat_at: {_format_ts(entry.last_heartbeat_at)}")
+    print(f"worker_dead_asserted_by: {entry.worker_dead_asserted_by or '-'}")
+    print(f"worker_dead_asserted_at: {_format_ts(entry.worker_dead_asserted_at)}")
     return 0
 
 
@@ -392,6 +404,31 @@ def cmd_transitions_release(args: argparse.Namespace) -> int:
         print("next redispatch returns the recorded result without re-executing")
     else:
         print("next agent redispatch re-executes exactly once (release consumed)")
+    return 0
+
+
+def cmd_transitions_mark_dead(args: argparse.Namespace) -> int:
+    from mycelium.config import ConfigError
+
+    try:
+        ledger, _ = _find_operator_entry(args, args.request_id)
+    except ConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    try:
+        entry = ledger.mark_worker_dead_for(
+            args.request_id,
+            by=args.by,
+            reason=args.reason,
+            override_heartbeat=args.override_heartbeat,
+        )
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(
+        f"marked worker dead for {entry.request_id} ({entry.tool}): "
+        f"asserted_by={entry.worker_dead_asserted_by}"
+    )
     return 0
 
 
@@ -513,6 +550,26 @@ def main(argv: list[str] | None = None) -> int:
         "--reason", required=True, help="Why the release is justified"
     )
 
+    mark_dead_parser = transitions_sub.add_parser(
+        "mark-dead",
+        help="Assert a worker is dead so reclaim can proceed",
+    )
+    _add_operator_storage_args(mark_dead_parser)
+    mark_dead_parser.add_argument("request_id")
+    mark_dead_parser.add_argument(
+        "--by", required=True, help="Operator identity (audit stamp)"
+    )
+    mark_dead_parser.add_argument(
+        "--reason", required=True, help="Why the worker is believed dead"
+    )
+    mark_dead_parser.add_argument(
+        "--override-heartbeat",
+        action="store_true",
+        default=False,
+        help="Skip liveness check (use only when operator has direct evidence "
+        "of death — bypass may cause a duplicate effect if worker is alive)",
+    )
+
     args = parser.parse_args(argv)
     if args.command == "init":
         return cmd_init(args.output, full=args.full, minimal=args.minimal, force=args.force)
@@ -527,6 +584,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_transitions_show(args)
         if args.transitions_command == "release":
             return cmd_transitions_release(args)
+        if args.transitions_command == "mark-dead":
+            return cmd_transitions_mark_dead(args)
     return 1
 
 

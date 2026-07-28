@@ -66,6 +66,8 @@ transition:
   # lease_renew_interval: 1200   # default = lease_ttl/3; set 0 to disable auto-renew (v1.14.0)
   poll_interval: 0.05
   poll_timeout: 300
+  # reclaim_requires_death_signal: false  # default; true = require mark-dead before reclaim (v1.16.0)
+  # presumed_dead_after: 7200             # default = 2 × lease_ttl; grace window for heartbeat
   # left = Mycelium field; right = kwarg name your tools receive (change/drop as needed)
   scope_from:
     thread_id: thread_id    # <TODO: conversation/thread kwarg>
