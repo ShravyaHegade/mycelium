@@ -1,0 +1,135 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      setup_branch_protection:
+        description: Configure branch protection on main
+        type: boolean
+        default: false
+        required: false
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.setup_branch_protection != 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      should_release: ${{ steps.check.outputs.should_release }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Read version and check tag
+        id: check
+        run: |
+          VERSION=$(python -c "import tomllib; print(tomllib.load(open('sdk/pyproject.toml','rb'))['project']['version'])")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          git fetch --tags
+          if git tag -l "v$VERSION" | grep -q .; then
+            echo "Tag v$VERSION already exists — nothing to release."
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install SDK
+        if: steps.check.outputs.should_release == 'true'
+        run: pip install -e "./sdk[dev]"
+
+      - name: Run tests
+        if: steps.check.outputs.should_release == 'true'
+        working-directory: sdk
+        run: pytest tests/ -v
+
+      - name: Run lint
+        if: steps.check.outputs.should_release == 'true'
+        working-directory: sdk
+        run: ruff check mycelium tests
+
+      - name: Extract changelog section
+        if: steps.check.outputs.should_release == 'true'
+        run: |
+          python3 .github/scripts/extract-changelog.py \
+            "${{ steps.check.outputs.version }}" > /tmp/release-notes.md
+
+      - name: Create tag and GitHub Release
+        if: steps.check.outputs.should_release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ steps.check.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "v${VERSION}" -m "v${VERSION}" "${{ github.sha }}"
+          git push origin "v${VERSION}"
+
+          if [ -s /tmp/release-notes.md ]; then
+            gh release create "v${VERSION}" \
+              --target "${{ github.sha }}" \
+              --title "v${VERSION}" \
+              --notes-file /tmp/release-notes.md
+          else
+            gh release create "v${VERSION}" \
+              --target "${{ github.sha }}" \
+              --title "v${VERSION}" \
+              --generate-notes
+          fi
+
+  publish:
+    needs: release
+    if: needs.release.outputs.should_release == 'true'
+    uses: ./.github/workflows/publish.yml
+    secrets: inherit
+    permissions:
+      contents: read
+      id-token: write
+
+  configure-branch-protection:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.setup_branch_protection == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      administration: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enable branch protection on main
+        run: |
+          gh api "repos/${{ github.repository }}/branches/main/protection" \
+            --method PUT \
+            --field required_status_checks='{"strict":true,"contexts":["test (3.10)", "test (3.11)", "test (3.12)", "test (3.13)"]}' \
+            --field enforce_admins=true \
+            --field required_pull_request_reviews='{"required_approving_review_count":1}' \
+            --field restrictions=null \
+          || {
+            echo "::error::Failed to configure branch protection automatically."
+            echo "::error::"
+            echo "::error::Configure manually in GitHub UI:"
+            echo "::error::  Settings → Branches → Add branch protection rule (main)"
+            echo "::error::  □ Require a pull request before merging"
+            echo "::error::    □ Require approvals (1)"
+            echo "::error::  □ Require status checks to pass before merging"
+            echo "::error::    □ Require branches to be up to date"
+            echo "::error::    Status checks that are required:"
+            echo "::error::      - test (3.10)"
+            echo "::error::      - test (3.11)"
+            echo "::error::      - test (3.12)"
+            echo "::error::      - test (3.13)"
+            echo "::error::  □ Include administrators"
+            echo "::error::  □ Allow force pushes: false"
+            exit 1
+          }
