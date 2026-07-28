@@ -130,6 +130,21 @@ Multi-worker / cloud ledgers: `pip install 'mycelium-runtime[redis]'` or
 - **Full API reference:** [sdk/README.md](sdk/README.md)
 - **PyPI:** https://pypi.org/project/mycelium-runtime/
 
+## Release process
+
+1. Create a feature branch, make changes, open a PR to `main`.
+2. CI (pytest + ruff on Python 3.10–3.13) must pass.
+3. To release, bump the version in `sdk/pyproject.toml` and add a `## X.Y.Z (date)` section to `CHANGELOG.md` in the **same PR**.
+4. Merge the PR. On push to `main`, automation:
+   - Reads the version from `sdk/pyproject.toml`.
+   - Checks whether tag `v{version}` already exists — if it does, exits quietly (doc-only or non-version merges release nothing).
+   - Runs the SDK tests and ruff (Python 3.12) as a safety gate before tagging.
+   - Creates an annotated tag `v{version}` on the merge commit.
+   - Creates a GitHub Release with notes extracted from the matching `CHANGELOG.md` section (falls back to auto-generated notes if extraction finds nothing).
+   - Calls the [publish](.github/workflows/publish.yml) workflow to build and upload to PyPI (trusted publishing).
+
+**Manual escape hatch:** pushing a `v*` tag or triggering `workflow_dispatch` on the publish workflow still works — the existing manual path is unchanged.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
