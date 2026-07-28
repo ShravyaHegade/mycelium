@@ -132,6 +132,12 @@ Multi-worker / cloud ledgers: `pip install 'mycelium-runtime[redis]'` or
 
 ## Release process
 
+### One-time setup
+
+Create a GitHub Personal Access Token with `contents: write` scope on this repo and add it as a repository secret named `RELEASE_PAT` at **Settings → Secrets and variables → Actions**. This is required because the tag push uses the PAT (instead of `GITHUB_TOKEN`) so that `publish.yml`'s `on: push: tags: v*` trigger fires — `GITHUB_TOKEN`-pushed tags cannot trigger other workflows.
+
+### Per-release steps
+
 1. Create a feature branch, make changes, open a PR to `main`.
 2. CI (pytest + ruff on Python 3.10–3.13) must pass.
 3. To release, bump the version in `sdk/pyproject.toml` and add a `## X.Y.Z (date)` section to `CHANGELOG.md` in the **same PR**.
@@ -139,11 +145,11 @@ Multi-worker / cloud ledgers: `pip install 'mycelium-runtime[redis]'` or
    - Reads the version from `sdk/pyproject.toml`.
    - Checks whether tag `v{version}` already exists — if it does, exits quietly (doc-only or non-version merges release nothing).
    - Runs the SDK tests and ruff (Python 3.12) as a safety gate before tagging.
-   - Creates an annotated tag `v{version}` on the merge commit.
+   - Creates an annotated tag `v{version}` and pushes it (via PAT so the tag-push triggers the publish workflow).
    - Creates a GitHub Release with notes extracted from the matching `CHANGELOG.md` section (falls back to auto-generated notes if extraction finds nothing).
-   - Calls the [publish](.github/workflows/publish.yml) workflow to build and upload to PyPI (trusted publishing).
+   - The tag push triggers [publish.yml](.github/workflows/publish.yml) (`on: push: tags: v*`) which builds and uploads to PyPI via trusted publishing.
 
-**Manual escape hatch:** pushing a `v*` tag or triggering `workflow_dispatch` on the publish workflow still works — the existing manual path is unchanged.
+**Manual escape hatch:** pushing a `v*` tag or triggering `workflow_dispatch` on the publish workflow still works — the existing manual path is unchanged. If the automation fails, publish manually by running `git push origin v{version}` locally after merging.
 
 ## License
 
