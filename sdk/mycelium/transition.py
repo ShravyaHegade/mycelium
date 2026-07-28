@@ -680,4 +680,5 @@ __all__ = [
     "allows_failed_before_retry",
     "is_strict_side_effect",
     "terminal_from_legacy_status",
+    "has_worker_death_evidence",
 ]

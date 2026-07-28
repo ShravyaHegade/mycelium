@@ -18,6 +18,7 @@ from mycelium.action_ledger import (
     LedgerSoftBlockError,
     LedgerStorage,
     LedgerStorageUnavailableError,
+    LedgerWorkerAliveError,
     get_ledger,
     ledger,
     ledger_sync,
@@ -89,6 +90,7 @@ from mycelium.transition import (
     derive_transition_key,
     derive_transition_key_for_call,
     execution_scope,
+    has_worker_death_evidence,
     resolve_lease_validity,
 )
 from mycelium.transition_resolution import (
@@ -107,6 +109,7 @@ __all__ = [
     "LedgerEntry",
     "LedgerError",
     "LedgerHardBlockError",
+    "LedgerWorkerAliveError",
     "LedgerPendingError",
     "LedgerPollTimeoutError",
     "LedgerReleaseRefusedError",
@@ -164,6 +167,7 @@ __all__ = [
     "derive_transition_key_for_call",
     "execution_scope",
     "resolve_lease_validity",
+    "has_worker_death_evidence",
     "repair_transition_fields",
     "transition_needs_repair",
     "load_config",
