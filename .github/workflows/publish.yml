@@ -1,7 +1,6 @@
 name: Publish
 
 on:
-  workflow_call:
   push:
     tags:
       - "v*"
