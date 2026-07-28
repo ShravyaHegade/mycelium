@@ -102,34 +102,20 @@ jobs:
   configure-branch-protection:
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.setup_branch_protection == 'true'
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      administration: write
     steps:
-      - uses: actions/checkout@v4
-      - name: Enable branch protection on main
+      - name: Print branch protection setup instructions
         run: |
-          gh api "repos/${{ github.repository }}/branches/main/protection" \
-            --method PUT \
-            --field required_status_checks='{"strict":true,"contexts":["test (3.10)", "test (3.11)", "test (3.12)", "test (3.13)"]}' \
-            --field enforce_admins=true \
-            --field required_pull_request_reviews='{"required_approving_review_count":1}' \
-            --field restrictions=null \
-          || {
-            echo "::error::Failed to configure branch protection automatically."
-            echo "::error::"
-            echo "::error::Configure manually in GitHub UI:"
-            echo "::error::  Settings → Branches → Add branch protection rule (main)"
-            echo "::error::  □ Require a pull request before merging"
-            echo "::error::    □ Require approvals (1)"
-            echo "::error::  □ Require status checks to pass before merging"
-            echo "::error::    □ Require branches to be up to date"
-            echo "::error::    Status checks that are required:"
-            echo "::error::      - test (3.10)"
-            echo "::error::      - test (3.11)"
-            echo "::error::      - test (3.12)"
-            echo "::error::      - test (3.13)"
-            echo "::error::  □ Include administrators"
-            echo "::error::  □ Allow force pushes: false"
-            exit 1
-          }
+          echo "::notice::GITHUB_TOKEN cannot configure branch protection (needs admin PAT)."
+          echo "::notice::"
+          echo "::notice::Configure manually in GitHub UI:"
+          echo "::notice::  Settings → Branches → Add branch protection rule (main)"
+          echo "::notice::  □ Require a pull request before merging"
+          echo "::notice::    □ Require approvals (0) — solo maintainer: CI approval is enough"
+          echo "::notice::  □ Require status checks to pass before merging"
+          echo "::notice::    □ Require branches to be up to date"
+          echo "::notice::    Status checks that are required:"
+          echo "::notice::      - test (3.10)"
+          echo "::notice::      - test (3.11)"
+          echo "::notice::      - test (3.12)"
+          echo "::notice::      - test (3.13)"
+          echo "::notice::  □ Do NOT include administrators (keep your merge escape hatch)"
