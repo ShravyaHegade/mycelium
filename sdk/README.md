@@ -308,7 +308,8 @@ async def send_payment(amount: float, recipient: str) -> dict:
 ## What `@ledger` / `ledger_sync` do
 
 - Record every tool invocation in a durable `ActionLedger`
-- Deduplicate retries and redispatches via a rich **transition key** (scope + tool + args + `side_effect_class` + policy), not only `tool_call_id`
+- Deduplicate retries and redispatches via a rich **transition key** (scope + tool + args + `side_effect_class` + policy), not only `tool_call_id`  
+  Same caller `request_id` with different args → **different** transition key (by design — `request_id` alone is not an identity-conflict guard; see `test_mengchheang_public_repro.py::test_semantic_identity`).
 - Resolve redispatches through **gates** (see [Resolution gates](#resolution-gates)) instead of re-running blindly
 - Persist failed attempts with **terminal outcomes** (`FAILED_BEFORE_EFFECT`, `FAILED_AFTER_EFFECT`, `UNKNOWN`, `EXPIRED`, etc.) for audit and reconciliation
 

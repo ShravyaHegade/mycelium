@@ -18,6 +18,20 @@ Minor: worker-death / stream-loss signal — reclaim requires affirmative death 
 
 ## Unreleased
 
+### Regression tests from Mengchheang's public repro
+
+- Ported the three probes from `notes/design-partners/mycelium_1_16_0_public_repro.py`
+  into `tests/test_mengchheang_public_repro.py`:
+  1. **Semantic identity** — same caller `request_id` + changed args produces
+     a different transition key (intentional; documented).
+  2. **Concurrent NOT_EXECUTED reconcile** — BarrierReconciler forces both
+     threads to return NOT_EXECUTED simultaneously; CAS loser polls winner.
+  3. **Concurrent expired Redis reclaim** — BarrierClient forces both readers
+     to see the same stale value; `_try_reclaim` (WATCH/MULTI) gives at most
+     one `"claimed"`.
+- Pre-1.18.1 bug baselines preserved in module docstring.
+- Identity-conflict note added to `sdk/README.md` transition-key docs.
+
 ### NOT\_EXECUTED CAS-loss path polls instead of hard-blocking
 
 - `_apply_reconcile_result` CAS loss on NOT\_EXECUTED: re-reads the entry
