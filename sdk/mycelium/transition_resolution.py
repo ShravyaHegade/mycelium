@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any, Protocol
 
 from mycelium._compat import StrEnum
 from mycelium.transition import (
+    ProviderKeyValidity,
     RetryPermission,
     SideEffectBoundary,
     SideEffectClass,
@@ -15,6 +17,7 @@ from mycelium.transition import (
     blocks_on_ambiguous_replay,
     legacy_status_from_terminal,
     parse_terminal_outcome,
+    provider_key_validity,
     terminal_from_legacy_status,
 )
 
@@ -22,6 +25,7 @@ from mycelium.transition import (
 class _ExistingTransition(Protocol):
     side_effect_boundary: str
     provider_idempotency_key: str | None
+    provider_key_first_attempt_at: float | None
 
     def resolved_terminal_outcome(self, *, now: float | None = None) -> TerminalOutcome: ...
 
@@ -185,6 +189,7 @@ def resolve_side_effect_gate(
     binding: ToolTransitionBinding,
     *,
     incoming_provider_idempotency_key: str | None = None,
+    now: float | None = None,
 ) -> TransitionGate:
     """Decide how to handle an existing transition for a side-effecting tool.
 
@@ -203,6 +208,11 @@ def resolve_side_effect_gate(
     via ``binding.provider_idempotency_key_param``; otherwise the
     ``retry_only_with_same_provider_idempotency_key`` permission stays
     cooperative (backward compatible).
+
+    When the tool declares ``provider_idempotency_key_ttl`` and the key has
+    expired since the first attempt, the gate returns ``HARD_BLOCK`` even for
+    same-key retries: the provider may have purged its deduplication state,
+    making the "safe" retry a double-charge risk.
     """
     if transition_needs_repair(existing):
         return TransitionGate.REPAIR
@@ -266,6 +276,11 @@ def resolve_side_effect_gate(
                         existing, incoming_provider_idempotency_key
                     ):
                         return TransitionGate.HARD_BLOCK
+                    if (
+                        provider_key_validity(existing, binding, now=now)
+                        == ProviderKeyValidity.EXPIRED
+                    ):
+                        return TransitionGate.HARD_BLOCK
                 return TransitionGate.ALLOW
             return TransitionGate.HARD_BLOCK
         if retry == RetryPermission.SAFE_RETRY:
@@ -279,6 +294,8 @@ def hard_block_message(
     *,
     tool: str,
     request_id: str,
+    binding: ToolTransitionBinding | None = None,
+    now: float | None = None,
 ) -> str:
     outcome = existing.resolved_terminal_outcome()
     boundary = _entry_boundary(existing)
@@ -290,9 +307,27 @@ def hard_block_message(
     if outcome == TerminalOutcome.EXPIRED:
         lease_until = getattr(existing, "lease_until", None)
         lease_hint = f", lease_until={lease_until!r}"
+    key_expiry_hint = ""
+    if binding is not None and binding.provider_idempotency_key_ttl is not None:
+        if (
+            provider_key_validity(existing, binding, now=now)
+            == ProviderKeyValidity.EXPIRED
+        ):
+            first = getattr(existing, "provider_key_first_attempt_at", None) or getattr(
+                existing, "started_at", None
+            )
+            age_hint = ""
+            if first is not None:
+                elapsed = (now if now is not None else time.time()) - first
+                age_hint = f", age={elapsed:.1f}s"
+            key_expiry_hint = (
+                f", provider_idempotency_key_ttl="
+                f"{binding.provider_idempotency_key_ttl!r}{age_hint}"
+            )
     return (
         f"Side-effecting tool {tool!r} request {request_id!r} is "
-        f"{outcome.value} with boundary {boundary.value}{lease_hint}{ref_hint}; "
+        f"{outcome.value} with boundary {boundary.value}"
+        f"{lease_hint}{key_expiry_hint}{ref_hint}; "
         "manual reconciliation required"
     )
 

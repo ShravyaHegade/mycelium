@@ -435,6 +435,7 @@ class LedgerEntry:
     side_effect_boundary: str = SideEffectBoundary.NOT_CROSSED.value
     external_operation_ref: str | None = None
     provider_idempotency_key: str | None = None
+    provider_key_first_attempt_at: float | None = None
     # Operator release (manual reconciliation) audit fields. Set once by
     # ActionLedger.release(); "not_executed" is consumed by the next claim.
     # Worker-death signal fields. ``last_heartbeat_at`` is set on claim and
@@ -501,6 +502,7 @@ class LedgerEntry:
             "side_effect_boundary": self.side_effect_boundary,
             "external_operation_ref": self.external_operation_ref,
             "provider_idempotency_key": self.provider_idempotency_key,
+            "provider_key_first_attempt_at": self.provider_key_first_attempt_at,
             "last_heartbeat_at": self.last_heartbeat_at,
             "worker_dead_asserted_by": self.worker_dead_asserted_by,
             "worker_dead_asserted_at": self.worker_dead_asserted_at,
@@ -548,6 +550,7 @@ class LedgerEntry:
             ),
             external_operation_ref=data.get("external_operation_ref"),
             provider_idempotency_key=data.get("provider_idempotency_key"),
+            provider_key_first_attempt_at=data.get("provider_key_first_attempt_at"),
             last_heartbeat_at=data.get("last_heartbeat_at"),
             worker_dead_asserted_by=data.get("worker_dead_asserted_by"),
             worker_dead_asserted_at=data.get("worker_dead_asserted_at"),
@@ -963,6 +966,7 @@ class ActionLedger:
         kwargs: dict[str, Any],
         *,
         binding: ToolTransitionBinding | None = None,
+        _provider_key_first_attempt_at: float | None = None,
     ) -> LedgerEntry:
         bound = _bind_args(args, kwargs)
         boundary = (
@@ -975,6 +979,10 @@ class ActionLedger:
             if binding is not None
             else None
         )
+        if provider_key is not None and _provider_key_first_attempt_at is None:
+            pkey_first_attempt: float | None = time.time()
+        else:
+            pkey_first_attempt = _provider_key_first_attempt_at
         return LedgerEntry(
             request_id=request_id,
             tool=tool,
@@ -986,6 +994,7 @@ class ActionLedger:
             idempotency_key=request_id,
             side_effect_boundary=boundary,
             provider_idempotency_key=provider_key,
+            provider_key_first_attempt_at=pkey_first_attempt,
         )
 
     def claim(
@@ -1250,6 +1259,9 @@ class ActionLedger:
         request_id: str,
         tool: str,
         existing: LedgerEntry,
+        *,
+        binding: ToolTransitionBinding | None = None,
+        now: float | None = None,
     ) -> None:
         outcome = existing.resolved_terminal_outcome()
         if outcome == TerminalOutcome.EXPIRED:
@@ -1266,7 +1278,9 @@ class ActionLedger:
                     f"{boundary.value} — effect may have happened"
                 )
             existing = self.mark_blocked(request_id, error=error)
-        message = hard_block_message(existing, tool=tool, request_id=request_id)
+        message = hard_block_message(
+            existing, tool=tool, request_id=request_id, binding=binding, now=now
+        )
         raise LedgerHardBlockError(message)
 
     def _apply_reconcile_result(
@@ -1277,6 +1291,7 @@ class ActionLedger:
         kwargs: dict[str, Any],
         binding: ToolTransitionBinding,
         result: Any,
+        _preserved_pkey_first_attempt: float | None = None,
     ) -> LedgerEntry | None:
         """Map a reconcile result onto the ledger.
 
@@ -1288,8 +1303,19 @@ class ActionLedger:
         if result.status == ReconcileStatus.COMPLETED:
             return self.complete(request_id, result.result)
         if result.status == ReconcileStatus.NOT_EXECUTED:
+            if _preserved_pkey_first_attempt is None:
+                old = self.get(request_id)
+                if old is not None and old.provider_idempotency_key is not None:
+                    _preserved_pkey_first_attempt = (
+                        old.provider_key_first_attempt_at
+                    )
             fresh = self._new_inflight_entry(
-                request_id, tool, args, kwargs, binding=binding
+                request_id,
+                tool,
+                args,
+                kwargs,
+                binding=binding,
+                _provider_key_first_attempt_at=_preserved_pkey_first_attempt,
             )
             self._set_entry(fresh)
             return fresh
@@ -1368,6 +1394,11 @@ class ActionLedger:
         """
         if existing.operator_resolution != OPERATOR_RESOLUTION_NOT_EXECUTED:
             return None
+        _preserved = (
+            existing.provider_key_first_attempt_at
+            if existing.provider_idempotency_key is not None
+            else None
+        )
         fresh = self._apply_reconcile_result(
             request_id,
             tool,
@@ -1375,6 +1406,7 @@ class ActionLedger:
             kwargs,
             binding,
             ReconcileResult.not_executed(),
+            _preserved_pkey_first_attempt=_preserved,
         )
         if fresh is None:
             return None
@@ -1407,7 +1439,7 @@ class ActionLedger:
         )
         if resolved is not None:
             return resolved
-        self._raise_hard_block(request_id, tool, existing)
+        self._raise_hard_block(request_id, tool, existing, binding=binding)
         raise AssertionError("unreachable")  # _raise_hard_block always raises
 
     async def _reconcile_or_hard_block_async(
@@ -1429,7 +1461,7 @@ class ActionLedger:
         )
         if resolved is not None:
             return resolved
-        self._raise_hard_block(request_id, tool, existing)
+        self._raise_hard_block(request_id, tool, existing, binding=binding)
         raise AssertionError("unreachable")  # _raise_hard_block always raises
 
     def claim_side_effecting(
@@ -1491,8 +1523,19 @@ class ActionLedger:
                         )
                         continue
 
+            _old_pkey_attempt = (
+                existing.provider_key_first_attempt_at
+                if existing is not None
+                and existing.provider_idempotency_key is not None
+                else None
+            )
             entry = self._new_inflight_entry(
-                request_id, tool, args, kwargs, binding=binding
+                request_id,
+                tool,
+                args,
+                kwargs,
+                binding=binding,
+                _provider_key_first_attempt_at=_old_pkey_attempt,
             )
             outcome, existing = self._try_claim_inflight(entry, lease_ttl=ttl)
             if outcome == "completed" and existing is not None:
@@ -1649,8 +1692,19 @@ class ActionLedger:
                         )
                         continue
 
+            _old_pkey_attempt = (
+                existing.provider_key_first_attempt_at
+                if existing is not None
+                and existing.provider_idempotency_key is not None
+                else None
+            )
             entry = self._new_inflight_entry(
-                request_id, tool, args, kwargs, binding=binding
+                request_id,
+                tool,
+                args,
+                kwargs,
+                binding=binding,
+                _provider_key_first_attempt_at=_old_pkey_attempt,
             )
             outcome, existing = self._try_claim_inflight(entry, lease_ttl=ttl)
             if outcome == "completed" and existing is not None:

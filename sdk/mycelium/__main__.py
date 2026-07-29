@@ -339,6 +339,12 @@ def cmd_transitions_show(args: argparse.Namespace) -> int:
     print(f"owner: {entry.owner or '-'}")
     print(f"idempotency_key: {entry.idempotency_key}")
     print(f"provider_idempotency_key: {entry.provider_idempotency_key or '-'}")
+    pkey_first = entry.provider_key_first_attempt_at
+    if pkey_first is not None:
+        pkey_age = time.time() - pkey_first
+        print(f"provider_key_first_attempt_at: {_format_ts(pkey_first)} (age={pkey_age:.1f}s)")
+    else:
+        print("provider_key_first_attempt_at: -")
     print(f"external_operation_ref: {entry.external_operation_ref or '-'}")
     print(f"error: {entry.error or '-'}")
     print(f"result: {json.dumps(entry.result, default=str)}")
