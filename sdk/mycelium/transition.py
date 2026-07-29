@@ -78,6 +78,52 @@ class LeaseValidity(StrEnum):
     UNBOUNDED = "UNBOUNDED"
 
 
+class ProviderKeyValidity(StrEnum):
+    """Whether a provider idempotency key is still within its validity window.
+
+    When a tool declares ``provider_idempotency_key_ttl``, the first attempt's
+    timestamp is recorded on the ledger entry.  On a subsequent same-key retry
+    the gate checks whether the window has expired — if so the provider may
+    have purged the key, making the retry unsafe.
+
+    ``UNTRACKED`` means the tool has no TTL configured (existing behaviour
+    unchanged).
+    """
+
+    VALID = "VALID"
+    EXPIRED = "EXPIRED"
+    UNTRACKED = "UNTRACKED"
+
+
+def provider_key_validity(
+    entry: Any,
+    binding: ToolTransitionBinding,
+    *,
+    now: float | None = None,
+) -> ProviderKeyValidity:
+    """Classify whether a provider idempotency key's validity window has elapsed.
+
+    Returns ``UNTRACKED`` when the binding has no ``provider_idempotency_key_ttl``
+    (the existing idempotency-key retry behaviour is unchanged).  ``VALID`` when
+    the elapsed time since the first attempt is still within the declared window.
+    ``EXPIRED`` when the window has passed — the provider may have purged its
+    deduplication state so the ``FAILED_BEFORE_EFFECT`` retry should be hardened
+    to a ``HARD_BLOCK``.
+    """
+    ttl = binding.provider_idempotency_key_ttl
+    if ttl is None:
+        return ProviderKeyValidity.UNTRACKED
+    first = getattr(entry, "provider_key_first_attempt_at", None)
+    if first is None:
+        first = getattr(entry, "started_at", None)
+    if first is None:
+        return ProviderKeyValidity.UNTRACKED
+    now = now if now is not None else time.time()
+    if (now - first) >= ttl:
+        return ProviderKeyValidity.EXPIRED
+    return ProviderKeyValidity.VALID
+
+
 def resolve_lease_validity(
     lease_until: float | None,
     *,
@@ -381,6 +427,7 @@ class ToolTransitionBinding:
     side_effect_boundary_default: SideEffectBoundary = SideEffectBoundary.NOT_CROSSED
     spendability: Spendability = Spendability.SINGLE_USE
     provider_idempotency_key_param: str | None = None
+    provider_idempotency_key_ttl: float | None = None
 
     @classmethod
     def for_tool(
@@ -394,6 +441,7 @@ class ToolTransitionBinding:
         side_effect_boundary: SideEffectBoundary | None = None,
         spendability: Spendability | None = None,
         provider_idempotency_key_param: str | None = None,
+        provider_idempotency_key_ttl: float | None = None,
     ) -> ToolTransitionBinding:
         return cls(
             agent_id=agent_id,
@@ -408,6 +456,7 @@ class ToolTransitionBinding:
             ),
             spendability=resolve_spendability(side_effect_class, spendability),
             provider_idempotency_key_param=provider_idempotency_key_param,
+            provider_idempotency_key_ttl=provider_idempotency_key_ttl,
         )
 
 
@@ -650,6 +699,7 @@ __all__ = [
     "STRICT_SIDE_EFFECT_CLASSES",
     "TerminalOutcome",
     "LeaseValidity",
+    "ProviderKeyValidity",
     "ToolTransitionBinding",
     "TransitionConfig",
     "TransitionScope",
@@ -672,6 +722,7 @@ __all__ = [
     "parse_spendability",
     "parse_terminal_outcome",
     "resolve_lease_validity",
+    "provider_key_validity",
     "resolve_retry_permission",
     "resolve_spendability",
     "resolve_side_effect_boundary_default",

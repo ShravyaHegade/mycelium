@@ -170,6 +170,7 @@ class ToolConfig:
     side_effect_boundary: SideEffectBoundary | None = None
     spendability: Spendability | None = None
     provider_idempotency_key_param: str | None = None
+    provider_idempotency_key_ttl: float | None = None
     callable_path: str | None = None
 
     def is_noop(self) -> bool:
@@ -512,6 +513,9 @@ class MyceliumConfig:
             provider_idempotency_key_param=(
                 tool_config.provider_idempotency_key_param
             ),
+            provider_idempotency_key_ttl=(
+                tool_config.provider_idempotency_key_ttl
+            ),
         )
 
     def _ledger_timing_kwargs(self) -> dict[str, float | bool]:
@@ -830,6 +834,15 @@ def _parse_tool_config(
             )
         provider_idempotency_key_param = value
 
+    provider_idempotency_key_ttl: float | None = None
+    if "provider_idempotency_key_ttl" in raw:
+        value = raw["provider_idempotency_key_ttl"]
+        if not isinstance(value, (int, float)) or value <= 0:
+            raise ConfigError(
+                f"tool '{name}': provider_idempotency_key_ttl must be a positive number"
+            )
+        provider_idempotency_key_ttl = float(value)
+
     callable_path = _parse_callable_path(
         raw.get("callable"),
         kind="tool",
@@ -847,6 +860,7 @@ def _parse_tool_config(
         side_effect_boundary=side_effect_boundary,
         spendability=spendability,
         provider_idempotency_key_param=provider_idempotency_key_param,
+        provider_idempotency_key_ttl=provider_idempotency_key_ttl,
         callable_path=callable_path,
     )
 
@@ -945,6 +959,7 @@ def _apply_action_ledger_tools(
             side_effect_boundary=existing.side_effect_boundary,
             spendability=existing.spendability,
             provider_idempotency_key_param=existing.provider_idempotency_key_param,
+            provider_idempotency_key_ttl=existing.provider_idempotency_key_ttl,
             callable_path=existing.callable_path,
         )
 

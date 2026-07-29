@@ -48,6 +48,19 @@ Minor: atomicity contract for one-shot terminal outcomes — stale workers must 
 
 - 126-parametrized test suite in `tests/test_atomicity_contract.py`: transition matrix (6 outcomes × 5 mutators × 3 backends), release/reconcile resolution paths, stalled-worker E2E (complete and fail), owner fencing, two-thread race (same outcome and interleaved).
 
+## 1.17.0 (2026-07-28)
+
+Minor: provider idempotency-key validity window — expired keys hard-block instead of allowing safe retry.
+
+- New `ProviderKeyValidity` enum (`VALID` / `EXPIRED` / `UNTRACKED`) and `provider_key_validity()` pure helper in `mycelium.transition`, styled after `resolve_lease_validity`.
+- New `provider_idempotency_key_ttl` field (seconds, per-tool) on `ToolTransitionBinding` and YAML `tools.<name>.provider_idempotency_key_ttl`. When set, the gate checks whether the elapsed time since the first attempt exceeds the declared window. If so, a same-key `FAILED_BEFORE_EFFECT` retry is hardened to `HARD_BLOCK` (the provider may have purged its deduplication state). Omit for today's unchanged behaviour.
+- New `provider_key_first_attempt_at` field on `LedgerEntry` (serialized; pre-upgrade entries fall back to `started_at`). Set at first-claim time; carried forward across reclaim, Reconciler `NOT_EXECUTED` reset, and operator-release consumption.
+- `resolve_side_effect_gate()` new optional `now` parameter. The `RETRY_ONLY_WITH_SAME_PROVIDER_IDEMPOTENCY_KEY` + same-key branch now additionally calls `provider_key_validity()` and returns `HARD_BLOCK` when the key has expired.
+- `hard_block_message()` new optional `binding` and `now` parameters; when the binding has an expired TTL, the message includes the TTL and key age.
+- `ToolTransitionBinding.for_tool()` new `provider_idempotency_key_ttl` parameter.
+- `mycelium transitions show` prints `provider_key_first_attempt_at` and its age.
+- 21 tests in `tests/test_provider_key_validity.py` covering the helper function, gate behaviour, serialisation round-trip, config wiring, and end-to-end expired-key hard-block.
+
 ## 1.16.1 (2026-07-28)
 
 ### CI / release automation

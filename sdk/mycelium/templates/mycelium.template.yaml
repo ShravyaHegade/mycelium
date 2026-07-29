@@ -36,6 +36,10 @@
 #   reuses the same key, else HARD_BLOCK. Omit to keep the cooperative default.
 #   e.g.  your_keyed_mutate_tool: {side_effect_class: keyed_mutate,
 #                                  provider_idempotency_key_param: idempotency_key}
+# provider_idempotency_key_ttl (optional, per tool; seconds): validity window
+#   for the provider idempotency key. On a same-key retry, if the elapsed time
+#   since the first attempt exceeds this TTL, the gate HARD_BLOCKs (provider
+#   may have purged its deduplication state). Omit to keep today's behaviour.
 # In tool code, wrap the external call in `with side_effect():` so a failure
 #   after the call is classified FAILED_AFTER_EFFECT / UNKNOWN (not retried),
 #   not FAILED_BEFORE_EFFECT. Inside it call
