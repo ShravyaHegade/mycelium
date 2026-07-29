@@ -15,6 +15,10 @@ See ``sdk/README.md`` § "Atomicity contract" for the full design.
 from __future__ import annotations
 
 import threading
+import time
+import uuid
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -24,7 +28,9 @@ from mycelium import (
     InMemoryLedgerStorage,
     LedgerEntry,
     LedgerOutcomeAlreadySetError,
+    ReconcileResult,
     RedisLedgerStorage,
+    SideEffectBoundary,
     SideEffectClass,
     TerminalOutcome,
     ToolTransitionBinding,
@@ -441,6 +447,306 @@ def test_wrapper_owner_fencing_prevents_stale_overwrite(ledger: ActionLedger) ->
         ledger.complete(request_id2, {"ok": True}, _expected_owner="bob")
     stored2 = ledger.get(request_id2)
     assert stored2.terminal_outcome == TerminalOutcome.IN_FLIGHT.value
+
+
+# ---------------------------------------------------------------------------
+# Reclaim race: two threads must not both get "claimed" from try_claim_inflight
+# ---------------------------------------------------------------------------
+
+
+def test_concurrent_reclaim_race_inmemory() -> None:
+    """In-memory reclaim race: at most one thread gets ``claimed``."""
+    storage = InMemoryLedgerStorage()
+    request_id = "race-reclaim-mem"
+    now = time.time()
+
+    expired = LedgerEntry(
+        request_id=request_id,
+        tool="t",
+        args=(),
+        kwargs={},
+        status="in-flight",
+        terminal_outcome=TerminalOutcome.IN_FLIGHT.value,
+        lease_until=now - 10,
+        idempotency_key=request_id,
+    )
+    storage.set(expired)
+
+    fresh = LedgerEntry(
+        request_id=request_id,
+        tool="t",
+        args=(),
+        kwargs={},
+        status="in-flight",
+        terminal_outcome=TerminalOutcome.IN_FLIGHT.value,
+        lease_until=now + 3600,
+        idempotency_key=request_id,
+    )
+
+    results: list[tuple[str, LedgerEntry | None]] = []
+    barrier = threading.Barrier(2, timeout=5)
+
+    def _racer() -> None:
+        barrier.wait()
+        outcome, existing = storage.try_claim_inflight(fresh, lease_ttl=3600.0)
+        results.append((outcome, existing))
+
+    t1 = threading.Thread(target=_racer, daemon=True)
+    t2 = threading.Thread(target=_racer, daemon=True)
+    t1.start()
+    t2.start()
+    t1.join(timeout=10)
+    t2.join(timeout=10)
+
+    outcomes = [r[0] for r in results]
+    claimed = [o for o in outcomes if o == "claimed"]
+    assert len(claimed) == 1, (
+        f"expected exactly one 'claimed', got {len(claimed)}: {results}"
+    )
+
+
+def test_concurrent_reclaim_race_redis(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Redis reclaim race: at most one thread gets ``claimed``."""
+    fakeredis = pytest.importorskip("fakeredis")
+    fake = fakeredis.FakeRedis(decode_responses=True)
+
+    def from_url(url: str, **kwargs: object) -> object:
+        return fake
+
+    import redis as redis_mod
+
+    monkeypatch.setattr(redis_mod.Redis, "from_url", from_url)
+
+    storage = RedisLedgerStorage("redis://test")
+    request_id = "race-reclaim-redis"
+    now = time.time()
+
+    expired = LedgerEntry(
+        request_id=request_id,
+        tool="t",
+        args=(),
+        kwargs={},
+        status="in-flight",
+        terminal_outcome=TerminalOutcome.IN_FLIGHT.value,
+        lease_until=now - 10,
+        idempotency_key=request_id,
+    )
+    storage.set(expired)
+
+    fresh = LedgerEntry(
+        request_id=request_id,
+        tool="t",
+        args=(),
+        kwargs={},
+        status="in-flight",
+        terminal_outcome=TerminalOutcome.IN_FLIGHT.value,
+        lease_until=now + 3600,
+        idempotency_key=request_id,
+    )
+
+    results: list[tuple[str, LedgerEntry | None]] = []
+    barrier = threading.Barrier(2, timeout=5)
+
+    def _racer() -> None:
+        barrier.wait()
+        outcome, existing = storage.try_claim_inflight(fresh, lease_ttl=3600.0)
+        results.append((outcome, existing))
+
+    t1 = threading.Thread(target=_racer, daemon=True)
+    t2 = threading.Thread(target=_racer, daemon=True)
+    t1.start()
+    t2.start()
+    t1.join(timeout=10)
+    t2.join(timeout=10)
+
+    outcomes = [r[0] for r in results]
+    claimed = [o for o in outcomes if o == "claimed"]
+    assert len(claimed) == 1, (
+        f"expected exactly one 'claimed', got {len(claimed)}: {results}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Reconcile NOT_EXECUTED race: CAS loser polls/returns instead of hard-block
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("backend", ["memory", "file", "redis"])
+def test_concurrent_reconcile_not_executed_race(
+    backend: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two threads racing on reconcile NOT_EXECUTED: the CAS loser re-reads
+    and returns the winner's entry instead of hard-blocking. Both threads
+    see the same completed result and the tool runs exactly once."""
+    if backend == "memory":
+        storage = InMemoryLedgerStorage()
+    elif backend == "file":
+        storage = FileLedgerStorage(tmp_path / "reconcile_race.json")
+    elif backend == "redis":
+        fakeredis = pytest.importorskip("fakeredis")
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        import redis as redis_mod
+        monkeypatch.setattr(redis_mod.Redis, "from_url", lambda url, **kw: fake)
+        storage = RedisLedgerStorage("redis://test")
+
+    class NotExecutedReconciler:
+        def __init__(self) -> None:
+            self.entries: list[str] = []
+
+        def reconcile(self, entry: LedgerEntry) -> ReconcileResult:
+            self.entries.append(entry.request_id)
+            return ReconcileResult.not_executed()
+
+    ledger_inst = ActionLedger(
+        storage=storage,
+        reconciler=NotExecutedReconciler(),
+        poll_interval=0.01,
+        poll_timeout=2.0,
+    )
+    binding = _BINDING
+    request_id = "race-reconcile-not-exec"
+
+    entry = _make_entry(
+        request_id=request_id,
+        terminal_outcome=TerminalOutcome.BLOCKED.value,
+    )
+    _set_entry_on_storage(ledger_inst, request_id, entry)
+    stored = ledger_inst.get(request_id)
+    from dataclasses import replace
+
+    ledger_inst._set_entry(
+        replace(stored, external_operation_ref="pi_race")
+    )
+
+    exec_count = 0
+    results: list[tuple[str, Any]] = []
+    barrier = threading.Barrier(2, timeout=5)
+
+    def _racer() -> None:
+        nonlocal exec_count
+        barrier.wait()
+        entry = ledger_inst.claim_side_effecting(
+            request_id, "test_tool", (), {}, binding,
+        )
+        if entry.terminal_outcome == TerminalOutcome.COMPLETED.value:
+            results.append(("completed", entry.result))
+        elif entry.terminal_outcome == TerminalOutcome.IN_FLIGHT.value:
+            exec_count += 1
+            result_value = {"ran": True}
+            ledger_inst.complete(request_id, result_value)
+            results.append(("ran_tool", result_value))
+        else:
+            results.append((entry.terminal_outcome or "unknown", None))
+
+    t1 = threading.Thread(target=_racer, daemon=True)
+    t2 = threading.Thread(target=_racer, daemon=True)
+    t1.start()
+    t2.start()
+    t1.join(timeout=10)
+    t2.join(timeout=10)
+
+    assert exec_count == 1, (
+        f"expected exactly 1 tool execution, got {exec_count}"
+    )
+    statuses = [r[0] for r in results]
+    assert "ran_tool" in statuses, f"nobody ran the tool: {results}"
+    assert "completed" in statuses, f"nobody saw the completed result: {results}"
+    result_values = [r[1] for r in results]
+    assert result_values[0] == result_values[1], (
+        f"both threads should see the same result: {results}"
+    )
+
+
+@pytest.mark.parametrize("backend", ["memory", "file", "redis"])
+def test_concurrent_reconcile_not_executed_race_expired_seed(
+    backend: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same race as above but seeded from EXPIRED (lease-expired IN_FLIGHT
+    with not_crossed boundary + external_operation_ref)."""
+    import time as time_mod
+
+    if backend == "memory":
+        storage = InMemoryLedgerStorage()
+    elif backend == "file":
+        storage = FileLedgerStorage(tmp_path / "reconcile_race_expired.json")
+    elif backend == "redis":
+        fakeredis = pytest.importorskip("fakeredis")
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        import redis as redis_mod
+        monkeypatch.setattr(redis_mod.Redis, "from_url", lambda url, **kw: fake)
+        storage = RedisLedgerStorage("redis://test")
+
+    class NotExecutedReconciler:
+        def reconcile(self, entry: LedgerEntry) -> ReconcileResult:
+            return ReconcileResult.not_executed()
+
+    ledger_inst = ActionLedger(
+        storage=storage,
+        reconciler=NotExecutedReconciler(),
+        poll_interval=0.01,
+        poll_timeout=2.0,
+    )
+    binding = _BINDING
+    request_id = "race-reconcile-not-exec-expired"
+
+    _seed_owner = str(uuid.uuid4())
+    storage.set(
+            LedgerEntry(
+                request_id=request_id,
+                tool="test_tool",
+                args=[],
+                kwargs={},
+                status="in-flight",
+                terminal_outcome=TerminalOutcome.IN_FLIGHT.value,
+                owner=_seed_owner,
+                lease_until=time_mod.time() - 1,
+                side_effect_boundary=SideEffectBoundary.NOT_CROSSED.value,
+                external_operation_ref="pi_expired_race",
+                idempotency_key=request_id,
+            )
+        )
+
+    exec_count = 0
+    results: list[tuple[str, Any]] = []
+    barrier = threading.Barrier(2, timeout=5)
+
+    def _racer() -> None:
+        nonlocal exec_count
+        barrier.wait()
+        entry = ledger_inst.claim_side_effecting(
+            request_id, "test_tool", (), {}, binding,
+        )
+        if entry.terminal_outcome == TerminalOutcome.COMPLETED.value:
+            results.append(("completed", entry.result))
+        elif entry.terminal_outcome == TerminalOutcome.IN_FLIGHT.value:
+            exec_count += 1
+            result_value = {"ran": True}
+            ledger_inst.complete(request_id, result_value)
+            results.append(("ran_tool", result_value))
+        else:
+            results.append((entry.terminal_outcome or "unknown", None))
+
+    t1 = threading.Thread(target=_racer, daemon=True)
+    t2 = threading.Thread(target=_racer, daemon=True)
+    t1.start()
+    t2.start()
+    t1.join(timeout=10)
+    t2.join(timeout=10)
+
+    assert exec_count == 1, (
+        f"expected exactly 1 tool execution, got {exec_count}"
+    )
+    statuses = [r[0] for r in results]
+    assert "ran_tool" in statuses, f"nobody ran the tool: {results}"
+    assert "completed" in statuses, f"nobody saw the completed result: {results}"
+    result_values = [r[1] for r in results]
+    assert result_values[0] == result_values[1], (
+        f"both threads should see the same result: {results}"
+    )
 
 
 # ---------------------------------------------------------------------------

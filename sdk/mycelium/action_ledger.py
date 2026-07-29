@@ -156,6 +156,19 @@ _RESOLUTION_ACCEPTED_STORED_OUTCOMES: frozenset[str] = frozenset({
     TerminalOutcome.FAILED_BEFORE_EFFECT.value,
 })
 
+# Stored terminal-outcome values that **the NOT_EXECUTED reset** accepts.
+# Excludes ``IN_FLIGHT`` so two reconcilers racing ``NOT_EXECUTED``
+# cannot both transition ``IN_FLIGHT → IN_FLIGHT`` — only the first
+# writer wins; the second sees ``IN_FLIGHT`` and fails the CAS.
+# EXPIRED entries (stored ``IN_FLIGHT`` with expired lease) are advanced
+# to ``BLOCKED`` before the CAS (see ``_apply_reconcile_result``).
+_RECONCILE_NOT_EXECUTED_OUTCOMES: frozenset[str] = frozenset({
+    TerminalOutcome.BLOCKED.value,
+    TerminalOutcome.UNKNOWN.value,
+    TerminalOutcome.FAILED_AFTER_EFFECT.value,
+    TerminalOutcome.FAILED_BEFORE_EFFECT.value,
+})
+
 # Policies for tools ledgered without a transition_binding (unclassified).
 # "warn": legacy behavior + a one-time warning when a failed entry is
 # reclaimed. "strict": route the claim through claim_side_effecting with a
@@ -276,6 +289,12 @@ _active_transition_var: ContextVar[_ActiveTransition | None] = ContextVar(
     "mycelium_active_transition",
     default=None,
 )
+
+# Set when _apply_reconcile_result or _raise_hard_block re-reads the entry and
+# finds it already claimed by another thread (CAS-loss or stale snapshot).
+# The claim loop checks this flag: if set, an IN_FLIGHT return means "poll",
+# not "this thread won the fresh claim".
+_reconcile_cas_lost: threading.local = threading.local()
 
 
 def get_active_transition() -> _ActiveTransition | None:
@@ -650,19 +669,33 @@ class LedgerStorage:
 
 
 class InMemoryLedgerStorage(LedgerStorage):
-    """Default in-memory storage. Survives within the process only."""
+    """Default in-memory storage. Survives within the process only.
+
+    Thread-safe via ``_lock`` (``threading.RLock``) so concurrent in-process
+    claims and transitions do not lose writes.  Multi-process users must
+    choose a durable backend.
+    """
 
     def __init__(self) -> None:
         self._entries: dict[str, LedgerEntry] = {}
+        self._lock = threading.RLock()
 
     def get(self, request_id: str) -> LedgerEntry | None:
-        return self._entries.get(request_id)
+        with self._lock:
+            return self._entries.get(request_id)
 
     def set(self, entry: LedgerEntry) -> None:
-        self._entries[entry.request_id] = entry
+        with self._lock:
+            self._entries[entry.request_id] = entry
 
-    def list_all(self) -> list[LedgerEntry]:
-        return list(self._entries.values())
+    def try_claim_inflight(
+        self,
+        entry: LedgerEntry,
+        *,
+        lease_ttl: float = DEFAULT_LEASE_TTL,
+    ) -> tuple[str, LedgerEntry | None]:
+        with self._lock:
+            return default_try_claim_inflight(self, entry, lease_ttl=lease_ttl)
 
     def try_transition(
         self,
@@ -671,22 +704,33 @@ class InMemoryLedgerStorage(LedgerStorage):
         expected_terminal_outcomes: frozenset[str],
         expected_owner: str | None = None,
     ) -> bool:
-        existing = self._entries.get(entry.request_id)
-        if existing is None:
-            return False
-        if existing.terminal_outcome not in expected_terminal_outcomes:
-            return False
-        if expected_owner is not None and existing.owner != expected_owner:
-            return False
-        self.set(entry)
-        return True
+        with self._lock:
+            existing = self._entries.get(entry.request_id)
+            if existing is None:
+                return False
+            if existing.terminal_outcome not in expected_terminal_outcomes:
+                return False
+            if expected_owner is not None and existing.owner != expected_owner:
+                return False
+            self.set(entry)
+            return True
+
+    def list_all(self) -> list[LedgerEntry]:
+        with self._lock:
+            return list(self._entries.values())
 
 
 class FileLedgerStorage(LedgerStorage):
-    """JSON-file-backed storage with ``fcntl`` locking for multi-process safety."""
+    """JSON-file-backed storage with ``fcntl`` + threading locking.
+
+    The ``fcntl`` lock guards across processes; the ``threading.Lock`` guards
+    across threads within the same process (``flock`` has process-level
+    semantics on macOS/Linux, so multiple threads cannot rely on it alone).
+    """
 
     def __init__(self, path: str | Path) -> None:
         self._file = LockedJsonDictFile(path)
+        self._lock = threading.Lock()
 
     def get(self, request_id: str) -> LedgerEntry | None:
         def read(data: dict[str, dict[str, Any]]) -> LedgerEntry | None:
@@ -695,13 +739,15 @@ class FileLedgerStorage(LedgerStorage):
                 return None
             return LedgerEntry.from_dict(raw)
 
-        return self._file.read_modify_write_no_save(read)
+        with self._lock:
+            return self._file.read_modify_write_no_save(read)
 
     def set(self, entry: LedgerEntry) -> None:
         def mutate(data: dict[str, dict[str, Any]]) -> None:
             data[entry.request_id] = entry.to_dict()
 
-        self._file.read_modify_write(mutate)
+        with self._lock:
+            self._file.read_modify_write(mutate)
 
     def try_claim_inflight(
         self,
@@ -726,7 +772,8 @@ class FileLedgerStorage(LedgerStorage):
             data[entry.request_id] = leased.to_dict()
             outcome.append(("claimed", None))
 
-        self._file.read_modify_write(mutate)
+        with self._lock:
+            self._file.read_modify_write(mutate)
         return outcome[0]
 
     def try_transition(
@@ -753,7 +800,8 @@ class FileLedgerStorage(LedgerStorage):
             data[entry.request_id] = entry.to_dict()
             result.append(True)
 
-        self._file.read_modify_write(mutate)
+        with self._lock:
+            self._file.read_modify_write(mutate)
         return result[0]
 
     def list_all(self) -> list[LedgerEntry]:
@@ -1384,26 +1432,41 @@ class ActionLedger:
         *,
         binding: ToolTransitionBinding | None = None,
         now: float | None = None,
-    ) -> None:
-        outcome = existing.resolved_terminal_outcome()
-        if outcome == TerminalOutcome.EXPIRED:
-            boundary = SideEffectBoundary(existing.side_effect_boundary)
-            if boundary == SideEffectBoundary.NOT_CROSSED:
-                error = (
-                    "stale in-flight lease with not_crossed boundary; "
-                    "reclaim only if an external_operation_ref reconcile "
-                    "proves NOT_EXECUTED"
-                )
-            else:
-                error = (
-                    "stale in-flight lease; side-effect boundary "
-                    f"{boundary.value} — effect may have happened"
-                )
-            existing = self.mark_blocked(
-                request_id,
-                error=error,
-                _expected_from=_IN_FLIGHT_OUTCOMES,
-            )
+    ) -> LedgerEntry:
+        current = self.get(request_id)
+        if current is not None:
+            curr_outcome = current.resolved_terminal_outcome(now=now)
+            if curr_outcome == TerminalOutcome.IN_FLIGHT:
+                _reconcile_cas_lost.val = True
+                return current
+            if curr_outcome == TerminalOutcome.COMPLETED:
+                return current
+            if curr_outcome == TerminalOutcome.EXPIRED:
+                boundary = SideEffectBoundary(current.side_effect_boundary)
+                if boundary == SideEffectBoundary.NOT_CROSSED:
+                    error = (
+                        "stale in-flight lease with not_crossed boundary; "
+                        "reclaim only if an external_operation_ref reconcile "
+                        "proves NOT_EXECUTED"
+                    )
+                else:
+                    error = (
+                        "stale in-flight lease; side-effect boundary "
+                        f"{boundary.value} — effect may have happened"
+                    )
+                try:
+                    existing = self.mark_blocked(
+                        request_id,
+                        error=error,
+                        _expected_from=_IN_FLIGHT_OUTCOMES,
+                        _expected_owner=current.owner,
+                    )
+                except LedgerOutcomeAlreadySetError:
+                    again = self.get(request_id)
+                    if again is not None:
+                        _reconcile_cas_lost.val = True
+                        return again
+                    existing = current
         message = hard_block_message(
             existing, tool=tool, request_id=request_id, binding=binding, now=now
         )
@@ -1418,6 +1481,7 @@ class ActionLedger:
         binding: ToolTransitionBinding,
         result: Any,
         _preserved_pkey_first_attempt: float | None = None,
+        _cas_race_returns_none: bool = False,
     ) -> LedgerEntry | None:
         """Map a reconcile result onto the ledger.
 
@@ -1425,6 +1489,11 @@ class ActionLedger:
         result, no re-execution). ``NOT_EXECUTED`` resets the entry to a fresh
         in-flight claim so the tool runs exactly once. ``UNKNOWN`` returns None
         so the caller hard-blocks.
+
+        When ``_cas_race_returns_none`` is True (operator-resolution path),
+        a lost CAS returns None so the caller can fall through. Otherwise
+        (reconciler path) the winner's entry is returned so the claim loop
+        polls instead of hard-blocking.
         """
         if result.status == ReconcileStatus.COMPLETED:
             return self.complete(
@@ -1447,7 +1516,41 @@ class ActionLedger:
                 binding=binding,
                 _provider_key_first_attempt_at=_preserved_pkey_first_attempt,
             )
-            self._set_entry(fresh)
+            # EXPIRED entries have stored terminal ``IN_FLIGHT`` (lease is
+            # resolved at read time).  Advance past ``IN_FLIGHT`` first so the
+            # CAS below cannot race on ``IN_FLIGHT → IN_FLIGHT``.
+            now = time.time()
+            stale = self.get(request_id)
+            _stale_owner: str | None = stale.owner if stale is not None else None
+            if stale is not None and stale.resolved_terminal_outcome(now=now) in (
+                TerminalOutcome.EXPIRED,
+            ):
+                try:
+                    self.mark_blocked(
+                        request_id,
+                        error="reconciling expired entry as NOT_EXECUTED",
+                        _expected_from=_IN_FLIGHT_OUTCOMES,
+                        _expected_owner=_stale_owner,
+                    )
+                except LedgerOutcomeAlreadySetError:
+                    pass
+                after_block = self.get(request_id)
+                if (
+                    after_block is not None
+                    and after_block.terminal_outcome != TerminalOutcome.BLOCKED.value
+                ):
+                    if _cas_race_returns_none:
+                        return None
+                    _reconcile_cas_lost.val = True
+                    return after_block
+            if not self._try_transition(
+                fresh,
+                expected_from=_RECONCILE_NOT_EXECUTED_OUTCOMES,
+            ):
+                if _cas_race_returns_none:
+                    return None
+                _reconcile_cas_lost.val = True
+                return self.get(request_id)
             return fresh
         return None
 
@@ -1537,6 +1640,7 @@ class ActionLedger:
             binding,
             ReconcileResult.not_executed(),
             _preserved_pkey_first_attempt=_preserved,
+            _cas_race_returns_none=True,
         )
         if fresh is None:
             return None
@@ -1569,8 +1673,7 @@ class ActionLedger:
         )
         if resolved is not None:
             return resolved
-        self._raise_hard_block(request_id, tool, existing, binding=binding)
-        raise AssertionError("unreachable")  # _raise_hard_block always raises
+        return self._raise_hard_block(request_id, tool, existing, binding=binding)
 
     async def _reconcile_or_hard_block_async(
         self,
@@ -1591,8 +1694,7 @@ class ActionLedger:
         )
         if resolved is not None:
             return resolved
-        self._raise_hard_block(request_id, tool, existing, binding=binding)
-        raise AssertionError("unreachable")  # _raise_hard_block always raises
+        return self._raise_hard_block(request_id, tool, existing, binding=binding)
 
     def claim_side_effecting(
         self,
@@ -1628,9 +1730,20 @@ class ActionLedger:
                 if gate == TransitionGate.RETURN:
                     return existing
                 if gate == TransitionGate.HARD_BLOCK:
-                    return self._reconcile_or_hard_block(
+                    entry = self._reconcile_or_hard_block(
                         request_id, tool, args, kwargs, existing, binding
                     )
+                    if entry.resolved_terminal_outcome() == TerminalOutcome.IN_FLIGHT:
+                        if getattr(_reconcile_cas_lost, 'val', False):
+                            _reconcile_cas_lost.val = False
+                            self._poll_side_effecting(
+                                request_id,
+                                tool=tool,
+                                interval=interval,
+                                poll_deadline=poll_deadline,
+                            )
+                            continue
+                    return entry
                 if gate == TransitionGate.POLL:
                     self._poll_side_effecting(
                         request_id,
@@ -1682,9 +1795,20 @@ class ActionLedger:
                 if gate == TransitionGate.RETURN:
                     return existing
                 if gate == TransitionGate.HARD_BLOCK:
-                    return self._reconcile_or_hard_block(
+                    entry = self._reconcile_or_hard_block(
                         request_id, tool, args, kwargs, existing, binding
                     )
+                    if entry.resolved_terminal_outcome() == TerminalOutcome.IN_FLIGHT:
+                        if getattr(_reconcile_cas_lost, 'val', False):
+                            _reconcile_cas_lost.val = False
+                            self._poll_side_effecting(
+                                request_id,
+                                tool=tool,
+                                interval=interval,
+                                poll_deadline=poll_deadline,
+                            )
+                            continue
+                    return entry
                 if gate == TransitionGate.ALLOW and self._reclaim_requires_death_signal:
                     if not has_worker_death_evidence(
                         existing,
@@ -1709,9 +1833,21 @@ class ActionLedger:
                 claimed = self.get(request_id)
                 return claimed if claimed is not None else entry
             if existing is not None:
-                return self._reconcile_or_hard_block(
+                entry = self._reconcile_or_hard_block(
                     request_id, tool, args, kwargs, existing, binding
                 )
+                if entry.resolved_terminal_outcome() == TerminalOutcome.IN_FLIGHT:
+                    if getattr(_reconcile_cas_lost, 'val', False):
+                        _reconcile_cas_lost.val = False
+                        self._poll_side_effecting(
+                            request_id,
+                            tool=tool,
+                            interval=interval,
+                            poll_deadline=poll_deadline,
+                        )
+                        continue
+                    return entry
+                return entry
             raise LedgerError(
                 f"Unexpected claim outcome {outcome!r} for side-effecting tool {tool!r}"
             )
@@ -1804,9 +1940,20 @@ class ActionLedger:
                 if gate == TransitionGate.RETURN:
                     return existing
                 if gate == TransitionGate.HARD_BLOCK:
-                    return await self._reconcile_or_hard_block_async(
+                    entry = await self._reconcile_or_hard_block_async(
                         request_id, tool, args, kwargs, existing, binding
                     )
+                    if entry.resolved_terminal_outcome() == TerminalOutcome.IN_FLIGHT:
+                        if getattr(_reconcile_cas_lost, 'val', False):
+                            _reconcile_cas_lost.val = False
+                            await self._poll_side_effecting_async(
+                                request_id,
+                                tool=tool,
+                                interval=interval,
+                                poll_deadline=poll_deadline,
+                            )
+                            continue
+                    return entry
                 if gate == TransitionGate.POLL:
                     await self._poll_side_effecting_async(
                         request_id,
@@ -1858,9 +2005,20 @@ class ActionLedger:
                 if gate == TransitionGate.RETURN:
                     return existing
                 if gate == TransitionGate.HARD_BLOCK:
-                    return await self._reconcile_or_hard_block_async(
+                    entry = await self._reconcile_or_hard_block_async(
                         request_id, tool, args, kwargs, existing, binding
                     )
+                    if entry.resolved_terminal_outcome() == TerminalOutcome.IN_FLIGHT:
+                        if getattr(_reconcile_cas_lost, 'val', False):
+                            _reconcile_cas_lost.val = False
+                            await self._poll_side_effecting_async(
+                                request_id,
+                                tool=tool,
+                                interval=interval,
+                                poll_deadline=poll_deadline,
+                            )
+                            continue
+                    return entry
                 if gate == TransitionGate.ALLOW and self._reclaim_requires_death_signal:
                     if not has_worker_death_evidence(
                         existing,
@@ -1885,9 +2043,21 @@ class ActionLedger:
                 claimed = self.get(request_id)
                 return claimed if claimed is not None else entry
             if existing is not None:
-                return await self._reconcile_or_hard_block_async(
+                entry = await self._reconcile_or_hard_block_async(
                     request_id, tool, args, kwargs, existing, binding
                 )
+                if entry.resolved_terminal_outcome() == TerminalOutcome.IN_FLIGHT:
+                    if getattr(_reconcile_cas_lost, 'val', False):
+                        _reconcile_cas_lost.val = False
+                        await self._poll_side_effecting_async(
+                            request_id,
+                            tool=tool,
+                            interval=interval,
+                            poll_deadline=poll_deadline,
+                        )
+                        continue
+                    return entry
+                return entry
             raise LedgerError(
                 f"Unexpected claim outcome {outcome!r} for side-effecting tool {tool!r}"
             )

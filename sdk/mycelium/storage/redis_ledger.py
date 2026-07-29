@@ -91,13 +91,9 @@ class RedisEntryStorage:
             if outcome == "in_flight":
                 return "in_flight", existing
 
-            leased = with_lease(entry, now=now, lease_ttl=lease_ttl)
-            payload = json.dumps(leased.to_dict(), default=str)
-            if ttl > 0:
-                self._client.set(key, payload, ex=ttl)
-            else:
-                self._client.set(key, payload)
-            return "claimed", None
+            reclaimed = self._try_reclaim(key, entry, ttl, lease_ttl)
+            if reclaimed is not None:
+                return reclaimed
 
         existing_raw = self._client.get(key)
         if existing_raw is None:
@@ -106,6 +102,43 @@ class RedisEntryStorage:
         if existing.status == "completed":
             return "completed", existing
         return "in_flight", existing
+
+    def _try_reclaim(
+        self,
+        key: str,
+        entry: E,
+        ttl: int,
+        lease_ttl: float,
+    ) -> tuple[ClaimOutcome, E | None] | None:
+        """CAS reclaim: only overwrite if the stored entry is still
+        reclaimable per :func:`claim_inflight_outcome`. Returns ``None``
+        when the watch fires (caller retries from the top)."""
+        from redis.exceptions import WatchError
+
+        from mycelium.storage._helpers import claim_inflight_outcome, with_lease
+
+        now = time.time()
+        leased = with_lease(entry, now=now, lease_ttl=lease_ttl)
+        payload = json.dumps(leased.to_dict(), default=str)
+        try:
+            with self._client.pipeline(transaction=True) as pipe:
+                pipe.watch(key)
+                raw = pipe.get(key)
+                if raw is None:
+                    return ("claimed", None)
+                current = self._from_dict(json.loads(raw))
+                rerun = claim_inflight_outcome(current, now=time.time())
+                if rerun != "claimed":
+                    return rerun, current
+                pipe.multi()
+                if ttl > 0:
+                    pipe.set(key, payload, ex=ttl)
+                else:
+                    pipe.set(key, payload)
+                pipe.execute()
+                return ("claimed", None)
+        except WatchError:
+            return None
 
     def try_transition(
         self,
