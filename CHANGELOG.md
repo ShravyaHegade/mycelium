@@ -18,6 +18,36 @@ Minor: worker-death / stream-loss signal — reclaim requires affirmative death 
 
 ## Unreleased
 
+## 1.18.0 (2026-07-29)
+
+Minor: atomicity contract for one-shot terminal outcomes — stale workers must not silently overwrite already-resolved transitions, enforced via CAS on all storage backends.
+
+### CAS via `try_transition`
+
+- New `LedgerStorage.try_transition(entry, *, expected_terminal_outcomes, expected_owner) -> bool`: per-backend atomic CAS. Memory (opt-in via override on `InMemoryLedgerStorage`), File (within `LockedJsonDictFile.read_modify_write`), Redis (`pipe.watch()` + `WatchError` retry loop), Postgres (`UPDATE ... WHERE payload->>'terminal_outcome' = ANY(...) RETURNING`).
+- `ActionLedger._try_transition()` wrapper invoked by `complete()`, `fail()`, `mark_blocked()`, `mark_unknown()` via private `_expected_from` / `_expected_owner` params.
+- Public mutators (`complete`/`fail`/`mark_blocked`/`mark_unknown`) default `_expected_from` to `_IN_FLIGHT_OUTCOMES` — refuse writes when the entry is already terminal.
+- Resolution paths (`release`, `_apply_reconcile_result`) pass `_expected_from=_RESOLUTION_ACCEPTED_STORED_OUTCOMES` — can complete from `BLOCKED`, `UNKNOWN`, `FAILED_AFTER_EFFECT`.
+
+### Owner fencing
+
+- The `@ledger` / `@ledger_sync` wrapper captures `_ledger_owner()` and passes it as `_expected_owner` to `complete()` / `_record_failure`.
+- A stale worker that held a stale lease cannot overwrite a transition another worker already resolved — mismatch raises `LedgerOutcomeAlreadySetError`.
+- `_record_failure` catches `LedgerOutcomeAlreadySetError` and re-raises the original tool exception (never masks).
+
+### Poll loop hardening
+
+- `_poll_side_effecting` / `_poll_side_effecting_async`: no longer call `_raise_hard_block` after `mark_unknown` (which now CAS-checks `_expected_from=`). Directly raise `LedgerHardBlockError`.
+- `_raise_hard_block` passes `_expected_from=_IN_FLIGHT_OUTCOMES` on `mark_blocked`.
+
+### New exception
+
+- `LedgerOutcomeAlreadySetError` (subclasses `LedgerError`): raised when a terminal-outcome write is refused by the CAS guard.
+
+### Tests
+
+- 126-parametrized test suite in `tests/test_atomicity_contract.py`: transition matrix (6 outcomes × 5 mutators × 3 backends), release/reconcile resolution paths, stalled-worker E2E (complete and fail), owner fencing, two-thread race (same outcome and interleaved).
+
 ## 1.16.1 (2026-07-28)
 
 ### CI / release automation

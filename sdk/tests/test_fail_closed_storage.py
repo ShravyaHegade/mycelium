@@ -162,7 +162,7 @@ class TestCompleteDuringStorageDown:
         )
         storage.set(entry)
         storage.fail_set = True
-        with pytest.raises(LedgerStorageUnavailableError, match="set"):
+        with pytest.raises(LedgerStorageUnavailableError, match="try_transition"):
             ledger_inst.complete("req-complete", {"ok": True})
         # Entry should still be IN_FLIGHT (not completed)
         stored = storage.get("req-complete")

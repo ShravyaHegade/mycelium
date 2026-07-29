@@ -14,6 +14,7 @@ from typing import Any
 from mycelium import (
     InMemoryLedgerStorage,
     LeaseValidity,
+    LedgerEntry,
     LedgerHardBlockError,
     ReconcileResult,
     SideEffectClass,
@@ -202,7 +203,21 @@ def prove_read_unknown_safe_retry() -> dict[str, Any]:
             {"query": "billing", "tool_call_id": "read_call"},
             transition_binding=binding,
         )
-        ledger_inst.mark_unknown(request_id, error="ambiguous crash")
+        stored = ledger_inst.get(request_id)
+        _set_unknown = LedgerEntry(
+            request_id=stored.request_id,
+            tool=stored.tool,
+            args=stored.args,
+            kwargs=stored.kwargs,
+            status="failed",
+            terminal_outcome=TerminalOutcome.UNKNOWN.value,
+            error="ambiguous crash",
+            started_at=stored.started_at,
+            finished_at=stored.finished_at,
+            owner=stored.owner,
+            idempotency_key=stored.idempotency_key,
+        )
+        storage.set(_set_unknown)
         second = search_docs(query="billing", tool_call_id="read_call")
 
     assert attempts["count"] == 2

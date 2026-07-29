@@ -278,13 +278,28 @@ def test_read_only_unknown_reexecutes_via_decorator() -> None:
         assert first == {"query": "billing", "hits": 1}
 
         # Simulate an ambiguous crash-after-claim recorded as UNKNOWN.
+        # Directly manipulate storage to bypass CAS on the already-COMPLETED entry.
         request_id = inner.derive_request_id(
             "search_docs",
             (),
             {"query": "billing", "tool_call_id": "call_ro"},
             transition_binding=binding,
         )
-        inner.mark_unknown(request_id, error="ambiguous crash")
+        stored = inner.get(request_id)
+        unknown = LedgerEntry(
+            request_id=stored.request_id,
+            tool=stored.tool,
+            args=stored.args,
+            kwargs=stored.kwargs,
+            status="failed",
+            terminal_outcome=TerminalOutcome.UNKNOWN.value,
+            error="ambiguous crash",
+            started_at=stored.started_at,
+            finished_at=stored.finished_at,
+            owner=stored.owner,
+            idempotency_key=stored.idempotency_key,
+        )
+        storage.set(unknown)
 
         second = search_docs(query="billing", tool_call_id="call_ro")
 
