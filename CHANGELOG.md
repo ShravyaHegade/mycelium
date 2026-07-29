@@ -18,6 +18,72 @@ Minor: worker-death / stream-loss signal — reclaim requires affirmative death 
 
 ## Unreleased
 
+### NOT\_EXECUTED CAS-loss path polls instead of hard-blocking
+
+- `_apply_reconcile_result` CAS loss on NOT\_EXECUTED: re-reads the entry
+  and returns the winner's fresh claim to the claim loop, which polls until
+  the winner completes. Both reconcilers now see the same completed result
+  and the tool runs exactly once (instead of one reconciler hard-blocking).
+- `_raise_hard_block`: re-reads the entry before raising. If the entry is
+  now `IN_FLIGHT` with a live lease (another thread reclaimed it), returns
+  to the claim loop instead of raising. Never `mark_blocked`s an entry
+  whose lease is currently held.
+- `_reconcile_or_hard_block` / `_reconcile_or_hard_block_async`: simplified
+  — no longer asserts unreachable after `_raise_hard_block` since it may
+  return an entry for polling.
+- Claim loop: all six `_reconcile_or_hard_block` call sites (three sync +
+  three async) check for `IN_FLIGHT` return and poll instead of returning
+  the in-flight entry as a resolved result.
+- Operator-resolution path: `_consume_operator_resolution` passes
+  `_cas_race_returns_none=True` so CAS loss on operator release falls
+  through to the reconciler path instead of stamping the winner's entry.
+
+### Tests
+
+- `test_concurrent_reconcile_not_executed_race` rewritten: asserts both
+  threads get the same completed result and the tool ran exactly once
+  (instead of one thread hard-blocking).
+- New `test_concurrent_reconcile_not_executed_race_expired_seed`: same
+  race but seeded from an EXPIRED lease-expired `IN_FLIGHT` entry with
+  not_crossed boundary and external_operation_ref.
+
+## 1.18.1 (2026-07-29)
+
+Patch: unguarded-write races in reconcile NOT\_EXECUTED reset and reclaim
+paths. Both could produce a lost-update where two concurrent writers each
+believe they own the fresh claim — the external design-partner audit
+confirmed neither race has been observed in production, but the contract
+is now enforced at the storage layer.
+
+### Reconciler NOT\_EXECUTED reset via CAS
+
+- `_apply_reconcile_result` for `ReconcileStatus.NOT_EXECUTED` now uses
+  `_try_transition` (CAS) instead of plain `_set_entry`. The expected-from
+  set (`_RECONCILE_NOT_EXECUTED_OUTCOMES`) excludes `IN_FLIGHT` so two
+  reconcilers cannot both write a fresh in-flight claim; EXPIRED entries
+  are advanced to `BLOCKED` first via `mark_blocked` so the CAS pre-condition
+  is unambiguous.
+
+### Reclaim path CAS per backend
+
+- `RedisEntryStorage.try_claim_inflight`: the reclaim path (expired lease /
+  failed entry rewrite) now uses WATCH-based CAS via
+  `_try_reclaim()`.  The stored entry is re-classified under WATCH and only
+  overwritten when it is still reclaimable.  A `WatchError` loop retries
+  from the top.
+- `InMemoryLedgerStorage`: all storage methods (`get`, `set`,
+  `try_claim_inflight`, `try_transition`) are now guarded by a
+  `threading.RLock`, making concurrent in-process claims safe.
+- `FileLedgerStorage`: methods that cross the ``fcntl`` lock are now also
+  guarded by a `threading.Lock` (``flock`` has process-level semantics, so
+  two threads in the same process cannot rely on it alone).
+
+### Tests
+
+- 5 new tests in `tests/test_atomicity_contract.py` covering both race
+  conditions: per-backend reconcile NOT\_EXECUTED race (memory / file /
+  redis) and per-backend reclaim race (InMemory, Redis direct).
+
 ## 1.18.0 (2026-07-29)
 
 Minor: atomicity contract for one-shot terminal outcomes — stale workers must not silently overwrite already-resolved transitions, enforced via CAS on all storage backends.

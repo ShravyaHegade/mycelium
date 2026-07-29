@@ -839,6 +839,17 @@ The `@ledger` / `@ledger_sync` wrapper captures the current worker's identity (`
 | Redis | `pipe.watch()` on the key; `WatchError` retry loop on conflict |
 | Postgres | `UPDATE ... WHERE payload->>'terminal_outcome' = ANY(...) RETURNING` |
 
+### NOT_EXECUTED reset CAS (v1.18+)
+
+The `NOT_EXECUTED` reset path (reconcile → fresh `IN_FLIGHT` claim) uses a CAS on
+`_RECONCILE_NOT_EXECUTED_OUTCOMES`. When two reconcilers both return
+`NOT_EXECUTED`, the CAS loser reads the winner's entry and returns it to the
+claim loop, which polls until the winner completes rather than hard-blocking.
+The same stale-snapshot guard applies in `_raise_hard_block`: a re-read that
+finds `IN_FLIGHT` with a live lease returns to the claim loop instead of
+raising, and `mark_blocked` is never called on an entry whose lease is
+currently held.
+
 ## For contributors (repo layout)
 
 Clone the GitHub repo to run proofs and tests. PyPI installs only the `mycelium` package.
