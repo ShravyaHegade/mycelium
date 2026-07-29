@@ -110,6 +110,17 @@ class LedgerAlreadyResolvedError(LedgerError):
     """
 
 
+class LedgerOutcomeAlreadySetError(LedgerError):
+    """Raised when a terminal-outcome write is refused because the transition
+    already has a terminal outcome (the outcome is one-shot).  Analogous to
+    HTTP 409 Conflict: a stale worker or late duplicate tried to write an
+    outcome after the transition was already resolved elsewhere.
+
+    Pre-upgrade behaviour silently overwrote the true outcome.  This exception
+    is the new fail-closed guard.
+    """
+
+
 class LedgerWorkerAliveError(LedgerError):
     """Raised when a worker-death assertion is refused because the worker appears alive.
 
@@ -133,6 +144,17 @@ class LedgerStorageUnavailableError(LedgerError):
 # Verified outcomes accepted by ActionLedger.release().
 OPERATOR_RESOLUTION_COMPLETED = "completed"
 OPERATOR_RESOLUTION_NOT_EXECUTED = "not_executed"
+
+# Stored terminal-outcome values that resolution paths (release, reconcile)
+# will accept from existing entries.  IN_FLIGHT (None) and COMPLETED are missing
+# because resolution paths should never see them at write time.
+_RESOLUTION_ACCEPTED_STORED_OUTCOMES: frozenset[str] = frozenset({
+    TerminalOutcome.IN_FLIGHT.value,
+    TerminalOutcome.BLOCKED.value,
+    TerminalOutcome.UNKNOWN.value,
+    TerminalOutcome.FAILED_AFTER_EFFECT.value,
+    TerminalOutcome.FAILED_BEFORE_EFFECT.value,
+})
 
 # Policies for tools ledgered without a transition_binding (unclassified).
 # "warn": legacy behavior + a one-time warning when a failed entry is
@@ -161,6 +183,10 @@ _BOUNDARY_RANK: dict[SideEffectBoundary, int] = {
     SideEffectBoundary.MAYBE_CROSSED: 1,
     SideEffectBoundary.CROSSED: 2,
 }
+
+# Expected terminal outcomes for a wrapper-path transition write (IN_FLIGHT).
+_IN_FLIGHT_OUTCOMES: frozenset[str] = frozenset({TerminalOutcome.IN_FLIGHT.value})
+
 
 # Resolved outcomes that park a transition until a human releases it.
 _STUCK_OUTCOMES = frozenset(
@@ -591,6 +617,33 @@ class LedgerStorage:
             lease_ttl=lease_ttl,
         )
 
+    def try_transition(
+        self,
+        entry: LedgerEntry,
+        *,
+        expected_terminal_outcomes: frozenset[str],
+        expected_owner: str | None = None,
+    ) -> bool:
+        """Atomically write *entry* only if the stored entry's terminal outcome
+        is one of *expected_terminal_outcomes* (and *expected_owner* matches,
+        when set).
+
+        Returns ``True`` when the write succeeds, ``False`` when the pre-condition
+        is not met (caller raises ``LedgerOutcomeAlreadySetError``).
+
+        The default implementation performs a get+set (single-process only).
+        Override with an atomic compare-and-swap for multi-process backends.
+        """
+        existing = self.get(entry.request_id)
+        if existing is None:
+            return False
+        if existing.terminal_outcome not in expected_terminal_outcomes:
+            return False
+        if expected_owner is not None and existing.owner != expected_owner:
+            return False
+        self.set(entry)
+        return True
+
     def list_all(self) -> list[LedgerEntry]:
         """Return all entries. Intended for debugging/auditing only."""
         raise NotImplementedError
@@ -610,6 +663,23 @@ class InMemoryLedgerStorage(LedgerStorage):
 
     def list_all(self) -> list[LedgerEntry]:
         return list(self._entries.values())
+
+    def try_transition(
+        self,
+        entry: LedgerEntry,
+        *,
+        expected_terminal_outcomes: frozenset[str],
+        expected_owner: str | None = None,
+    ) -> bool:
+        existing = self._entries.get(entry.request_id)
+        if existing is None:
+            return False
+        if existing.terminal_outcome not in expected_terminal_outcomes:
+            return False
+        if expected_owner is not None and existing.owner != expected_owner:
+            return False
+        self.set(entry)
+        return True
 
 
 class FileLedgerStorage(LedgerStorage):
@@ -658,6 +728,33 @@ class FileLedgerStorage(LedgerStorage):
 
         self._file.read_modify_write(mutate)
         return outcome[0]
+
+    def try_transition(
+        self,
+        entry: LedgerEntry,
+        *,
+        expected_terminal_outcomes: frozenset[str],
+        expected_owner: str | None = None,
+    ) -> bool:
+        result: list[bool] = []
+
+        def mutate(data: dict[str, dict[str, Any]]) -> None:
+            raw = data.get(entry.request_id)
+            if raw is None:
+                result.append(False)
+                return
+            existing = LedgerEntry.from_dict(raw)
+            if existing.terminal_outcome not in expected_terminal_outcomes:
+                result.append(False)
+                return
+            if expected_owner is not None and existing.owner != expected_owner:
+                result.append(False)
+                return
+            data[entry.request_id] = entry.to_dict()
+            result.append(True)
+
+        self._file.read_modify_write(mutate)
+        return result[0]
 
     def list_all(self) -> list[LedgerEntry]:
         data = self._file.load()
@@ -738,6 +835,27 @@ class ActionLedger:
     ) -> tuple[str, LedgerEntry | None]:
         with _storage_errors("try_claim_inflight"):
             return self._storage.try_claim_inflight(entry, lease_ttl=lease_ttl)
+
+    def _try_transition(
+        self,
+        entry: LedgerEntry,
+        *,
+        expected_from: frozenset[str] | None = None,
+        expected_owner: str | None = None,
+    ) -> bool:
+        """Atomically write *entry* subject to outcome/owner pre-conditions.
+
+        Returns ``True`` on success, ``False`` when the stored entry's
+        terminal outcome is not in *expected_from* (or owner mismatch).
+        The caller raises ``LedgerOutcomeAlreadySetError`` on ``False``.
+        """
+        outcomes = expected_from if expected_from is not None else _IN_FLIGHT_OUTCOMES
+        with _storage_errors("try_transition"):
+            return self._storage.try_transition(
+                entry,
+                expected_terminal_outcomes=outcomes,
+                expected_owner=expected_owner,
+            )
 
     def _list_all_entries(self) -> list[LedgerEntry]:
         with _storage_errors("list_all"):
@@ -929,7 +1047,11 @@ class ActionLedger:
                     "Use mark_worker_dead() first, or wait for the grace window."
                 )
         if verified == OPERATOR_RESOLUTION_COMPLETED:
-            completed = self.complete(request_id, result)
+            completed = self.complete(
+                request_id,
+                result,
+                _expected_from=_RESOLUTION_ACCEPTED_STORED_OUTCOMES,
+            )
             entry = replace(
                 completed,
                 operator_resolution=OPERATOR_RESOLUTION_COMPLETED,
@@ -1277,7 +1399,11 @@ class ActionLedger:
                     "stale in-flight lease; side-effect boundary "
                     f"{boundary.value} — effect may have happened"
                 )
-            existing = self.mark_blocked(request_id, error=error)
+            existing = self.mark_blocked(
+                request_id,
+                error=error,
+                _expected_from=_IN_FLIGHT_OUTCOMES,
+            )
         message = hard_block_message(
             existing, tool=tool, request_id=request_id, binding=binding, now=now
         )
@@ -1301,7 +1427,11 @@ class ActionLedger:
         so the caller hard-blocks.
         """
         if result.status == ReconcileStatus.COMPLETED:
-            return self.complete(request_id, result.result)
+            return self.complete(
+                request_id,
+                result.result,
+                _expected_from=_RESOLUTION_ACCEPTED_STORED_OUTCOMES,
+            )
         if result.status == ReconcileStatus.NOT_EXECUTED:
             if _preserved_pkey_first_attempt is None:
                 old = self.get(request_id)
@@ -1606,8 +1736,15 @@ class ActionLedger:
                     self.mark_unknown(
                         request_id,
                         error="timed out polling in-flight side-effecting transition",
+                        _expected_from=_IN_FLIGHT_OUTCOMES,
                     )
-                    self._raise_hard_block(request_id, tool, current)
+                    raise LedgerHardBlockError(
+                        hard_block_message(
+                            current,
+                            tool=tool,
+                            request_id=request_id,
+                        )
+                    )
                 raise LedgerPollTimeoutError(
                     f"Timed out polling side-effecting request {request_id!r}"
                 )
@@ -1770,8 +1907,15 @@ class ActionLedger:
                     self.mark_unknown(
                         request_id,
                         error="timed out polling in-flight side-effecting transition",
+                        _expected_from=_IN_FLIGHT_OUTCOMES,
                     )
-                    self._raise_hard_block(request_id, tool, current)
+                    raise LedgerHardBlockError(
+                        hard_block_message(
+                            current,
+                            tool=tool,
+                            request_id=request_id,
+                        )
+                    )
                 raise LedgerPollTimeoutError(
                     f"Timed out polling side-effecting request {request_id!r}"
                 )
@@ -1797,7 +1941,14 @@ class ActionLedger:
             ):
                 return
 
-    def complete(self, request_id: str, result: Any) -> LedgerEntry:
+    def complete(
+        self,
+        request_id: str,
+        result: Any,
+        *,
+        _expected_from: frozenset[str] | None = None,
+        _expected_owner: str | None = None,
+    ) -> LedgerEntry:
         existing = self._get_entry(request_id)
         if existing is None:
             raise LedgerError(f"Cannot complete unknown request {request_id!r}")
@@ -1810,7 +1961,23 @@ class ActionLedger:
             lease_until=None,
             side_effect_boundary=SideEffectBoundary.CROSSED.value,
         )
-        self._set_entry(entry)
+        if not self._try_transition(
+            entry,
+            expected_from=_expected_from,
+            expected_owner=_expected_owner,
+        ):
+            current = self._get_entry(request_id)
+            raise LedgerOutcomeAlreadySetError(
+                f"Cannot complete request {request_id!r}: "
+                f"terminal outcome already set to "
+                f"{current.terminal_outcome if current else '?'} "
+                f"(expected from {_expected_from or {'IN_FLIGHT'}})"
+                + (
+                    f", owner mismatch (expected {_expected_owner})"
+                    if _expected_owner is not None
+                    else ""
+                )
+            )
         return entry
 
     def fail(
@@ -1819,6 +1986,8 @@ class ActionLedger:
         error: BaseException,
         *,
         failed_after_effect: bool = False,
+        _expected_from: frozenset[str] | None = None,
+        _expected_owner: str | None = None,
     ) -> LedgerEntry:
         existing = self._get_entry(request_id)
         if existing is None:
@@ -1842,7 +2011,23 @@ class ActionLedger:
             lease_until=None,
             side_effect_boundary=boundary,
         )
-        self._set_entry(entry)
+        if not self._try_transition(
+            entry,
+            expected_from=_expected_from,
+            expected_owner=_expected_owner,
+        ):
+            current = self._get_entry(request_id)
+            raise LedgerOutcomeAlreadySetError(
+                f"Cannot fail request {request_id!r}: "
+                f"terminal outcome already set to "
+                f"{current.terminal_outcome if current else '?'} "
+                f"(expected from {_expected_from or {'IN_FLIGHT'}}"
+                + (
+                    f", owner mismatch (expected {_expected_owner})"
+                    if _expected_owner is not None
+                    else ""
+                )
+            )
         return entry
 
     def attach_receipt_ref(self, request_id: str, receipt_ref: str) -> LedgerEntry:
@@ -1943,7 +2128,14 @@ class ActionLedger:
         self._set_entry(entry)
         return entry
 
-    def mark_blocked(self, request_id: str, *, error: str | None = None) -> LedgerEntry:
+    def mark_blocked(
+        self,
+        request_id: str,
+        *,
+        error: str | None = None,
+        _expected_from: frozenset[str] | None = None,
+        _expected_owner: str | None = None,
+    ) -> LedgerEntry:
         existing = self._get_entry(request_id)
         if existing is None:
             raise LedgerError(f"Cannot block unknown request {request_id!r}")
@@ -1955,10 +2147,27 @@ class ActionLedger:
             finished_at=time.time(),
             lease_until=None,
         )
-        self._set_entry(entry)
+        if not self._try_transition(
+            entry,
+            expected_from=_expected_from,
+            expected_owner=_expected_owner,
+        ):
+            current = self._get_entry(request_id)
+            raise LedgerOutcomeAlreadySetError(
+                f"Cannot block request {request_id!r}: "
+                f"terminal outcome already set to "
+                f"{current.terminal_outcome if current else '?'}"
+            )
         return entry
 
-    def mark_unknown(self, request_id: str, *, error: str | None = None) -> LedgerEntry:
+    def mark_unknown(
+        self,
+        request_id: str,
+        *,
+        error: str | None = None,
+        _expected_from: frozenset[str] | None = None,
+        _expected_owner: str | None = None,
+    ) -> LedgerEntry:
         existing = self._get_entry(request_id)
         if existing is None:
             raise LedgerError(f"Cannot mark unknown request {request_id!r}")
@@ -1970,7 +2179,17 @@ class ActionLedger:
             finished_at=time.time(),
             lease_until=None,
         )
-        self._set_entry(entry)
+        if not self._try_transition(
+            entry,
+            expected_from=_expected_from,
+            expected_owner=_expected_owner,
+        ):
+            current = self._get_entry(request_id)
+            raise LedgerOutcomeAlreadySetError(
+                f"Cannot mark unknown request {request_id!r}: "
+                f"terminal outcome already set to "
+                f"{current.terminal_outcome if current else '?'}"
+            )
         return entry
 
     def mark_worker_dead(
@@ -2283,13 +2502,20 @@ async def _claim_for_transition_async(
 
 
 def _record_failure(
-    ledger: ActionLedger, request_id: str, exc: BaseException
+    ledger: ActionLedger,
+    request_id: str,
+    exc: BaseException,
+    *,
+    _expected_owner: str | None = None,
 ) -> None:
     """Record a tool failure with the terminal outcome implied by the boundary.
 
     ``not_crossed`` → ``FAILED_BEFORE_EFFECT`` (safe to retry per policy),
     ``maybe_crossed`` → ``UNKNOWN`` (ambiguous; hard-block for reconcile),
     ``crossed`` → ``FAILED_AFTER_EFFECT`` (effect happened; hard-block).
+
+    When *_expected_owner* is set, the write also fences on the stored entry's
+    ``owner`` field (wrapper-path).
     """
     entry = ledger.get(request_id)
     boundary = (
@@ -2298,11 +2524,20 @@ def _record_failure(
         else SideEffectBoundary.NOT_CROSSED
     )
     if boundary == SideEffectBoundary.CROSSED:
-        ledger.fail(request_id, exc, failed_after_effect=True)
+        ledger.fail(
+            request_id,
+            exc,
+            failed_after_effect=True,
+            _expected_owner=_expected_owner,
+        )
     elif boundary == SideEffectBoundary.MAYBE_CROSSED:
-        ledger.mark_unknown(request_id, error=f"{type(exc).__name__}: {exc}")
+        ledger.mark_unknown(
+            request_id,
+            error=f"{type(exc).__name__}: {exc}",
+            _expected_owner=_expected_owner,
+        )
     else:
-        ledger.fail(request_id, exc)
+        ledger.fail(request_id, exc, _expected_owner=_expected_owner)
 
 
 def _run_ledgered(
@@ -2335,15 +2570,25 @@ def _run_ledgered(
     token = _active_transition_var.set(
         _ActiveTransition(ledger, request_id, transition_binding)
     )
+    owner = _ledger_owner()
     try:
         with _lease_auto_renew(ledger, request_id):
             result = func(*args, **clean_kwargs)
     except Exception as exc:
         # A storage failure while recording the failure must not mask the
         # original tool exception — log it, then re-raise the tool's own error.
+        # An outcome-already-set error also does not mask — the transition was
+        # resolved elsewhere after the tool started.
         try:
-            _record_failure(ledger, request_id, exc)
+            _record_failure(ledger, request_id, exc, _expected_owner=owner)
             _emit_tool_receipt(audit_emitter, ledger, request_id)
+        except LedgerOutcomeAlreadySetError:
+            _logger.warning(
+                "outcome already set for %s while recording failure "
+                "(transition resolved elsewhere after tool started) — "
+                "re-raising original exception",
+                request_id,
+            )
         except Exception:
             _logger.exception(
                 "could not record failure for %s (storage down?); "
@@ -2354,7 +2599,15 @@ def _run_ledgered(
     finally:
         _active_transition_var.reset(token)
 
-    ledger.complete(request_id, result)
+    try:
+        ledger.complete(request_id, result, _expected_owner=owner)
+    except LedgerOutcomeAlreadySetError:
+        _logger.warning(
+            "outcome already set for %s while completing "
+            "(transition resolved elsewhere after tool started) — "
+            "tool result discarded",
+            request_id,
+        )
     _emit_tool_receipt(audit_emitter, ledger, request_id)
     return result
 
@@ -2389,15 +2642,25 @@ async def _run_ledgered_async(
     token = _active_transition_var.set(
         _ActiveTransition(ledger, request_id, transition_binding)
     )
+    owner = _ledger_owner()
     try:
         with _lease_auto_renew(ledger, request_id):
             result = await func(*args, **clean_kwargs)
     except Exception as exc:
         # A storage failure while recording the failure must not mask the
         # original tool exception — log it, then re-raise the tool's own error.
+        # An outcome-already-set error also does not mask — the transition was
+        # resolved elsewhere after the tool started.
         try:
-            _record_failure(ledger, request_id, exc)
+            _record_failure(ledger, request_id, exc, _expected_owner=owner)
             _emit_tool_receipt(audit_emitter, ledger, request_id)
+        except LedgerOutcomeAlreadySetError:
+            _logger.warning(
+                "outcome already set for %s while recording failure "
+                "(transition resolved elsewhere after tool started) — "
+                "re-raising original exception",
+                request_id,
+            )
         except Exception:
             _logger.exception(
                 "could not record failure for %s (storage down?); "
@@ -2408,7 +2671,15 @@ async def _run_ledgered_async(
     finally:
         _active_transition_var.reset(token)
 
-    ledger.complete(request_id, result)
+    try:
+        ledger.complete(request_id, result, _expected_owner=owner)
+    except LedgerOutcomeAlreadySetError:
+        _logger.warning(
+            "outcome already set for %s while completing "
+            "(transition resolved elsewhere after tool started) — "
+            "tool result discarded",
+            request_id,
+        )
     _emit_tool_receipt(audit_emitter, ledger, request_id)
     return result
 

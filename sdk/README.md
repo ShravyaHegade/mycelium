@@ -1,9 +1,9 @@
 # Mycelium runtime
 
-[![PyPI version](https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&release=1.16.0)](https://pypi.org/project/mycelium-runtime/)
+[![PyPI version](https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&release=1.18.0)](https://pypi.org/project/mycelium-runtime/)
 [![Python](https://img.shields.io/pypi/pyversions/mycelium-runtime.svg)](https://pypi.org/project/mycelium-runtime/)
 
-Current package: **mycelium-runtime v1.16.0** (worker-death signal + operator release + `REPAIR` gate + lease auto-renew + transition envelope).
+Current package: **mycelium-runtime v1.18.0** (atomicity contract + CAS backends + owner fencing + worker-death signal + operator release + `REPAIR` gate + lease auto-renew + transition envelope).
 
 ## One painful bug → a few lines of config
 
@@ -806,6 +806,38 @@ Configs without `transition:` keep v1.2 ledger behavior. See [CHANGELOG](../CHAN
 Legacy per-tool style still works. Start with `mycelium init`; use `mycelium init --full` for the all-guards reference template.
 
 ---
+
+## Atomicity contract (v1.18.0)
+
+**Problem:** Two workers claim the same transition. Worker A completes. Worker B's stale `IN_FLIGHT` entry resolves later and silently overwrites A's `COMPLETED` result with a `FAILED_*` outcome. The operation's terminal state is lost.
+
+**Solution:** Every terminal-outcome write goes through a CAS (`try_transition`) that checks the entry's current `terminal_outcome` and `owner` against expected values. Already-resolved entries refuse overwrites.
+
+### Transition matrix (rejected transitions)
+
+| Current `terminal_outcome` | `complete()` | `fail()` | `mark_blocked()` | `mark_unknown()` |
+|---|---|---|---|---|
+| `IN_FLIGHT` | ✅ allowed | ✅ allowed | ✅ allowed | ✅ allowed |
+| `COMPLETED` | ❌ | ❌ | ❌ | ❌ |
+| `BLOCKED` | ❌ | ❌ | ❌ | ❌ |
+| `UNKNOWN` | ❌ | ❌ | ❌ | ❌ |
+| `FAILED_BEFORE_EFFECT` | ❌ | ❌ | ❌ | ❌ |
+| `FAILED_AFTER_EFFECT` | ❌ | ❌ | ❌ | ❌ |
+
+Resolution paths (`release()` / reconcile) can complete from `BLOCKED`, `UNKNOWN`, or `FAILED_AFTER_EFFECT` — they pass a broader `_expected_from` set.
+
+### Owner fencing
+
+The `@ledger` / `@ledger_sync` wrapper captures the current worker's identity (`_ledger_owner()`) and passes it to `complete()` and `_record_failure`. If a different worker tries to resolve the same entry, the CAS rejects it with `LedgerOutcomeAlreadySetError`. In `_record_failure`, the CAS error is caught and the original tool exception is re-raised — never masked.
+
+### Backend implementation
+
+| Backend | CAS mechanism |
+|---------|--------------|
+| Memory | `InMemoryLedgerStorage` delegates to `set()` when CAS matches |
+| File | Within `LockedJsonDictFile.read_modify_write` |
+| Redis | `pipe.watch()` on the key; `WatchError` retry loop on conflict |
+| Postgres | `UPDATE ... WHERE payload->>'terminal_outcome' = ANY(...) RETURNING` |
 
 ## For contributors (repo layout)
 

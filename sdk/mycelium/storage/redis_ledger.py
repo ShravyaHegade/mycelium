@@ -107,6 +107,37 @@ class RedisEntryStorage:
             return "completed", existing
         return "in_flight", existing
 
+    def try_transition(
+        self,
+        entry: E,
+        *,
+        expected_terminal_outcomes: frozenset[str],
+        expected_owner: str | None = None,
+    ) -> bool:
+        from redis.exceptions import WatchError
+
+        key = self._key(entry.request_id)
+        payload = json.dumps(entry.to_dict(), default=str)
+        for _ in range(32):
+            try:
+                with self._client.pipeline(transaction=True) as pipe:
+                    pipe.watch(key)
+                    raw = pipe.get(key)
+                    if raw is None:
+                        return False
+                    existing = json.loads(raw)
+                    if existing.get("terminal_outcome") not in expected_terminal_outcomes:
+                        return False
+                    if expected_owner is not None and existing.get("owner") != expected_owner:
+                        return False
+                    pipe.multi()
+                    pipe.set(key, payload)
+                    pipe.execute()
+                    return True
+            except WatchError:
+                continue
+        return False
+
     def list_all(self) -> list[E]:
         pattern = f"{self._prefix}*"
         entries: list[E] = []
@@ -153,6 +184,19 @@ class RedisLedgerStorage:
     def list_all(self) -> list[Any]:
         return self._inner.list_all()
 
+    def try_transition(
+        self,
+        entry: Any,
+        *,
+        expected_terminal_outcomes: frozenset[str],
+        expected_owner: str | None = None,
+    ) -> bool:
+        return self._inner.try_transition(
+            entry,
+            expected_terminal_outcomes=expected_terminal_outcomes,
+            expected_owner=expected_owner,
+        )
+
 
 class RedisTaskLedgerStorage:
     """Redis storage for :class:`~mycelium.task_ledger.TaskLedgerEntry`."""
@@ -186,6 +230,19 @@ class RedisTaskLedgerStorage:
         lease_ttl: float = 3600.0,
     ) -> tuple[ClaimOutcome, Any | None]:
         return self._inner.try_claim_inflight(entry, lease_ttl=lease_ttl)
+
+    def try_transition(
+        self,
+        entry: Any,
+        *,
+        expected_terminal_outcomes: frozenset[str],
+        expected_owner: str | None = None,
+    ) -> bool:
+        return self._inner.try_transition(
+            entry,
+            expected_terminal_outcomes=expected_terminal_outcomes,
+            expected_owner=expected_owner,
+        )
 
     def list_all(self) -> list[Any]:
         return self._inner.list_all()
