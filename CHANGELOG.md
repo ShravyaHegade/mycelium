@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Docs
+
+- Document release authority honesty: ``--by`` is audit-only; backend write access
+  is the real privilege. Expanded the one-line warning into a dedicated subsection
+  under the operator runbook covering release, mark-dead, and the Python API.
+  No authentication hook shipped — governance is a separate layer (per
+  Igor/ThumbGate seam).
+
 ## 1.19.0 (2026-07-30)
 
 Minor: fail-closed Gmail sent-log reconciler (design-partner patch from Shadow / agent-contracts).
