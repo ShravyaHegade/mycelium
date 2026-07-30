@@ -606,54 +606,9 @@ ledger.release(request_id, verified="not_executed",
                by="ops@example.com", reason="provider shows no charge")
 ```
 
-### Release authority (what Mycelium does not authenticate)
+> **Warning: backend access = release authority.** Anyone who can write to the ledger backend can release transitions — `--by` is an audit stamp, not authentication. Protect Redis/Postgres/file access like you protect production credentials, and prefer signed audit receipts (`audit_receipt:`) so releases are tamper-evident.
 
-Mycelium records *what* happened and *who* said so, but it does not verify
-*whether that who is allowed to say so*. This is a deliberate seam, called out by
-our design partner Igor (ThumbGate): Mycelium owns durable execution truth;
-governance and authentication belong in a separate layer.
-
-**Anyone who can write to the ledger backend or call the CLI / Python API can
-settle a stuck transition.** There is no login, SSO, RBAC, or proof of identity
-under the hood:
-
-| Privilege | What it lets you do |
-|-----------|---------------------|
-| Backend write access (Redis/Postgres/file) | Release any transition, mark any worker dead, or write directly to storage |
-| `mycelium transitions release` | Record a human verification that settles a hard-blocked transition |
-| `mycelium transitions mark-dead` | Assert a worker is dead so reclaim can proceed |
-| `ActionLedger.release()` / `mark_worker_dead_for()` | Same operations via the Python API |
-
-The ``--by`` / ``by=`` argument is an **audit stamp** recorded on the entry
-so operators can answer *who recorded this decision?* after the fact. It is not
-a login, a signature, or an identity-provider assertion:
-
-```bash
-# --by records WHO said so, not PROOF that they are allowed to.
-mycelium transitions release <request_id> --verified completed \
-  --by ops@example.com --reason "confirmed in Stripe dashboard"
-```
-
-The same applies to ``mark-dead``: ``--by`` identifies the operator who asserted
-death, and the heartbeat/liveness check is a **safety guard** (prevents claiming
-a transition from a worker that may still be alive), not an authentication gate.
-
-**Practical guidance for production deployments:**
-
-1. **Protect backend credentials like production secrets.** Anyone with the Redis
-   URL, Postgres DSN, or file path can release transitions. Store them in a
-   secret manager, restrict network access, and audit access logs.
-2. **Enable signed audit receipts** (``audit_receipt:`` in YAML or pass an
-   ``AuditReceiptEmitter`` to ``ActionLedger``) so every release and death
-   assertion is tamper-evident. This does not prevent unauthorized releases,
-   but it makes them detectable.
-3. **If you need real allow/deny — put it outside Mycelium.** A gateway, IAM
-   policy, or proxy that gates access to the backend is the right layer. An
-   optional pluggable authorization hook on ``release`` / ``mark-dead`` /
-   ``reconcile`` has been discussed but is **not yet shipped**. Open a
-   GitHub issue if this gap blocks your deployment.
-
-### Assert worker death (`reclaim_requires_death_signal: true`)
+**4. (When `reclaim_requires_death_signal: true`) Assert worker death:**
 
 When the death-signal gate is on, EXPIRED entries cannot be reclaimed or released until the operator asserts the worker is dead. This prevents reclaiming a transition from a worker that is merely paused (GC, storage partition, failing auto-renew).
 
