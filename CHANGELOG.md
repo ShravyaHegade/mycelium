@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Docs
+
+- Identity semantics documented: transition key compounds scope + tool + args
+  + class + policy (not `request_id` alone). Same `request_id` + changed args
+  = new transition (intentional). Opt-in identity-conflict rejection mode
+  discussed but not shipped. (Mengchheang probe 1 / `dp-identity-conflict`
+  closed as decided + documented.)
+
 ## 1.19.0 (2026-07-30)
 
 Minor: fail-closed Gmail sent-log reconciler (design-partner patch from Shadow / agent-contracts).
