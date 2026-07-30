@@ -51,10 +51,13 @@ pip install 'mycelium-runtime[redis]'      # multi-worker / cloud ledger
 pip install 'mycelium-runtime[postgres]'   # Postgres ledger backend
 mycelium demo --slow       # feature tour, paced for screen recording
 mycelium demo              # same tour, fast
+mycelium demo --redis      # optional Cloud-style two-worker Redis proof (#7417)
 mycelium init              # on-ramp: transition + one ledgered tool → mycelium.yaml
 mycelium init --full       # reference: all guards (fill TODOs; not the default)
 mycelium init --minimal    # smaller multi-guard scaffold
 ```
+
+`mycelium demo --redis` runs two OS processes against a real Redis ledger — Worker B redispatches while A is in-flight; B polls and returns A's result. Needs Redis (`MYCELIUM_TEST_REDIS_URL` or `redis://127.0.0.1:6379/15`) and `pip install 'mycelium-runtime[redis]'`.
 
 `mycelium init` is the real start path (duplicate-tool fix). Use `--full` when you want every section documented in one file.
 
