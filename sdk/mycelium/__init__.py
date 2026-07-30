@@ -47,6 +47,7 @@ from mycelium.config import (
 from mycelium.history_guard import HistoryGuard, HistoryTruncatedError
 from mycelium.message_validator import MessageValidationError, MessageValidator
 from mycelium.protect import protect, protect_sync
+from mycelium.providers import GmailReconciler
 from mycelium.reconcile import Reconciler, ReconcileResult, ReconcileStatus
 from mycelium.session import Session
 from mycelium.state_flush import (
@@ -124,6 +125,7 @@ __all__ = [
     "OPERATOR_RESOLUTION_NOT_EXECUTED",
     "UNCLASSIFIED_POLICY_WARN",
     "UNCLASSIFIED_POLICY_STRICT",
+    "GmailReconciler",
     "get_ledger",
     "ledger",
     "ledger_sync",

@@ -483,6 +483,36 @@ def send_payment(amount, recipient):
 
 Reconciliation is **fail-closed**: no ref, no reconciler, or a reconciler that raises/times out all resolve to a hard-block — an exception in the reconciler never propagates. Async tools can implement `reconcile_async`; the async claim path prefers it and falls back to `reconcile`. Wire a reconciler via `@ledger` / `@ledger_sync` or `ActionLedger(reconciler=...)`.
 
+#### Gmail sent-log reconciler (`GmailReconciler`)
+
+Email send tools often fail after the provider accepts the message but before the 250 OK reaches the agent. The ambiguous transition hard-blocks. A `GmailReconciler` resolves them automatically by checking the Gmail sent-log:
+
+```python
+from mycelium import ledger_sync, GmailReconciler, ReconcileResult
+
+reconciler = GmailReconciler(service=gmail_client)  # duck-typed Gmail API
+
+@ledger_sync(transition_binding=binding, reconciler=reconciler)
+def send_email(to, subject, body):
+    message_id = str(uuid4())  # RFC 2822 Message-ID generated before transport
+    with side_effect():
+        record_external_operation(message_id)
+        mime_msg = build_mime(to, subject, body, message_id)
+        smtp.sendmail(from_addr, to, mime_msg.as_string())
+    return {"message_id": message_id}
+```
+
+The reconciler queries `users.messages.list(q='in:sent rfc822msgid:<Message-ID>')`:
+
+| Matches | Result | Reasoning |
+|---------|--------|-----------|
+| 1 | `COMPLETED` | message landed; return the Gmail message object |
+| 0 | `UNKNOWN` | indexing lag — never authorizes blind retry (`NOT_EXECUTED`) |
+| 2+ | `UNKNOWN` | duplicate may already have occurred |
+| missing ref | `UNKNOWN` | no query made |
+
+Like all reconcilers, `GmailReconciler` is strict about indexing lag: zero matches means "not yet visible," not "never sent." The transition stays hard-blocked so an operator releases it when the provider confirms.
+
 ### Stale lease + reconcile (`EXPIRED + not_crossed`)
 
 When a worker dies or a lease expires while a side-effecting tool is still `IN_FLIGHT`, the transition becomes `EXPIRED`. Resolution depends on boundary and class:
