@@ -308,10 +308,43 @@ async def send_payment(amount: float, recipient: str) -> dict:
 ## What `@ledger` / `ledger_sync` do
 
 - Record every tool invocation in a durable `ActionLedger`
-- Deduplicate retries and redispatches via a rich **transition key** (scope + tool + args + `side_effect_class` + policy), not only `tool_call_id`  
-  Same caller `request_id` with different args → **different** transition key (by design — `request_id` alone is not an identity-conflict guard; see `test_mengchheang_public_repro.py::test_semantic_identity`).
+- Deduplicate retries and redispatches via a rich **transition key** (scope + tool + args + `side_effect_class` + policy), not only `tool_call_id`
 - Resolve redispatches through **gates** (see [Resolution gates](#resolution-gates)) instead of re-running blindly
 - Persist failed attempts with **terminal outcomes** (`FAILED_BEFORE_EFFECT`, `FAILED_AFTER_EFFECT`, `UNKNOWN`, `EXPIRED`, etc.) for audit and reconciliation
+
+### Transition identity and the `request_id` caveat
+
+The transition key is a compound of runtime scope + tool name + canonicalised
+args + `side_effect_class` + policy version — not `request_id` alone (or
+`tool_call_id` alone):
+
+| Inputs | → | Transition key |
+|--------|---|----------------|
+| Same `request_id` + same args | → | Same key — deduplicated, replayed, or polled as usual |
+| Same `request_id` + **changed** args | → | **Different** key — the tool may execute again |
+
+This is **intentional**: `request_id` records *which dispatch ticket* the
+framework sent; it does not mean *what the tool is supposed to do*. Two
+dispatches with the same ticket but different instructions are different
+operations, not a conflict.
+
+Some systems reject "same ticket, different meaning" as an identity conflict
+(see our design partner Mengchheang Long's continuity harness). Mycelium does
+**not** — not yet. An opt-in identity-conflict rejection mode (same
+`request_id`, different args → reject) has been discussed but is **not
+shipped**. If this gap matters for your deployment, open a GitHub issue.
+
+The current contract is pinned in
+`tests/test_mengchheang_public_repro.py::test_semantic_identity`:
+
+```python
+kwargs_a = {"amount": 10, "request_id": "intent-1"}
+kwargs_b = {"amount": 11, "request_id": "intent-1"}
+key_a = derive_transition_key_for_call("charge", (), kwargs_a, _BINDING)
+key_b = derive_transition_key_for_call("charge", (), kwargs_b, _BINDING)
+assert key_a != key_b       # changed args → different key
+assert executions == [10, 11]  # both calls execute
+```
 
 ### Resolution gates
 
