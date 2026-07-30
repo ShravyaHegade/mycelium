@@ -3,7 +3,7 @@
 [![PyPI version](https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&release=1.18.0)](https://pypi.org/project/mycelium-runtime/)
 [![Python](https://img.shields.io/pypi/pyversions/mycelium-runtime.svg)](https://pypi.org/project/mycelium-runtime/)
 
-Current package: **mycelium-runtime v1.18.0** (atomicity contract + CAS backends + owner fencing + worker-death signal + operator release + `REPAIR` gate + lease auto-renew + transition envelope).
+Current package: **mycelium-runtime v1.18.2** (atomicity contract + CAS backends + owner fencing + worker-death signal + operator release + `REPAIR` gate + lease auto-renew + transition envelope).
 
 ## One painful bug → a few lines of config
 
@@ -808,7 +808,7 @@ Legacy per-tool style still works. Start with `mycelium init`; use `mycelium ini
 
 ---
 
-## Atomicity contract (v1.18.0)
+## Atomicity contract (v1.18+)
 
 **Problem:** Two workers claim the same transition. Worker A completes. Worker B's stale `IN_FLIGHT` entry resolves later and silently overwrites A's `COMPLETED` result with a `FAILED_*` outcome. The operation's terminal state is lost.
 

@@ -16,9 +16,11 @@ Minor: worker-death / stream-loss signal — reclaim requires affirmative death 
 - `reclaim_requires_death_signal` and `presumed_dead_after` wired through `ledger()` / `ledger_sync()` decorators and `config.py` `_ledger_timing_kwargs()`.
 - 26 tests in `tests/test_worker_death_signal.py` covering field serialization, `has_worker_death_evidence()`, gate behavior (on/off), `mark_worker_dead` with heartbeat guard and override, release strengthening, `presumed_dead_after` defaults, claim-path gating (read-only RECLAIM, side-effecting ALLOW), heartbeat maintenance on claim/renew, Redis TTL floor, and CLI mark-dead + release round-trip.
 
-## Unreleased
+## 1.18.2 (2026-07-30)
 
-### Regression tests from Mengchheang's public repro
+Patch: regression tests from Mengchheang's public repro (no code changes).
+
+### Tests
 
 - Ported the three probes from `notes/design-partners/mycelium_1_16_0_public_repro.py`
   into `tests/test_mengchheang_public_repro.py`:
@@ -30,6 +32,9 @@ Minor: worker-death / stream-loss signal — reclaim requires affirmative death 
      to see the same stale value; `_try_reclaim` (WATCH/MULTI) gives at most
      one `"claimed"`.
 - Pre-1.18.1 bug baselines preserved in module docstring.
+
+### Docs
+
 - Identity-conflict note added to `sdk/README.md` transition-key docs.
 
 ### NOT\_EXECUTED CAS-loss path polls instead of hard-blocking
