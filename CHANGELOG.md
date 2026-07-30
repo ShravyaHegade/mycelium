@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.19.0 (2026-07-30)
+
+Minor: fail-closed Gmail sent-log reconciler (design-partner patch from Shadow / agent-contracts).
+
+### Features
+
+- New `GmailReconciler(service)` — read-only reconciler that queries the Gmail
+  API sent-log by RFC 2822 Message-ID to resolve ambiguous email-send transitions.
+  Injected ``service`` is duck-typed (no hard google dep); behavior: missing ref →
+  `UNKNOWN`, 1 match → `COMPLETED` + provider receipt, 0 matches → `UNKNOWN`
+  (indexing lag, never `NOT_EXECUTED`), 2+ matches → `UNKNOWN`, API error →
+  propagate (fail-closed).
+- New provider sub-package `mycelium/providers/` — home for first-party
+  reconcilers (`GmailReconciler`) with room for more providers.
+- Exported from package root: `from mycelium import GmailReconciler`.
+
+### Docs
+
+- `sdk/README.md`: worked example of Gmail sent-log reconciliation under the
+  Reconciler section, next to the existing Stripe example.
+
+### Tests
+
+- `tests/test_gmail_reconciler.py`: 6 tests covering missing/empty ref, 0/1/2+
+  matches, and API error propagation — all using a fake Gmail API service.
+
 ## 1.16.0 (2026-07-27)
 
 Minor: worker-death / stream-loss signal — reclaim requires affirmative death evidence when opted in.
