@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### CLI
+
+- `mycelium demo` demo-DX pass (design-partner feedback from Akash /
+  Thskyshield):
+  - ASCII-safe output: em dashes / arrows removed and every print routed
+    through an ASCII-safe writer, so the tour no longer crashes on Windows
+    consoles (cp1252).
+  - New explicit HARD_BLOCK section: an ambiguous mutating transition is
+    redispatched and the tour visibly shows `LedgerHardBlockError` + the
+    `HARD_BLOCK` gate (the product moment) before the operator-release step.
+  - Disambiguated metric labels: "Unguarded executions" (bug) vs "Ledgered
+    executions" vs "Tool body executions" so identical counts no longer read
+    as the same thing.
+  - Single-process story: the default tour now states it runs one process on
+    an in-memory ledger and points to `mycelium demo --redis` for the
+    two-worker cross-process proof (Redis not required for the default tour).
+
 ### Docs
 
 - Identity semantics documented: transition key compounds scope + tool + args

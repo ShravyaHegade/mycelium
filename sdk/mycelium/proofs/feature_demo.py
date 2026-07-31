@@ -226,8 +226,48 @@ def prove_read_unknown_safe_retry() -> dict[str, Any]:
     return {"executions": attempts["count"], "class": "read"}
 
 
+def prove_hard_block() -> dict[str, Any]:
+    """Ambiguous mutate cannot re-execute: redispatch raises LedgerHardBlockError."""
+    storage = InMemoryLedgerStorage()
+    binding = _mutate_binding(agent_id="hardblock-demo")
+    calls: list[float] = []
+
+    @ledger_sync(storage=storage, transition_binding=binding)
+    def charge(amount: float) -> dict[str, bool]:
+        calls.append(amount)
+        with side_effect():
+            record_external_operation("pi_hardblock_demo")
+            raise RuntimeError("provider timeout")
+
+    with execution_scope(_scope()):
+        try:
+            charge(amount=10.0, tool_call_id="hardblock_call")
+        except RuntimeError:
+            pass
+        entries = storage.list_all()
+        assert len(entries) == 1, f"expected one ledger entry after fail, got {entries!r}"
+        request_id = entries[0].request_id
+        try:
+            charge(amount=10.0, tool_call_id="hardblock_call")
+            raise AssertionError("expected LedgerHardBlockError on ambiguous redispatch")
+        except LedgerHardBlockError as exc:
+            message = str(exc)
+        final = storage.get(request_id)
+        assert final is not None
+
+    assert calls == [10.0], f"expected no re-exec after hard block, got {calls!r}"
+    assert final.resolved_terminal_outcome() == TerminalOutcome.UNKNOWN
+    return {
+        "executions": len(calls),
+        "gate": TransitionGate.HARD_BLOCK.value,
+        "raised": "LedgerHardBlockError",
+        "terminal_outcome": final.resolved_terminal_outcome().value,
+        "message": message,
+    }
+
+
 def prove_operator_release() -> dict[str, Any]:
-    """Hard-block after ambiguous mutate → operator release → one re-exec."""
+    """Hard-block after ambiguous mutate, operator release, one re-exec."""
     storage = InMemoryLedgerStorage()
     binding = _mutate_binding(agent_id="release-demo")
     calls: list[float] = []
