@@ -17,7 +17,7 @@ On LangGraph Cloud, long tool calls can be redispatched on the order of **~180s*
 pip install 'mycelium-runtime[langgraph]'  # Python 3.10+; automatic runtime IDs
 mycelium init                  # on-ramp scaffold (transition + one ledgered tool)
 mycelium init --full           # reference scaffold (all guards; fill TODOs)
-mycelium demo                  # feature tour (envelope, lease, repair, reconcile, release)
+mycelium demo                  # feature tour (envelope, lease, hard-block, repair, reconcile, release)
 mycelium demo --redis          # optional 2-worker Redis proof
 ```
 
@@ -69,7 +69,7 @@ pip install 'mycelium-runtime[langgraph]'  # optional automatic LangGraph IDs
 mycelium init              # on-ramp: duplicate-tool fix → ./mycelium.yaml
 mycelium init --full       # reference: every guard section (not the default)
 mycelium init --minimal    # smaller multi-guard scaffold
-mycelium demo              # feature tour: without/with Mycelium + gates / release
+mycelium demo              # feature tour: unguarded vs ledgered + gates / hard-block / release
 mycelium demo --redis      # optional Cloud-style 2-worker Redis proof
 ```
 
