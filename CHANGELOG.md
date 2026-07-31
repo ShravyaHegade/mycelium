@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.19.2 (2026-07-31)
+
+Patch: Phase 4 reliability test suite (real-process multiprocess concurrency,
+SIGKILL crash-window, backend outages, property-based transition invariants,
+Stripe-shaped payment provider mock) + `hypothesis` dev dep + payment-class
+identity docs guidance.
+
+### Docs
+
+- Payment-class identity guidance in `sdk/README.md` (recommended production pattern): mint payment-class transition keys / provider keys from server-authoritative values, not raw client or LLM args; deterministic `provider_key = HMAC-SHA256(server_secret, action_id)` passed through `provider_idempotency_key_param`. Guidance only — no API or key-derivation change.
+
+### Tests
+
+- `tests/test_multiprocess_concurrency.py`: 3 real-`spawn`-process tests (file + Redis) — two workers contending for one transition key charge exactly once; crash-after-claim + `NOT_EXECUTED` reconciler reclaim grants exactly one re-execution; cross-process lease fencing.
+- `tests/test_process_kill_crash_window.py`: 4 tests that SIGKILL workers mid-tool-body and assert the crash window never double-executes (with and without a `NOT_EXECUTED` reconciler, across file and Redis storage).
+- `tests/test_outage_redis_postgres.py`: 11 fail-closed outage tests — Redis down at claim/complete/failure-recording, Postgres down via a stubbed `_require_psycopg` boundary (no psycopg dependency), mid-reconcile outage never re-executes or fabricates a COMPLETED.
+- `tests/test_property_transitions.py`: Hypothesis property test over the single-key state machine (file + fakeredis) — claim/complete/fail/crash/release/reconcile/stuck interleavings uphold `executions <= 1 + not_executed_verdicts`, COMPLETED is terminal with a stable result, and mutators CAS strictly out of IN_FLIGHT. Also asserts key-derivation soundness (identical redispatches dedupe, real args re-key, bookkeeping kwargs are excluded from the args fingerprint).
+- `tests/test_payment_provider_mock.py`: 10 tests against a read-only Stripe-shaped `Reconciler` + fake PaymentIntent store — `succeeded`→COMPLETED, `requires_payment_method`/`canceled`/missing→NOT_EXECUTED (exactly one re-charge), `processing`→HARD_BLOCK (never re-charges), operator release unblocks with one charge, reconciler never mutates provider state, and a 25-redispatch storm never double-charges.
+
 ## 1.19.1 (2026-07-31)
 
 Patch: `mycelium demo` demo-DX pass + docs alignment (field mapping for
@@ -38,10 +57,6 @@ external verifiers, request_id identity semantics).
   closed as decided + documented.)
 
 ## Unreleased
-
-### Docs
-
-- Payment-class identity guidance in `sdk/README.md` (recommended production pattern): mint payment-class transition keys / provider keys from server-authoritative values, not raw client or LLM args; deterministic `provider_key = HMAC-SHA256(server_secret, action_id)` passed through `provider_idempotency_key_param`. Guidance only — no API or key-derivation change.
 
 ## 1.19.0 (2026-07-30)
 
