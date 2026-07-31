@@ -39,6 +39,10 @@ external verifiers, request_id identity semantics).
 
 ## Unreleased
 
+### Docs
+
+- Payment-class identity guidance in `sdk/README.md` (recommended production pattern): mint payment-class transition keys / provider keys from server-authoritative values, not raw client or LLM args; deterministic `provider_key = HMAC-SHA256(server_secret, action_id)` passed through `provider_idempotency_key_param`. Guidance only — no API or key-derivation change.
+
 ## 1.19.0 (2026-07-30)
 
 Minor: fail-closed Gmail sent-log reconciler (design-partner patch from Shadow / agent-contracts).

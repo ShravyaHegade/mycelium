@@ -597,6 +597,32 @@ With it declared, on a retry of a transition that failed before the effect:
 
 The declared key is excluded from the transition-key fingerprint, so a retry that swaps the key still resolves to the *same* transition and is caught rather than silently starting a new one. This is **opt-in**: tools that don't declare the param keep the previous cooperative behavior.
 
+#### Payment-class identity (server-authoritative)
+
+Never mint payment-class transition keys or provider keys from **raw client or
+LLM args alone**. A caller that can tweak any arg re-mints a different key —
+and can dodge an in-flight lease to start a second side effect. Derive identity
+from **server-authoritative values** the caller cannot casually change: tenant,
+mandate / intent hash, amount, recipient, network, and similar fields your
+service controls.
+
+Changing a *real* payment field (actual amount, recipient, mandate) → a new
+transition is correct — it is a different operation. Tweaking fluff to escape
+the key is what this rule blocks. Mycelium's compound transition key (scope +
+tool + args + class + policy) does not, on its own, distinguish the two.
+
+Recommended deterministic provider-key pattern:
+
+```text
+provider_key = HMAC-SHA256(server_secret, action_id)
+```
+
+Same `action_id` on retry mints the same provider key; the secret never leaves
+your server. Pass the key through `provider_idempotency_key_param` so Mycelium
+enforces same-key retry. Mycelium enforces the *same key on retry* when
+configured; your application must mint **stable, server-side** keys. Keep no
+wall-clock in the identity — retries must reproduce the same key.
+
 ### Operator runbook: your agent hard-blocked
 
 When a side-effecting transition ends ambiguous (`BLOCKED` / `UNKNOWN` / `FAILED_AFTER_EFFECT`, or `EXPIRED` past the side-effect boundary) and no `Reconciler` can settle it, every redispatch raises `LedgerHardBlockError` forever. The release workflow is the recovery path: an operator verifies against the external provider what *actually* happened, records that verification, and the next agent redispatch consumes it. **Release is a recorded human verification, not an unblock** — and the CLI never executes tools itself.
