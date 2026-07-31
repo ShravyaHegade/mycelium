@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mycelium-runtime"
-version = "1.19.1"
+version = "1.19.2"
 description = "Runtime guards and YAML auto-instrumentation for reliable AI agent tools"
 keywords = [
   "ai-agents",
@@ -50,6 +50,7 @@ dev = [
     "pytest-asyncio",
     "ruff",
     "fakeredis",
+    "hypothesis",
     "langgraph>=1.2.9",
 ]
 langgraph = [
