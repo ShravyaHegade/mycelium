@@ -1,9 +1,9 @@
 # Mycelium runtime
 
-[![PyPI version](https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&release=1.19.1)](https://pypi.org/project/mycelium-runtime/)
+[![PyPI version](https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&release=1.19.2)](https://pypi.org/project/mycelium-runtime/)
 [![Python](https://img.shields.io/pypi/pyversions/mycelium-runtime.svg)](https://pypi.org/project/mycelium-runtime/)
 
-Current package: **mycelium-runtime v1.19.1** (fail-closed Gmail sent-log reconciler + atomicity contract + CAS backends + owner fencing + worker-death signal + operator release + `REPAIR` gate + lease auto-renew + transition envelope).
+Current package: **mycelium-runtime v1.19.2** (fail-closed Gmail sent-log reconciler + atomicity contract + CAS backends + owner fencing + worker-death signal + operator release + `REPAIR` gate + lease auto-renew + transition envelope).
 
 ## One painful bug → a few lines of config
 
@@ -596,6 +596,32 @@ With it declared, on a retry of a transition that failed before the effect:
 | missing on either side | `HARD_BLOCK` |
 
 The declared key is excluded from the transition-key fingerprint, so a retry that swaps the key still resolves to the *same* transition and is caught rather than silently starting a new one. This is **opt-in**: tools that don't declare the param keep the previous cooperative behavior.
+
+#### Payment-class identity (server-authoritative)
+
+Never mint payment-class transition keys or provider keys from **raw client or
+LLM args alone**. A caller that can tweak any arg re-mints a different key —
+and can dodge an in-flight lease to start a second side effect. Derive identity
+from **server-authoritative values** the caller cannot casually change: tenant,
+mandate / intent hash, amount, recipient, network, and similar fields your
+service controls.
+
+Changing a *real* payment field (actual amount, recipient, mandate) → a new
+transition is correct — it is a different operation. Tweaking fluff to escape
+the key is what this rule blocks. Mycelium's compound transition key (scope +
+tool + args + class + policy) does not, on its own, distinguish the two.
+
+Recommended deterministic provider-key pattern:
+
+```text
+provider_key = HMAC-SHA256(server_secret, action_id)
+```
+
+Same `action_id` on retry mints the same provider key; the secret never leaves
+your server. Pass the key through `provider_idempotency_key_param` so Mycelium
+enforces same-key retry. Mycelium enforces the *same key on retry* when
+configured; your application must mint **stable, server-side** keys. Keep no
+wall-clock in the identity — retries must reproduce the same key.
 
 ### Operator runbook: your agent hard-blocked
 
