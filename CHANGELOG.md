@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 1.19.1 (2026-07-31)
+
+Patch: `mycelium demo` demo-DX pass + docs alignment (field mapping for
+external verifiers, request_id identity semantics).
 
 ### CLI
 
@@ -21,11 +24,20 @@
 
 ### Docs
 
+- Field mapping for external verifiers added to `sdk/README.md`:
+  `request_id` / transition key = Mycelium dispatch identity;
+  `external_operation_ref` = handle for read-only reconcile; provider id
+  (Stripe `pi_...`, Gmail Message-ID) = what an independent verifier indexes.
+  Terminal state is verifier-useful when the Reconciler queries an
+  independent source — the ref is a handle, not proof by itself. No
+  integration added.
 - Identity semantics documented: transition key compounds scope + tool + args
   + class + policy (not `request_id` alone). Same `request_id` + changed args
   = new transition (intentional). Opt-in identity-conflict rejection mode
   discussed but not shipped. (Mengchheang probe 1 / `dp-identity-conflict`
   closed as decided + documented.)
+
+## Unreleased
 
 ## 1.19.0 (2026-07-30)
 

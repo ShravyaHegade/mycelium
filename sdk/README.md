@@ -1,9 +1,9 @@
 # Mycelium runtime
 
-[![PyPI version](https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&release=1.18.0)](https://pypi.org/project/mycelium-runtime/)
+[![PyPI version](https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&release=1.19.1)](https://pypi.org/project/mycelium-runtime/)
 [![Python](https://img.shields.io/pypi/pyversions/mycelium-runtime.svg)](https://pypi.org/project/mycelium-runtime/)
 
-Current package: **mycelium-runtime v1.18.2** (atomicity contract + CAS backends + owner fencing + worker-death signal + operator release + `REPAIR` gate + lease auto-renew + transition envelope).
+Current package: **mycelium-runtime v1.19.1** (fail-closed Gmail sent-log reconciler + atomicity contract + CAS backends + owner fencing + worker-death signal + operator release + `REPAIR` gate + lease auto-renew + transition envelope).
 
 ## One painful bug → a few lines of config
 
@@ -545,6 +545,18 @@ The reconciler queries `users.messages.list(q='in:sent rfc822msgid:<Message-ID>'
 | missing ref | `UNKNOWN` | no query made |
 
 Like all reconcilers, `GmailReconciler` is strict about indexing lag: zero matches means "not yet visible," not "never sent." The transition stays hard-blocked so an operator releases it when the provider confirms.
+
+#### Field mapping for external verifiers
+
+When wiring an independent verifier, keep the three identifiers separate:
+
+| Identifier | What it is | Indexed by |
+|------------|------------|------------|
+| `request_id` / transition key | Mycelium's dispatch / ledger identity for the call | the Mycelium ledger |
+| `external_operation_ref` | the handle recorded on the entry for read-only reconcile — "did this land?" | the `Reconciler` lookup |
+| provider / third-party id (Stripe `pi_...`, Gmail Message-ID, ...) | the operation handle the external verifier indexes | the provider / verifier |
+
+Terminal state is verifier-useful when the `Reconciler` queries an **independent** source: the ref is a handle, not proof by itself — proof is the read-only reconciler query, not the fact that a ref was recorded. Record the ref **before** the side effect (ideally the idempotency key you send, or a pre-generated Message-ID) so a crash between claim and complete can still be reconciled.
 
 ### Stale lease + reconcile (`EXPIRED + not_crossed`)
 
