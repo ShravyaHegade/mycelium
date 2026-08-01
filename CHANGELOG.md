@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.20.3 (2026-08-01)
+
+Patch: webhook event-dedupe recipe — docs + runnable examples only (no core
+ledger change).
+
+### Docs
+
+- `sdk/README.md`: new **Webhook event dedupe (optional)** section beside the
+  manual-claim path — claim inbound provider events on the provider event id
+  (Stripe `event.id` / GitHub `X-GitHub-Delivery` / Twilio SID) through the
+  same `ActionLedger`; at-least-once delivery + durable claim = at-most-once
+  handler side effects. Explicitly an adjacent recipe, not a webhook platform.
+- `sdk/examples/webhooks/`: runnable one-pagers (fakes, no credentials) —
+  `stripe.md`/`stripe_handler.py`, `github.md`/`github_handler.py`,
+  `twilio.md`/`twilio_handler.py`. Each: verify signature → claim on event id →
+  SKIP / PROCEED-once / HARD_BLOCK fail-closed.
+- Root `README.md`: one-line pointer ("Inbound webhook event ids").
+- `sdk/README.md` Manual integration example: dropped the `side_effect()`
+  helper (no-op + warning outside `@ledger` bodies); documented that the manual
+  path is still fail-closed via the durable claim.
+
+## Unreleased
+
 ## 1.20.2 (2026-08-01)
 
 Patch: sync root README and handbook with the latest implementation.

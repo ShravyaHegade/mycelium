@@ -42,7 +42,7 @@ These aren't reasoning failures. They're runtime failures. Mycelium sits between
 - **Bad tool calls:** block invalid inputs and out-of-scope tools before they run (`@bounded` / registry)
 - **Resolution telemetry + DTTR (v1.20.0):** opt-in `OutcomeEmitter` writes flat, append-only rows on resolution events; the **Duplicate Tool Transition Rate** makes the no-double-execute guarantee observable in production. Off by default; memory/file storage only (no analytics dependency); emission failures are logged and swallowed so telemetry never breaks the tool path.
 
-Not Langfuse. Use both if you want traces and guards. Full resolution rules: [sdk/README.md](sdk/README.md#resolution-gates). Envelope field stack: [sdk/README.md](sdk/README.md#transition-envelope-fields). Payment-class identity guidance: [sdk/README.md](sdk/README.md#payment-class-identity-server-authoritative). Failure & threat model: [sdk/docs/FAILURE_AND_THREAT_MODEL.md](sdk/docs/FAILURE_AND_THREAT_MODEL.md).
+Not Langfuse. Use both if you want traces and guards. Full resolution rules: [sdk/README.md](sdk/README.md#resolution-gates). Envelope field stack: [sdk/README.md](sdk/README.md#transition-envelope-fields). Payment-class identity guidance: [sdk/README.md](sdk/README.md#payment-class-identity-server-authoritative). Failure & threat model: [sdk/docs/FAILURE_AND_THREAT_MODEL.md](sdk/docs/FAILURE_AND_THREAT_MODEL.md). Inbound webhook event ids: [sdk/README.md](sdk/README.md#webhook-event-dedupe-optional).
 
 ## Use it
 
