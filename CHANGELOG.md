@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Loop guard (AF-003):** run-scoped consecutive action-hash detector. Soft-blocks
+  with `ToolBoundaryError` (`violation=loop_detected`) then hard-blocks the whole
+  run with `LedgerHardBlockError` until operator release. Wrapper order:
+  `@loop_guard` → `@ledger` → `@bounded` → `@protect`. YAML `loop_guard:`,
+  `mycelium loops status|release` (`--verified clear|allow-once|abort-run`),
+  file/memory storage, example `sdk/examples/loop_guard_db_search.py`.
+- Docs sync: root `README.md` + handbook `docs/index.html` (scope, API, Loop guard
+  section, YAML) cover AF-003 alongside the SDK README.
+
 ## 1.20.6 (2026-08-01)
 
 Patch: align public version strings with the package; clean changelog headers.

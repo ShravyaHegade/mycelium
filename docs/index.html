@@ -370,6 +370,7 @@
       <li><a href="#api">API</a></li>
       <li><a href="#context">Context (opt-in)</a></li>
       <li><a href="#tools">Tool boundaries (opt-in)</a></li>
+      <li><a href="#loops">Loop guard (opt-in)</a></li>
       <li><a href="#actions">Actions (core)</a></li>
       <li><a href="#resolution">Resolution</a></li>
       <li><a href="#telemetry">Telemetry &amp; DTTR</a></li>
@@ -394,14 +395,15 @@
       on retry/redispatch, blocks bad tool args and out-of-scope calls, and keeps
       tool data fresh.
       <strong>Core:</strong> transition envelope (class + lease + terminal + gates / reconcile).
-      <strong>Opt-in:</strong> stale-context helpers and tool-boundary checks.
+      <strong>Opt-in:</strong> loop guard (AF-003), stale-context helpers, and tool-boundary checks.
       YAML callable paths and <code>mycelium run</code> add the core path without
       editing each function. Framework-agnostic. Not an approvals inbox, not hosted
       observability, not on-chain trails, not a recovery tool — a tool-boundary
       guard that composes under an approval layer and beside a tracer.
-      Latest: fail-closed Gmail sent-log reconciler (v1.19.0), opt-in
-      resolution telemetry with a pinned Duplicate Tool Transition Rate (v1.20.0),
-      and a webhook event-dedupe recipe (v1.20.3).
+      Latest: AF-003 loop guard (identical actions across new
+      <code>tool_call_id</code>s → soft then hard → <code>mycelium loops release</code>),
+      fail-closed Gmail sent-log reconciler (v1.19.0), opt-in resolution telemetry
+      with DTTR (v1.20.0), and a webhook event-dedupe recipe (v1.20.3).
       Early but API-stable (v1.20.6): breaking changes only at major versions.
     </p>
 
@@ -448,6 +450,14 @@
           <code>side_effect_boundary</code> → <code>terminal_outcome</code> →
           <code>external_operation_ref</code> → <code>retry_permission</code>.
           Same system as above; payment/write needs the heavier set.
+        </li>
+        <li>
+          <strong>Infinite action loops (AF-003)</strong> (opt-in) —
+          <code>loop_guard:</code> halts consecutive identical tool + args across
+          <em>new</em> <code>tool_call_id</code>s (the ledger only dedupes the same
+          dispatch). Soft <code>ToolBoundaryError</code>, then hard
+          <code>LedgerHardBlockError</code> for the whole run; operator
+          <code>mycelium loops release</code>.
         </li>
         <li>
           <strong>Stale or broken context</strong> (opt-in) — TTL cache
@@ -503,6 +513,10 @@ MessageValidator, HistoryGuard
 # Tool boundaries (opt-in)
 bounded, bounded_sync, ToolRegistry, ToolRunner
 
+# Loop guard AF-003 (opt-in)
+LoopGuard, loop_guard, loop_guard_sync, apply_loop_guard
+InMemoryLoopGuardStorage, FileLoopGuardStorage
+
 # Actions (core) — duplicate side effects / transition envelope
 ledger, ledger_sync, task_ledger, task_ledger_sync
 ActionLedger, TaskLedger, StateFlush, AuditReceiptEmitter, verify_receipt
@@ -527,7 +541,8 @@ MyceliumConfig.apply_tool, apply_named_task             # explicit names (v1.12.
 
 # CLI
 mycelium run --config PATH -- python ...                 # auto-instrumentation (v1.12.0)
-mycelium transitions list|show|release|mark-dead   # operator triage + release (v1.15.0+)</pre>
+mycelium transitions list|show|release|mark-dead   # operator triage + release (v1.15.0+)
+mycelium loops status|release                      # AF-003 loop-guard triage + release</pre>
     </section>
 
     <section id="context">
@@ -802,6 +817,55 @@ mycelium transitions release &lt;request_id&gt; --verified not-executed \
   --by ops@example.com --reason "provider shows no charge"</pre>
     </section>
 
+    <section id="loops">
+      <h2>Loop guard (AF-003, opt-in)</h2>
+      <p>
+        The action ledger deduplicates <strong>retries of the same dispatch</strong>
+        (<code>tool_call_id</code>). If the LLM emits a <em>new</em> id each turn with
+        the same tool + args, that is a new transition — the ledger allows it.
+        Optional <code>loop_guard:</code> detects that thrash before claim:
+      </p>
+      <ol>
+        <li>
+          <strong>Soft</strong> — <code>ToolBoundaryError</code>
+          (<code>violation=loop_detected</code>) with an <code>llm_message</code>;
+          body does not run.
+        </li>
+        <li>
+          <strong>Hard</strong> — <code>LedgerHardBlockError</code>; the
+          <strong>entire run</strong> is frozen until an operator releases it.
+        </li>
+      </ol>
+      <p>
+        Wrapper order: <code>@loop_guard</code> → <code>@ledger</code> →
+        <code>@bounded</code> → <code>@protect</code>. Enabled by default in
+        <code>mycelium init --full</code> and <code>--minimal</code> (file storage).
+        Thresholds by <code>side_effect_class</code> (read=5, idempotent_mutate=3,
+        mutate/irreversible=2). Demo:
+        <code>python examples/loop_guard_db_search.py</code> from <code>sdk/</code>.
+      </p>
+      <pre>loop_guard:
+  storage: file
+  path: ./mycelium-loop.json
+  escalate_after_soft: 1
+  consecutive_soft:
+    read: 5
+    idempotent_mutate: 3
+    keyed_mutate: 2
+    non_idempotent_mutate: 2
+    irreversible: 2
+
+mycelium loops status --stuck --config mycelium.yaml
+mycelium loops release &lt;run_id&gt; --verified clear|allow-once|abort-run \
+  --by ops@example.com --reason "..."</pre>
+      <p>
+        <code>clear</code> wipes counters; <code>allow-once</code> permits exactly one
+        matching action hash then re-arms; <code>abort-run</code> keeps the run frozen.
+        Full detail in the
+        <a href="https://github.com/mycelium-labs/mycelium/blob/main/sdk/README.md#loop-guard-af-003-identical-actions-across-new-tool_call_ids">SDK README</a>.
+      </p>
+    </section>
+
     <section id="telemetry">
       <h2>Outcome telemetry &amp; DTTR (v1.20+)</h2>
       <p>
@@ -933,6 +997,10 @@ registry:
 runner:
   max_llm_retries: 2
   max_tool_retries: 3
+
+loop_guard:
+  storage: file
+  path: ./mycelium-loop.json
 
 history_guard:
   max_tokens: 100000

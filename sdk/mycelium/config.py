@@ -34,6 +34,20 @@ from mycelium.integrations.langgraph import (
     LangGraphIntegrationError,
     instrument_langgraph_tool,
 )
+from mycelium.loop_guard import (
+    DEFAULT_CONSECUTIVE_SOFT,
+    FileLoopGuardStorage,
+    InMemoryLoopGuardStorage,
+    LoopGuard,
+    LoopGuardStorage,
+    apply_loop_guard,
+)
+from mycelium.loop_guard import (
+    UNCLASSIFIED_POLICY_STRICT as LOOP_UNCLASSIFIED_STRICT,
+)
+from mycelium.loop_guard import (
+    UNCLASSIFIED_POLICY_WARN as LOOP_UNCLASSIFIED_WARN,
+)
 from mycelium.message_validator import MessageValidator
 from mycelium.outcome_emit import (
     FileOutcomeStorage,
@@ -90,6 +104,7 @@ _GUARD_MARKERS = (
     "_mycelium_task_ledger",
     "_mycelium_bounded",
     "_mycelium_protected",
+    "_mycelium_loop_guarded",
     "_mycelium_langgraph_integration",
 )
 
@@ -178,6 +193,8 @@ class ToolConfig:
     provider_idempotency_key_param: str | None = None
     provider_idempotency_key_ttl: float | None = None
     callable_path: str | None = None
+    # Per-tool loop_guard: None=inherit global, False=disable, dict=overrides
+    loop_guard: dict[str, Any] | bool | None = None
 
     def is_noop(self) -> bool:
         return (
@@ -185,6 +202,7 @@ class ToolConfig:
             and self.bounded is None
             and self.ledger is None
             and not self.audit_receipt
+            and self.loop_guard is None
         )
 
 
@@ -227,8 +245,10 @@ class MyceliumConfig:
     action_ledger: dict[str, Any] | None = None
     task_ledger_defaults: dict[str, Any] | None = None
     integrations: dict[str, dict[str, Any]] | None = None
+    loop_guard: dict[str, Any] | None = None
     _audit_emitter: AuditReceiptEmitter | None = None
     _outcome_emitter: OutcomeEmitter | None = None
+    _loop_guard: LoopGuard | None = None
     _state_flush: StateFlush | None = None
     _audit_auto: bool = False
 
@@ -239,10 +259,26 @@ class MyceliumConfig:
         Looks up the tool by ``func.__name__``. If no config exists, the
         function is returned unchanged.
 
-        Guard order (outermost first):
-        ``@ledger`` -> ``@bounded`` -> ``@protect`` -> ``func``
+        Guard order (outermost first, after optional LangGraph instrument):
+        ``@loop_guard`` -> ``@ledger`` -> ``@bounded`` -> ``@protect`` -> ``func``
         """
         return self.apply_tool(func.__name__, func)
+
+    def loop_guard_applies(self, name: str, tool_config: ToolConfig | None = None) -> bool:
+        """Whether AF-003 loop_guard should wrap this tool."""
+        if self.loop_guard is None:
+            return False
+        cfg = tool_config if tool_config is not None else self.tools.get(name)
+        if cfg is not None and cfg.loop_guard is False:
+            return False
+        exclude = self.loop_guard.get("exclude") or []
+        if name in exclude:
+            return False
+        tools_sel = self.loop_guard.get("tools", "all")
+        if tools_sel != "all":
+            if not isinstance(tools_sel, list) or name not in tools_sel:
+                return False
+        return True
 
     def apply_tool(
         self,
@@ -251,7 +287,10 @@ class MyceliumConfig:
     ) -> Callable[..., Any]:
         """Apply the tool config selected by explicit logical ``name``."""
         tool_config = self.tools.get(name)
-        if tool_config is None or tool_config.is_noop():
+        if tool_config is None:
+            return func
+        applies_loop = self.loop_guard_applies(name, tool_config)
+        if tool_config.is_noop() and not applies_loop:
             return func
         if _check_existing_config_wrapper(func, kind="tool", name=name):
             return func
@@ -300,11 +339,31 @@ class MyceliumConfig:
                     **ledger_kwargs,
                 )(func)
 
-            if self.langgraph_enabled:
-                try:
-                    func = instrument_langgraph_tool(func)
-                except LangGraphIntegrationError as exc:
-                    raise ConfigError(str(exc)) from exc
+        # Loop guard outside ledger so soft/hard never claim.
+        if applies_loop:
+            guard = self.build_loop_guard()
+            assert guard is not None
+            consecutive_override: int | None = None
+            if isinstance(tool_config.loop_guard, dict):
+                raw_n = tool_config.loop_guard.get("consecutive_soft")
+                if raw_n is not None:
+                    consecutive_override = int(raw_n)
+            func = apply_loop_guard(
+                func,
+                guard,
+                tool_name=name,
+                side_effect_class=tool_config.side_effect_class,
+                consecutive_soft=consecutive_override,
+            )
+
+        # LangGraph outermost so it can inject scope/dispatch before inner guards.
+        if self.langgraph_enabled and (
+            tool_config.ledger is not None or applies_loop
+        ):
+            try:
+                func = instrument_langgraph_tool(func)
+            except LangGraphIntegrationError as exc:
+                raise ConfigError(str(exc)) from exc
 
         _mark_config_applied(func, kind="tool", name=name)
         return func
@@ -413,6 +472,68 @@ class MyceliumConfig:
         if self.history_guard is None:
             return None
         return HistoryGuard(**self.history_guard)
+
+    def build_loop_guard(self) -> LoopGuard | None:
+        """Build a shared LoopGuard if the config declares ``loop_guard:``."""
+        if self.loop_guard is None:
+            return None
+        if self._loop_guard is not None:
+            return self._loop_guard
+        raw = self.loop_guard
+        storage = self._build_loop_guard_storage(raw)
+        consecutive = dict(DEFAULT_CONSECUTIVE_SOFT)
+        consecutive_raw = raw.get("consecutive_soft")
+        if consecutive_raw is not None:
+            if not isinstance(consecutive_raw, dict):
+                raise ConfigError("'loop_guard.consecutive_soft' must be a mapping")
+            for key, value in consecutive_raw.items():
+                if not isinstance(value, int) or value < 1:
+                    raise ConfigError(
+                        f"'loop_guard.consecutive_soft.{key}' must be a positive int"
+                    )
+                consecutive[str(key)] = int(value)
+        escalate = raw.get("escalate_after_soft", 1)
+        if not isinstance(escalate, int) or escalate < 1:
+            raise ConfigError("'loop_guard.escalate_after_soft' must be a positive int")
+        unclassified = raw.get("unclassified_policy", LOOP_UNCLASSIFIED_WARN)
+        if unclassified not in (LOOP_UNCLASSIFIED_WARN, LOOP_UNCLASSIFIED_STRICT):
+            raise ConfigError(
+                "'loop_guard.unclassified_policy' must be "
+                f"{LOOP_UNCLASSIFIED_WARN!r} or {LOOP_UNCLASSIFIED_STRICT!r}"
+            )
+        exclude = raw.get("exclude") or []
+        if not isinstance(exclude, list):
+            raise ConfigError("'loop_guard.exclude' must be a list of tool names")
+        agent_id = "loop-guard"
+        if self.transition is not None and self.transition.agent_id:
+            agent_id = self.transition.agent_id
+        self._loop_guard = LoopGuard(
+            storage,
+            consecutive_soft=consecutive,
+            escalate_after_soft=escalate,
+            unclassified_policy=str(unclassified),
+            exclude=[str(item) for item in exclude],
+            outcome_emitter=self.build_outcome_emitter(),
+            agent_id=agent_id,
+        )
+        return self._loop_guard
+
+    @staticmethod
+    def _build_loop_guard_storage(raw: dict[str, Any]) -> LoopGuardStorage:
+        storage_type = raw.get("storage", "memory")
+        if storage_type == "memory":
+            return InMemoryLoopGuardStorage()
+        if storage_type == "file":
+            path = raw.get("path")
+            if not path:
+                raise ConfigError("loop_guard storage 'file' requires a 'path'")
+            return FileLoopGuardStorage(path)
+        if storage_type in ("redis", "postgres"):
+            raise ConfigError(
+                f"loop_guard storage {storage_type!r} is not implemented yet; "
+                "use 'memory' or 'file'"
+            )
+        raise ConfigError(f"unknown loop_guard storage type: {storage_type!r}")
 
     def build_message_validator(self) -> MessageValidator | None:
         """Build a MessageValidator if the config declares one."""
@@ -888,6 +1009,21 @@ def _parse_tool_config(
         name=name,
     )
 
+    loop_guard_raw = raw.get("loop_guard")
+    loop_guard_cfg: dict[str, Any] | bool | None
+    if loop_guard_raw is None:
+        loop_guard_cfg = None
+    elif loop_guard_raw is False:
+        loop_guard_cfg = False
+    elif loop_guard_raw is True:
+        loop_guard_cfg = {}
+    elif isinstance(loop_guard_raw, dict):
+        loop_guard_cfg = loop_guard_raw
+    else:
+        raise ConfigError(
+            f"tool '{name}'.loop_guard must be a bool or a mapping"
+        )
+
     return ToolConfig(
         name=name,
         protect=protect,
@@ -901,6 +1037,7 @@ def _parse_tool_config(
         provider_idempotency_key_param=provider_idempotency_key_param,
         provider_idempotency_key_ttl=provider_idempotency_key_ttl,
         callable_path=callable_path,
+        loop_guard=loop_guard_cfg,
     )
 
 
@@ -1000,6 +1137,7 @@ def _apply_action_ledger_tools(
             provider_idempotency_key_param=existing.provider_idempotency_key_param,
             provider_idempotency_key_ttl=existing.provider_idempotency_key_ttl,
             callable_path=existing.callable_path,
+            loop_guard=existing.loop_guard,
         )
 
 
@@ -1326,6 +1464,22 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
     if history_guard_raw is not None and not isinstance(history_guard_raw, dict):
         raise ConfigError("'history_guard' must be a mapping")
 
+    loop_guard_raw = data.get("loop_guard")
+    if loop_guard_raw is not None and not isinstance(loop_guard_raw, dict):
+        raise ConfigError("'loop_guard' must be a mapping")
+    if loop_guard_raw is not None:
+        # Validate early so half-wired configs fail at load.
+        storage_type = loop_guard_raw.get("storage", "memory")
+        if storage_type == "file" and not loop_guard_raw.get("path"):
+            raise ConfigError("loop_guard storage 'file' requires a 'path'")
+        if storage_type not in ("memory", "file", "redis", "postgres"):
+            raise ConfigError(
+                f"unknown loop_guard storage type: {storage_type!r}"
+            )
+        tools_sel = loop_guard_raw.get("tools", "all")
+        if tools_sel != "all" and not isinstance(tools_sel, list):
+            raise ConfigError("'loop_guard.tools' must be 'all' or a list of tool names")
+
     message_validator_raw = data.get("message_validator", False)
     if isinstance(message_validator_raw, dict):
         message_validator = bool(message_validator_raw.get("enabled", True))
@@ -1352,6 +1506,7 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
         action_ledger=action_ledger_raw,
         task_ledger_defaults=task_ledger_raw,
         integrations=integrations,
+        loop_guard=loop_guard_raw,
         _audit_auto=audit_auto,
     )
 

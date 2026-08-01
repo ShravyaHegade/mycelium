@@ -1,4 +1,4 @@
-"""CLI entrypoint: init, demo, command auto-instrumentation, and operator transitions."""
+"""CLI entrypoint: init, demo, run, transitions, loops, and outcomes."""
 
 from __future__ import annotations
 
@@ -511,6 +511,115 @@ def cmd_outcomes_dttr(args: argparse.Namespace) -> int:
     return 0
 
 
+def _loop_guard_from_args(args: argparse.Namespace) -> Any:
+    """Build a LoopGuard from --config / --file operator flags."""
+    from mycelium.config import ConfigError, load_config
+    from mycelium.loop_guard import FileLoopGuardStorage, LoopGuard
+
+    if getattr(args, "file", None):
+        return LoopGuard(FileLoopGuardStorage(args.file))
+
+    config_path = Path(args.config) if args.config else Path("mycelium.yaml")
+    if not config_path.is_file():
+        raise ConfigError(
+            f"no loop_guard storage specified and config not found: {config_path} "
+            "(pass --config or --file)"
+        )
+    config = load_config(config_path)
+    if config.loop_guard is None:
+        raise ConfigError(f"{config_path} declares no loop_guard section")
+    guard = config.build_loop_guard()
+    if guard is None:
+        raise ConfigError(f"{config_path} declares no loop_guard section")
+    storage_type = config.loop_guard.get("storage", "memory")
+    if storage_type == "memory":
+        raise ConfigError(
+            "loop_guard storage is 'memory', which lives inside the agent "
+            "process — the CLI cannot reach it. Use --file or configure "
+            "loop_guard.storage: file"
+        )
+    return guard
+
+
+def cmd_loops_status(args: argparse.Namespace) -> int:
+    from mycelium.config import ConfigError
+
+    try:
+        guard = _loop_guard_from_args(args)
+    except ConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    if args.run_id:
+        state = guard.get_state(args.run_id)
+        states = [state] if state is not None else []
+        if not states:
+            print(f"no loop-guard state for run {args.run_id!r}", file=sys.stderr)
+            return 1
+    else:
+        states = guard.storage.list_all()
+        if args.stuck:
+            states = [s for s in states if s.hard_blocked]
+
+    if args.json:
+        print(json.dumps([s.to_dict() for s in states], indent=2, default=str))
+        return 0
+
+    if not states:
+        print("(no loop-guard runs)")
+        return 0
+
+    for state in states:
+        flags = []
+        if state.hard_blocked:
+            flags.append("HARD")
+        if state.allow_once_hash:
+            flags.append("ALLOW_ONCE")
+        if state.operator_resolution:
+            flags.append(f"released:{state.operator_resolution}")
+        flag_s = f" [{' '.join(flags)}]" if flags else ""
+        print(
+            f"{state.scope_key}  streak={state.streak}  "
+            f"last_hash={(state.last_hash or '-')[:12]}  "
+            f"soft={len(state.soft_issued)}{flag_s}"
+        )
+        if state.hard_blocked and state.operator_resolution is None:
+            print(
+                f"  → mycelium loops release {state.scope_key} "
+                f"--verified clear|allow-once|abort-run --by … --reason …"
+            )
+    return 0
+
+
+def cmd_loops_release(args: argparse.Namespace) -> int:
+    from mycelium.action_ledger import (
+        LedgerAlreadyResolvedError,
+        LedgerReleaseRefusedError,
+    )
+    from mycelium.config import ConfigError
+
+    try:
+        guard = _loop_guard_from_args(args)
+        state = guard.release(
+            args.run_id,
+            verified=args.verified,
+            by=args.by,
+            reason=args.reason,
+        )
+    except ConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except (LedgerReleaseRefusedError, LedgerAlreadyResolvedError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    print(
+        f"released run {state.scope_key} --verified {state.operator_resolution} "
+        f"by {state.resolved_by}"
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="mycelium",
@@ -660,6 +769,75 @@ def main(argv: list[str] | None = None) -> int:
         "of death — bypass may cause a duplicate effect if worker is alive)",
     )
 
+    loops_parser = sub.add_parser(
+        "loops",
+        help="Operator triage and release of AF-003 loop-guard hard-blocks",
+    )
+    loops_sub = loops_parser.add_subparsers(dest="loops_command", required=True)
+
+    loops_status = loops_sub.add_parser(
+        "status", help="Show loop-guard state for runs"
+    )
+    loops_status.add_argument(
+        "run_id",
+        nargs="?",
+        default=None,
+        help="Optional run_id / scope key (default: list all)",
+    )
+    loops_status.add_argument(
+        "-c",
+        "--config",
+        type=Path,
+        default=Path("mycelium.yaml"),
+        help="Config path with loop_guard: (default: ./mycelium.yaml)",
+    )
+    loops_status.add_argument(
+        "--file",
+        type=Path,
+        default=None,
+        help="Direct path to loop_guard JSON file storage",
+    )
+    loops_status.add_argument(
+        "--stuck",
+        action="store_true",
+        help="Only hard-blocked runs",
+    )
+    loops_status.add_argument(
+        "--json", action="store_true", help="Machine-readable JSON output"
+    )
+
+    loops_release = loops_sub.add_parser(
+        "release",
+        help="Record a human verification releasing a loop-guard hard-block",
+    )
+    loops_release.add_argument("run_id")
+    loops_release.add_argument(
+        "-c",
+        "--config",
+        type=Path,
+        default=Path("mycelium.yaml"),
+        help="Config path with loop_guard: (default: ./mycelium.yaml)",
+    )
+    loops_release.add_argument(
+        "--file",
+        type=Path,
+        default=None,
+        help="Direct path to loop_guard JSON file storage",
+    )
+    loops_release.add_argument(
+        "--verified",
+        required=True,
+        choices=["clear", "allow-once", "abort-run"],
+        help="clear: wipe counters; allow-once: one matching action; "
+        "abort-run: keep frozen",
+    )
+    loops_release.add_argument(
+        "--by", required=True, help="Operator identity (audit stamp)"
+    )
+    loops_release.add_argument(
+        "--reason", required=True, help="Why the release is justified"
+    )
+
     outcomes_parser = sub.add_parser(
         "outcomes",
         help="Outcome telemetry: compute DTTR over emitted resolution rows",
@@ -716,6 +894,11 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_transitions_release(args)
         if args.transitions_command == "mark-dead":
             return cmd_transitions_mark_dead(args)
+    if args.command == "loops":
+        if args.loops_command == "status":
+            return cmd_loops_status(args)
+        if args.loops_command == "release":
+            return cmd_loops_release(args)
     if args.command == "outcomes":
         if args.outcomes_command == "dttr":
             return cmd_outcomes_dttr(args)
