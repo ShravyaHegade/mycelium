@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.20.6 (2026-08-01)
+
+Patch: align public version strings with the package; clean changelog headers.
+No code change.
+
+### Docs
+
+- PyPI badges (`release=`), "API-stable", and "Current package" banners →
+  **v1.20.6** (were still on v1.20.4 after the 1.20.5 release).
+- `sdk/docs/FAILURE_AND_THREAT_MODEL.md` version note → v1.20.6.
+- Remove stray empty `## Unreleased` headers between version sections.
+
 ## 1.20.5 (2026-08-01)
 
 Patch: docs-only sync of published surfaces to the v1.20.4 lineage. No code change.
@@ -16,8 +28,6 @@ Patch: docs-only sync of published surfaces to the v1.20.4 lineage. No code chan
   the webhook recipe (v1.20.3); boundaries link to the SDK README's
   "What Mycelium does not do".
 
-## Unreleased
-
 ## 1.20.4 (2026-08-01)
 
 Patch: positioning-only docs — "What Mycelium does not do" boundaries. No code change.
@@ -30,8 +40,6 @@ Patch: positioning-only docs — "What Mycelium does not do" boundaries. No code
   *under* an approval layer and *beside* a tracer — they don't replace each other).
 - Root `README.md`: boundary summary + link to the SDK section.
 - Handbook `docs/index.html`: one boundary sentence in the lede.
-
-## Unreleased
 
 ## 1.20.3 (2026-08-01)
 
@@ -54,8 +62,6 @@ ledger change).
   helper (no-op + warning outside `@ledger` bodies); documented that the manual
   path is still fail-closed via the durable claim.
 
-## Unreleased
-
 ## 1.20.2 (2026-08-01)
 
 Patch: sync root README and handbook with the latest implementation.
@@ -64,8 +70,6 @@ Patch: sync root README and handbook with the latest implementation.
 
 - Root `README.md`: "What it does (v1.20.x)" heading; added **Gmail sent-log reconciler (v1.19.0)** (Core) and **Resolution telemetry + DTTR (v1.20.0)** (Opt-in) bullets.
 - Handbook (`docs/index.html`): Gmail sent-log reconciler in Resolution (match matrix), Manual integration note in Actions, new **Outcome telemetry & DTTR** section (+ sidebar nav link), latest-features lede.
-
-## Unreleased
 
 ## 1.20.1 (2026-08-01)
 
@@ -120,6 +124,10 @@ observable in production.
 
 ### Docs
 
+- New public failure & threat model in `sdk/docs/FAILURE_AND_THREAT_MODEL.md`
+  (linked near "What `@ledger` does" in `sdk/README.md` and the root README):
+  scope, threat actors, guarantees the transition/ledger core provides and
+  deliberately does not, guarantee → test map, residual risks. Docs only.
 - `sdk/README.md` "Outcome telemetry & DTTR" section (definition + examples).
 - `sdk/docs/FAILURE_AND_THREAT_MODEL.md` residual-risk item: silent duplicates
   are invisible without opt-in telemetry; DTTR is the observability measure.
@@ -189,12 +197,6 @@ external verifiers, request_id identity semantics).
   = new transition (intentional). Opt-in identity-conflict rejection mode
   discussed but not shipped. (Mengchheang probe 1 / `dp-identity-conflict`
   closed as decided + documented.)
-
-## Unreleased
-
-### Docs
-
-- New public failure & threat model in `sdk/docs/FAILURE_AND_THREAT_MODEL.md` (link added near "What `@ledger` does" in `sdk/README.md` and the root README): scope, threat actors, the guarantees the transition/ledger core actually provides, the guarantees it deliberately does not (release authorization, runaway loops, trusting the reconciler, in-memory ledgers across processes, identity-conflict rejection), a guarantee → test map pinning every documented promise to a concrete test, and residual risks. Docs only — no API or behavior change.
 
 ## 1.19.0 (2026-07-30)
 
