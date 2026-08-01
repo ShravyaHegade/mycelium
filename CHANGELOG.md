@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 1.21.0 (2026-08-01)
+
+Minor: AF-003 loop guard — halt repeated identical tool actions across new
+`tool_call_id`s. Backward compatible (opt-in YAML; on by default in
+`mycelium init --full` / `--minimal`).
 
 ### Added
 
