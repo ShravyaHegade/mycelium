@@ -10,6 +10,8 @@
   `@loop_guard` → `@ledger` → `@bounded` → `@protect`. YAML `loop_guard:`,
   `mycelium loops status|release` (`--verified clear|allow-once|abort-run`),
   file/memory storage, example `sdk/examples/loop_guard_db_search.py`.
+- Docs sync: root `README.md` + handbook `docs/index.html` (scope, API, Loop guard
+  section, YAML) cover AF-003 alongside the SDK README.
 
 ## 1.20.6 (2026-08-01)
 

@@ -38,6 +38,7 @@ These aren't reasoning failures. They're runtime failures. Mycelium sits between
 
 **Opt-in** (configure or call explicitly):
 
+- **Infinite action loops (AF-003):** `loop_guard:` detects the same tool + args across *new* `tool_call_id`s (the ledger only dedupes redispatches of the *same* id). Soft-blocks with `ToolBoundaryError` (`violation=loop_detected`), then hard-blocks the whole run (`LedgerHardBlockError`) until an operator runs `mycelium loops release --verified clear|allow-once|abort-run`. On in `mycelium init --full` / `--minimal`. Details: [sdk/README.md](sdk/README.md#loop-guard-af-003-identical-actions-across-new-tool_call_ids).
 - **Stale or broken context:** TTL-fresh tool data (`@protect`); optional message/history validation before the next LLM turn
 - **Bad tool calls:** block invalid inputs and out-of-scope tools before they run (`@bounded` / registry)
 - **Resolution telemetry + DTTR (v1.20.0):** opt-in `OutcomeEmitter` writes flat, append-only rows on resolution events; the **Duplicate Tool Transition Rate** makes the no-double-execute guarantee observable in production. Off by default; memory/file storage only (no analytics dependency); emission failures are logged and swallowed so telemetry never breaks the tool path.
