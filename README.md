@@ -44,6 +44,8 @@ These aren't reasoning failures. They're runtime failures. Mycelium sits between
 
 Not Langfuse. Use both if you want traces and guards. Full resolution rules: [sdk/README.md](sdk/README.md#resolution-gates). Envelope field stack: [sdk/README.md](sdk/README.md#transition-envelope-fields). Payment-class identity guidance: [sdk/README.md](sdk/README.md#payment-class-identity-server-authoritative). Failure & threat model: [sdk/docs/FAILURE_AND_THREAT_MODEL.md](sdk/docs/FAILURE_AND_THREAT_MODEL.md). Inbound webhook event ids: [sdk/README.md](sdk/README.md#webhook-event-dedupe-optional).
 
+Not an approvals/policy inbox, not hosted observability, not on-chain audit trails, not a generic webhook hub, and not a rewind/agent-memory tool. It stops unsafe re-execution of side effects at the tool boundary — prevention, not post-hoc healing. Approvals, traces, and chain anchors are adjacent layers it composes with, not features it competes on: [What Mycelium does not do](sdk/README.md#what-mycelium-does-not-do).
+
 ## Use it
 
 ```bash

@@ -59,6 +59,20 @@ Mycelium sits between your agent loop and your tools (after the LLM returns `too
 
 Framework-agnostic. Raw message lists and plain Python functions (LangGraph, CrewAI, OpenAI tool loops, etc.).
 
+## What Mycelium does not do
+
+Mycelium is an **embeddable transition envelope at the tool boundary** — classify → claim/lease → gate (`RETURN` / `POLL` / `REPAIR` / `HARD_BLOCK` / …) → optional reconcile — for LangGraph, CrewAI, or plain Python, via YAML + decorators or manual claim/complete. It is not a full agent platform and deliberately stays out of adjacent lanes:
+
+| Not this | That lane | What Mycelium does instead |
+|---|---|---|
+| Approvals inbox / policy-builder UI | Approval & governance products (DashClaw / ThumbGate) | Hard-block + operator `release` (CLI/API); wire your own approver upstream |
+| Hosted traces & dashboards | Observability (Langfuse / LangSmith) | Optional local `OutcomeEmitter` / DTTR — opt-in telemetry, not a hosted identity |
+| On-chain audit trails | Separate “trails” / Argentum-style products | Durable ledger + optional provider reconcile / signed receipts — runtime/ledger anchors, not chain anchors |
+| Generic webhook/SaaS hub | Event buses / claim APIs | The same ledger *can* key on provider event ids; the wedge stays agent-tool redispatch |
+| Fix bad reasoning / rewind runs | Evals, memory, recovery tools | Stops unsafe **re-execution** of side effects at the tool boundary |
+
+**Compose:** use Mycelium *under* an approval layer and *beside* a tracer if you want all three — they don't replace each other. Layers shouldn't trust each other.
+
 ## Install
 
 **Requires Python 3.10+** (3.11+ recommended).
