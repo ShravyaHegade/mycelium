@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.20.1 (2026-08-01)
+
+Patch: document explicit claim → execute → complete (manual integration) beside
+the decorator / YAML wrap path; sync public version badges to 1.20.x.
+
+### Docs
+
+- `sdk/README.md`: new **Manual integration (claim → execute → complete)**
+  section — same ledger gates as `@ledger_sync`, for partners who own the tool
+  runner (PROCEED/SKIP-style). Prefers wrappers; no YAML switch.
+- Root `README.md`: link to that section from the non-YAML adoption path.
+- `mycelium init -h` description + post-init tip: prefer wrappers; point at
+  the manual-integration docs.
+
+### Chore
+
+- Bump package / badge / handbook version refs to **v1.20.1**.
+
 ## 1.20.0 (2026-08-01)
 
 Minor: opt-in resolution telemetry (`OutcomeEmitter`) + a pinned **Duplicate
