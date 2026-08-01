@@ -159,6 +159,25 @@ tasks: {}
 #     id_from: [your_business_key]
 
 # ---------------------------------------------------------------------------
+# loop_guard  (AF-003 — halt identical actions across new tool_call_ids)
+# ---------------------------------------------------------------------------
+loop_guard:
+  storage: file
+  path: ./mycelium-loop.json
+  escalate_after_soft: 1
+  # unclassified_policy: warn   # warn (default): missing side_effect_class → read N=5
+                                # strict: treat as mutate N=2
+  consecutive_soft:
+    read: 5
+    idempotent_mutate: 3
+    keyed_mutate: 2
+    non_idempotent_mutate: 2
+    irreversible: 2
+  # tools: all                  # default: all keys under tools:
+  # exclude: [poll_status]      # known pollers
+  # Per-tool: tools.my_tool.loop_guard: { consecutive_soft: 20 }  or  false
+
+# ---------------------------------------------------------------------------
 # registry / runner / history_guard / message_validator  (omit if unused)
 # ---------------------------------------------------------------------------
 registry:

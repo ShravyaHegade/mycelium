@@ -52,6 +52,7 @@ Mycelium sits between your agent loop and your tools (after the LLM returns `too
 |---|---------|-------------------|
 | **Core** | **Duplicate side effects on retry** | Transition envelope: classify tools, durable transition key, lease (+ auto-renew while `@ledger` runs), terminal state, resolution **gates** (`POLL` / `REPAIR` / `SOFT_BLOCK` / `HARD_BLOCK`), `external_operation_ref` + `Reconciler`, ledgers, signed receipts |
 | **Core** | **Transition envelope fields** | `side_effect_class` → `spendability` → `side_effect_boundary` → `terminal_outcome` → `external_operation_ref` → `retry_permission` — same system as above; payment/write needs the heavier set |
+| **Opt-in** | **Infinite action loops (AF-003)** | `loop_guard:` — action-hash streak across *new* `tool_call_id`s; soft (`ToolBoundaryError`) then hard (`LedgerHardBlockError`); operator `mycelium loops release` |
 | **Opt-in** | **Stale or broken context** | TTL cache (`@protect` / `Session`); optional `MessageValidator` / `HistoryGuard` you call before the next LLM turn |
 | **Opt-in** | **Bad tool calls** | `@bounded` input/output/scope checks; optional `ToolRegistry` allowlist — block before the tool runs |
 
@@ -867,6 +868,44 @@ ledger.release(request_id, verified="not_executed",
                by="ops@example.com", reason="worker died before effect")
 ```
 
+### Loop guard (AF-003): identical actions across new `tool_call_id`s
+
+The action ledger deduplicates **retries of the same dispatch**. If the LLM emits a *new* `tool_call_id` each turn with the same tool + args, that is a new transition — the ledger allows it. Optional `loop_guard:` detects that thrash:
+
+1. Soft — `ToolBoundaryError` (`violation=loop_detected`) with an `llm_message`; body does not run  
+2. Hard — `LedgerHardBlockError`; **entire run** frozen until an operator releases it  
+
+```yaml
+loop_guard:
+  storage: file
+  path: ./mycelium-loop.json
+  escalate_after_soft: 1
+  consecutive_soft:
+    read: 5
+    idempotent_mutate: 3
+    keyed_mutate: 2
+    non_idempotent_mutate: 2
+    irreversible: 2
+```
+
+Wrapper order: `@loop_guard` → `@ledger` → `@bounded` → `@protect` → `func`.
+
+```bash
+mycelium loops status --stuck --config mycelium.yaml
+# or: mycelium loops status --file ./mycelium-loop.json
+
+mycelium loops release <run_id> --verified clear|allow-once|abort-run \
+  --by ops@example.com --reason "..."
+```
+
+| `--verified` | Meaning |
+|---|---|
+| `clear` | Wipe streak / soft flags; counting restarts at 0 |
+| `allow-once` | Permit exactly one matching action hash, then re-arm |
+| `abort-run` | Keep the run frozen |
+
+Demo: `python examples/loop_guard_db_search.py` (from `sdk/`).
+
 Storage backends:
 
 | Backend | Use case | YAML `storage` |
@@ -1029,6 +1068,10 @@ tasks:
 
 registry:
   auto: true                     # allowlist = all configured tools
+
+loop_guard:
+  storage: file
+  path: ./mycelium-loop.json
 
 history_guard:
   max_tokens: 100000

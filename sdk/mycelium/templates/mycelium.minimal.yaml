@@ -79,6 +79,17 @@ tasks:
     id_from:
       - invoice_id
 
+loop_guard:
+  storage: file
+  path: ./mycelium-loop.json
+  escalate_after_soft: 1
+  consecutive_soft:
+    read: 5
+    idempotent_mutate: 3
+    keyed_mutate: 2
+    non_idempotent_mutate: 2
+    irreversible: 2
+
 registry:
   auto: true
 

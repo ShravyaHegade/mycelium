@@ -45,6 +45,22 @@ from mycelium.config import (
     load_config_from_string,
 )
 from mycelium.history_guard import HistoryGuard, HistoryTruncatedError
+from mycelium.loop_guard import (
+    DEFAULT_CONSECUTIVE_SOFT,
+    VERIFIED_ABORT_RUN,
+    VERIFIED_ALLOW_ONCE,
+    VERIFIED_CLEAR,
+    VERIFIED_RESOLUTIONS,
+    FileLoopGuardStorage,
+    InMemoryLoopGuardStorage,
+    LoopGuard,
+    LoopGuardStorage,
+    LoopRunState,
+    action_hash,
+    apply_loop_guard,
+    loop_guard,
+    loop_guard_sync,
+)
 from mycelium.message_validator import MessageValidationError, MessageValidator
 from mycelium.outcome_emit import (
     DttrReport,
@@ -212,6 +228,20 @@ __all__ = [
     "MessageValidationError",
     "HistoryGuard",
     "HistoryTruncatedError",
+    "DEFAULT_CONSECUTIVE_SOFT",
+    "VERIFIED_ABORT_RUN",
+    "VERIFIED_ALLOW_ONCE",
+    "VERIFIED_CLEAR",
+    "VERIFIED_RESOLUTIONS",
+    "FileLoopGuardStorage",
+    "InMemoryLoopGuardStorage",
+    "LoopGuard",
+    "LoopGuardStorage",
+    "LoopRunState",
+    "action_hash",
+    "apply_loop_guard",
+    "loop_guard",
+    "loop_guard_sync",
     "bounded",
     "bounded_sync",
     "ToolBoundaryError",

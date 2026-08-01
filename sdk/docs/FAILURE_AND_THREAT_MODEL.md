@@ -36,10 +36,13 @@ This document is **explicitly out of scope** for:
 - **LLM hallucination, prompt injection, or "is the operator *allowed* to
   release this?"** — see [release authority](../README.md#operator-runbook-your-agent-hard-blocked)
   for the honesty model (`--by` is an audit stamp, not authentication).
-- Budget / runaway-loop control (a tool that legitimately runs 1,000 times
-  under 1,000 distinct transition keys is *not* a duplicate).
+- Budget / runaway-loop control *unless* optional `loop_guard:` (AF-003) is
+  configured — that guard halts consecutive identical action hashes across
+  distinct `tool_call_id`s. Without it, a tool that legitimately runs 1,000
+  times under 1,000 distinct transition keys is *not* treated as a duplicate.
 - The optional `@protect` / `HistoryGuard` / `MessageValidator` / `@bounded`
-  / `Session` features.
+  / `Session` / `loop_guard` features (loop_guard is documented in the catalog
+  and SDK README; not part of the ledger core guarantee set below).
 
 ---
 
@@ -188,9 +191,10 @@ than the code makes.
   has been discussed but is **not shipped**; the current contract is pinned by
   `tests/test_mengchheang_public_repro.py::test_semantic_identity`
   (continuity-harness scenario). Treat this as an intentional non-guarantee.
-- **Budget / runaway loops.** If a caller legitimately produces many distinct
-  transition keys, the runtime does not stop the calls. Each key is guarded;
-  the total spend is not.
+- **Budget / runaway loops (without `loop_guard:`).** If a caller produces many
+  distinct transition keys, the ledger does not stop the calls. Optional
+  AF-003 `loop_guard:` halts consecutive identical *action* hashes (tool + args)
+  across new dispatch ids; it is not a general spend budget.
 - **Trusting the reconciler.** If your reconciler returns `NOT_EXECUTED` when
   the effect actually happened, the runtime will re-execute once. Reconcilers
   are read-only *by contract*, not enforced by Mycelium.
