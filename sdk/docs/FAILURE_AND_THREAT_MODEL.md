@@ -12,7 +12,7 @@ README is the source of truth for how the pieces are used; this file is the
 honest accounting of what can go wrong and which guarantee is pinned to which
 test.
 
-> Version note: this document tracks package **v1.19.2**. It is documentation
+> Version note: this document tracks package **v1.20.1**. It is documentation
 > only — no API or behavior change.
 
 ---

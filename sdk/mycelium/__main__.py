@@ -53,6 +53,10 @@ def cmd_init(output: Path, *, full: bool, minimal: bool, force: bool) -> int:
         print("Try: mycelium demo")
     else:
         print("Next: edit tool/task names, then load_config(...) in your agent code.")
+    print(
+        "Prefer wrappers (mycelium run / @ledger_sync). For a custom tool loop, "
+        "see sdk/README.md — Manual integration (claim → execute → complete)."
+    )
     return 0
 
 
@@ -514,7 +518,18 @@ def main(argv: list[str] | None = None) -> int:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    init_parser = sub.add_parser("init", help="Create mycelium.yaml in the current project")
+    init_parser = sub.add_parser(
+        "init",
+        help="Create mycelium.yaml in the current project",
+        description=(
+            "Scaffold mycelium.yaml for the wrapper path "
+            "(mycelium run / @config.apply / @ledger_sync). Prefer wrappers. "
+            "For a custom tool loop that needs explicit claim → execute → complete "
+            "(PROCEED/SKIP-style), see the SDK README section "
+            "'Manual integration (claim → execute → complete)' — there is no "
+            "YAML switch; that API is called from your code."
+        ),
+    )
     init_parser.add_argument(
         "-o",
         "--output",

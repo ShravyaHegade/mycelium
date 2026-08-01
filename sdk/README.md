@@ -1,9 +1,9 @@
 # Mycelium runtime
 
-[![PyPI version](https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&release=1.19.2)](https://pypi.org/project/mycelium-runtime/)
+[![PyPI version](https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&release=1.20.1)](https://pypi.org/project/mycelium-runtime/)
 [![Python](https://img.shields.io/pypi/pyversions/mycelium-runtime.svg)](https://pypi.org/project/mycelium-runtime/)
 
-Current package: **mycelium-runtime v1.19.2** (fail-closed Gmail sent-log reconciler + atomicity contract + CAS backends + owner fencing + worker-death signal + operator release + `REPAIR` gate + lease auto-renew + transition envelope).
+Current package: **mycelium-runtime v1.20.1** (outcome telemetry / DTTR + fail-closed Gmail sent-log reconciler + atomicity contract + CAS backends + owner fencing + worker-death signal + operator release + `REPAIR` gate + lease auto-renew + transition envelope).
 
 ## One painful bug → a few lines of config
 
@@ -304,6 +304,69 @@ from mycelium import ledger
 async def send_payment(amount: float, recipient: str) -> dict:
     return await gateway.charge(amount, recipient)
 ```
+
+### Manual integration (claim → execute → complete)
+
+Prefer `@ledger_sync` / `@ledger`, YAML + `mycelium run`, or `@config.apply` — those wrap the tool and run the two phases for you. Use the explicit API only when you already own the tool runner (custom loop, PROCEED/SKIP-style host) and cannot take a decorator.
+
+Same ledger, same gates, same hard-block rules. You call claim and complete yourself:
+
+```python
+from mycelium import (
+    ActionLedger,
+    FileLedgerStorage,
+    LedgerHardBlockError,
+    TerminalOutcome,
+    execution_scope,
+    side_effect,
+)
+from mycelium.transition import SideEffectClass, ToolTransitionBinding, TransitionScope
+
+ledger = ActionLedger(storage=FileLedgerStorage("./mycelium-ledger.json"))
+binding = ToolTransitionBinding.for_tool(
+    agent_id="payment-agent",
+    policy_version="2026.07.1",
+    side_effect_class=SideEffectClass.KEYED_MUTATE,
+)
+
+def send_payment(amount: float, recipient: str, *, tool_call_id: str) -> dict:
+    args = (amount, recipient)
+    kwargs = {"tool_call_id": tool_call_id}
+    request_id = ledger.derive_request_id(
+        "send_payment", args, kwargs, transition_binding=binding
+    )
+    with execution_scope(TransitionScope(thread_id="t1", run_id="r1", node="tools")):
+        try:
+            entry = ledger.claim_side_effecting(
+                request_id, "send_payment", args, kwargs, binding
+            )
+        except LedgerHardBlockError:
+            # Ambiguous mutate — reconcile / operator release; do not re-run.
+            raise
+
+        # SKIP / RETURN: already completed — replay stored result, no second send.
+        if entry.terminal_outcome == TerminalOutcome.COMPLETED.value:
+            return entry.result
+
+        # PROCEED: we hold IN_FLIGHT — run the side effect once, then settle.
+        try:
+            with side_effect():
+                result = gateway.charge(amount, recipient)
+            ledger.complete(request_id, result)
+            return result
+        except Exception as exc:
+            ledger.fail(request_id, exc, failed_after_effect=False)
+            raise
+```
+
+| Step | Meaning |
+|------|---------|
+| `claim_side_effecting(...)` | May I run? Resolves gates (`RETURN` / `POLL` / `HARD_BLOCK` / …). Raises on hard-block. |
+| `COMPLETED` → return `entry.result` | Partner-facing **SKIP** — already done. |
+| Else run body + `complete(...)` | Partner-facing **PROCEED** then settle. |
+| `fail(...)` | Settle a failure; use `failed_after_effect=True` if the provider may have accepted. |
+
+`mycelium init` / `mycelium run` always use the wrapper path — there is no YAML switch for manual claim/complete. For long tools claimed outside the decorator, call `renew_lease(request_id)` (or pass `lease_renew_interval` when you build the ledger) so peers keep polling instead of reclaiming mid-flight. See [Resolution gates](#resolution-gates).
 
 ## What `@ledger` / `ledger_sync` do
 
