@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.20.2 (2026-08-01)
+
+Patch: sync root README and handbook with the latest implementation.
+
+### Docs
+
+- Root `README.md`: "What it does (v1.20.x)" heading; added **Gmail sent-log reconciler (v1.19.0)** (Core) and **Resolution telemetry + DTTR (v1.20.0)** (Opt-in) bullets.
+- Handbook (`docs/index.html`): Gmail sent-log reconciler in Resolution (match matrix), Manual integration note in Actions, new **Outcome telemetry & DTTR** section (+ sidebar nav link), latest-features lede.
+
+## Unreleased
+
 ## 1.20.1 (2026-08-01)
 
 Patch: document explicit claim → execute → complete (manual integration) beside

@@ -16,7 +16,7 @@ Developers running **agents with side-effect tools** in production (payments, em
 
 Python 3.10+. Framework-agnostic.
 
-## What it does (v1.19.x)
+## What it does (v1.20.x)
 
 These aren't reasoning failures. They're runtime failures. Mycelium sits between your agent loop and your tools (after the LLM returns `tool_calls`):
 
@@ -29,6 +29,7 @@ These aren't reasoning failures. They're runtime failures. Mycelium sits between
   - **Worker-death signal (v1.16.0, opt-in):** when `reclaim_requires_death_signal: true`, EXPIRED entries cannot be reclaimed or released without affirmative death evidence (`mark_worker_dead()` / `mycelium transitions mark-dead`, or heartbeat older than the grace window). Prevents reclaiming from a worker that is merely paused.
   - **Provider idempotency-key validity (v1.17.0):** when `provider_idempotency_key_ttl` is set, a same-key retry that exceeds the window hard-blocks instead of retrying — the provider may have purged its deduplication state.
   - **Atomicity contract (v1.18.0):** every terminal-outcome write uses CAS (`try_transition`) — already-resolved transitions refuse overwrites. Owner fencing in `@ledger`/`@ledger_sync` prevents stale workers from overwriting another worker's outcome.
+  - **Gmail sent-log reconciler (v1.19.0):** email send tools fail after the provider accepts a message but before the 250 OK arrives — the ambiguous transition hard-blocks. `GmailReconciler` resolves it automatically by checking the Gmail sent-log (`in:sent rfc822msgid:<Message-ID>`); zero matches stays `UNKNOWN` (indexing lag), never a blind retry.
   - **Unclassified tools:** tools without a `transition_binding` have unknown side-effect semantics. `unclassified_policy: strict` routes retries through a conservative binding so failed retries hard-block instead of re-executing (default `warn` emits a one-time `UserWarning`). Side-effecting tools using memory storage get a one-time warning — the duplicate-side-effect guard only holds within the process.
   - **Stale lease (`EXPIRED`):** strict classes reclaim only when reconcile proves `NOT_EXECUTED` (fail-closed without a ref)
   - **Lease auto-renew (v1.14.0):** while a `@ledger` / `@ledger_sync` tool runs, Mycelium extends `lease_until` automatically (default every `lease_ttl / 3`) so long work does not look dead to a redispatched peer. Set `lease_renew_interval: 0` to disable; call `renew_lease()` for a manual bump or when claiming outside the decorator.
@@ -39,6 +40,7 @@ These aren't reasoning failures. They're runtime failures. Mycelium sits between
 
 - **Stale or broken context:** TTL-fresh tool data (`@protect`); optional message/history validation before the next LLM turn
 - **Bad tool calls:** block invalid inputs and out-of-scope tools before they run (`@bounded` / registry)
+- **Resolution telemetry + DTTR (v1.20.0):** opt-in `OutcomeEmitter` writes flat, append-only rows on resolution events; the **Duplicate Tool Transition Rate** makes the no-double-execute guarantee observable in production. Off by default; memory/file storage only (no analytics dependency); emission failures are logged and swallowed so telemetry never breaks the tool path.
 
 Not Langfuse. Use both if you want traces and guards. Full resolution rules: [sdk/README.md](sdk/README.md#resolution-gates). Envelope field stack: [sdk/README.md](sdk/README.md#transition-envelope-fields). Payment-class identity guidance: [sdk/README.md](sdk/README.md#payment-class-identity-server-authoritative). Failure & threat model: [sdk/docs/FAILURE_AND_THREAT_MODEL.md](sdk/docs/FAILURE_AND_THREAT_MODEL.md).
 
