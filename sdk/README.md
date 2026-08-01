@@ -318,7 +318,6 @@ from mycelium import (
     LedgerHardBlockError,
     TerminalOutcome,
     execution_scope,
-    side_effect,
 )
 from mycelium.transition import SideEffectClass, ToolTransitionBinding, TransitionScope
 
@@ -350,13 +349,12 @@ def send_payment(amount: float, recipient: str, *, tool_call_id: str) -> dict:
 
         # PROCEED: we hold IN_FLIGHT — run the side effect once, then settle.
         try:
-            with side_effect():
-                result = gateway.charge(amount, recipient)
-            ledger.complete(request_id, result)
-            return result
+            result = gateway.charge(amount, recipient)
         except Exception as exc:
             ledger.fail(request_id, exc, failed_after_effect=False)
             raise
+        ledger.complete(request_id, result)
+        return result
 ```
 
 | Step | Meaning |
@@ -366,7 +364,79 @@ def send_payment(amount: float, recipient: str, *, tool_call_id: str) -> dict:
 | Else run body + `complete(...)` | Partner-facing **PROCEED** then settle. |
 | `fail(...)` | Settle a failure; use `failed_after_effect=True` if the provider may have accepted. |
 
+The `side_effect()` / `record_external_operation()` boundary helpers only take effect inside `@ledger` / `@ledger_sync` tool bodies; in this manual path they are ignored. Durability still holds from the claim itself: if the process dies after claiming, the entry expires and a redispatch hard-blocks rather than re-running.
+
 `mycelium init` / `mycelium run` always use the wrapper path — there is no YAML switch for manual claim/complete. For long tools claimed outside the decorator, call `renew_lease(request_id)` (or pass `lease_renew_interval` when you build the ledger) so peers keep polling instead of reclaiming mid-flight. See [Resolution gates](#resolution-gates).
+
+### Webhook event dedupe (optional)
+
+If you already use Mycelium to guard agent tools, you can also claim inbound
+provider events the same way. This is an **optional adjacent recipe** — agent
+tools stay the primary use case, and it is not a general webhook platform.
+
+Inbound providers deliver **at-least-once** (Stripe, GitHub, Twilio all retry
+on non-2xx). Claim the **provider event id** through the same `ActionLedger`
+and you get **at-most-once handler side effects for that event id**: the first
+delivery does the work and `complete`s; a redelivery hits the `RETURN`/SKIP
+path and returns `200` without re-running the side effect.
+
+Key the transition on the **provider event id** — Stripe `event.id`, GitHub
+`X-GitHub-Delivery`, Twilio message/event SID — not the whole payload, not the
+provider's *response* id, and not Stripe's `Idempotency-Key` *request* header
+(that header dedupes requests you send *to* Stripe; it is unrelated to inbound
+delivery). Because the event id is the only arg in the fingerprint, a
+redelivery with slightly different payload bytes still resolves to the same
+transition. Pin `agent_id` and `policy_version` across deploys so the key
+stays stable after a release.
+
+Verify the provider signature **before** claiming. Then claim, work once, and
+settle — the same manual API as above. On `HARD_BLOCK`, fail closed (reconcile
+or use the operator-release path), never re-run blindly:
+
+```python
+from mycelium import (
+    ActionLedger,
+    FileLedgerStorage,
+    LedgerHardBlockError,
+    TerminalOutcome,
+)
+from mycelium.transition import SideEffectClass, ToolTransitionBinding
+
+ledger = ActionLedger(storage=FileLedgerStorage("./webhook-events.json"))
+binding = ToolTransitionBinding.for_tool(
+    agent_id="webhook-worker",
+    policy_version="2026.08.1",
+    side_effect_class=SideEffectClass.KEYED_MUTATE,
+)
+
+def handle_event(tool: str, event_id: str, do_work) -> int:
+    args, kwargs = (event_id,), {}
+    request_id = ledger.derive_request_id(tool, args, kwargs, transition_binding=binding)
+    try:
+        entry = ledger.claim_side_effecting(request_id, tool, args, kwargs, binding)
+    except LedgerHardBlockError:
+        return 409                          # HARD_BLOCK: reconcile / operator release
+    if entry.terminal_outcome == TerminalOutcome.COMPLETED.value:
+        return 200                          # SKIP: already handled this event id
+    try:
+        result = do_work()                  # the side effect, once
+    except Exception as exc:
+        ledger.fail(request_id, exc, failed_after_effect=False)
+        return 500
+    ledger.complete(request_id, result)
+    return 200                              # PROCEED
+```
+
+> **Note (manual mode):** the boundary/ref helpers (`side_effect()`,
+> `record_external_operation()`) only take effect inside `@ledger` /
+> `@ledger_sync` tool bodies. In manual claim mode they are ignored — durability
+> comes from the claim itself: if the process dies after claiming, the entry
+> expires and a redelivery hard-blocks instead of re-running.
+
+Runnable examples (fakes only, no provider credentials):
+[Stripe](examples/webhooks/stripe.md) (`event.id`) ·
+[GitHub](examples/webhooks/github.md) (`X-GitHub-Delivery`) ·
+[Twilio](examples/webhooks/twilio.md) (message/event SID).
 
 ## What `@ledger` / `ledger_sync` do
 
