@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mycelium-runtime"
-version = "1.20.4"
+version = "1.20.5"
 description = "Runtime guards and YAML auto-instrumentation for reliable AI agent tools"
 keywords = [
   "ai-agents",
