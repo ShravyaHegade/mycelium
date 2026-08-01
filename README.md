@@ -40,7 +40,7 @@ These aren't reasoning failures. They're runtime failures. Mycelium sits between
 - **Stale or broken context:** TTL-fresh tool data (`@protect`); optional message/history validation before the next LLM turn
 - **Bad tool calls:** block invalid inputs and out-of-scope tools before they run (`@bounded` / registry)
 
-Not Langfuse. Use both if you want traces and guards. Full resolution rules: [sdk/README.md](sdk/README.md#resolution-gates). Envelope field stack: [sdk/README.md](sdk/README.md#transition-envelope-fields). Payment-class identity guidance: [sdk/README.md](sdk/README.md#payment-class-identity-server-authoritative).
+Not Langfuse. Use both if you want traces and guards. Full resolution rules: [sdk/README.md](sdk/README.md#resolution-gates). Envelope field stack: [sdk/README.md](sdk/README.md#transition-envelope-fields). Payment-class identity guidance: [sdk/README.md](sdk/README.md#payment-class-identity-server-authoritative). Failure & threat model: [sdk/docs/FAILURE_AND_THREAT_MODEL.md](sdk/docs/FAILURE_AND_THREAT_MODEL.md).
 
 ## Use it
 
