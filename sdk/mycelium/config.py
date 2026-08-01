@@ -35,6 +35,12 @@ from mycelium.integrations.langgraph import (
     instrument_langgraph_tool,
 )
 from mycelium.message_validator import MessageValidator
+from mycelium.outcome_emit import (
+    FileOutcomeStorage,
+    InMemoryOutcomeStorage,
+    OutcomeEmitter,
+    OutcomeStorage,
+)
 from mycelium.protect import protect, protect_sync
 from mycelium.session import Session
 from mycelium.state_flush import (
@@ -216,11 +222,13 @@ class MyceliumConfig:
     tasks: dict[str, TaskConfig] | None = None
     state_flush: dict[str, Any] | None = None
     audit_receipt: dict[str, Any] | None = None
+    outcome_emit: dict[str, Any] | None = None
     transition: TransitionConfig | None = None
     action_ledger: dict[str, Any] | None = None
     task_ledger_defaults: dict[str, Any] | None = None
     integrations: dict[str, dict[str, Any]] | None = None
     _audit_emitter: AuditReceiptEmitter | None = None
+    _outcome_emitter: OutcomeEmitter | None = None
     _state_flush: StateFlush | None = None
     _audit_auto: bool = False
 
@@ -268,6 +276,7 @@ class MyceliumConfig:
         if tool_config.ledger is not None:
             storage = self._build_ledger_storage(tool_config.ledger)
             audit_emitter = self._tool_audit_emitter(tool_config)
+            outcome_emitter = self.build_outcome_emitter()
             transition_binding = self.tool_transition_binding(tool_config)
             ledger_kwargs = self._ledger_timing_kwargs()
             unclassified_policy = (self.action_ledger or {}).get(
@@ -278,6 +287,7 @@ class MyceliumConfig:
                 func = ledger(
                     storage=storage,
                     audit_emitter=audit_emitter,
+                    outcome_emitter=outcome_emitter,
                     transition_binding=transition_binding,
                     **ledger_kwargs,
                 )(func)
@@ -285,6 +295,7 @@ class MyceliumConfig:
                 func = ledger_sync(
                     storage=storage,
                     audit_emitter=audit_emitter,
+                    outcome_emitter=outcome_emitter,
                     transition_binding=transition_binding,
                     **ledger_kwargs,
                 )(func)
@@ -454,6 +465,22 @@ class MyceliumConfig:
             storage=storage,
         )
         return self._audit_emitter
+
+    def build_outcome_emitter(self) -> OutcomeEmitter | None:
+        """Build an OutcomeEmitter if the config declares one."""
+        if self.outcome_emit is None:
+            return None
+        if self._outcome_emitter is not None:
+            return self._outcome_emitter
+        agent_id = "mycelium"
+        if self.transition is not None:
+            agent_id = self.transition.agent_id
+        storage = self._build_outcome_storage(self.outcome_emit)
+        self._outcome_emitter = OutcomeEmitter(
+            agent_id=str(agent_id),
+            storage=storage,
+        )
+        return self._outcome_emitter
 
     def prepare_messages(self, messages: list[Any]) -> list[Any]:
         """
@@ -667,6 +694,18 @@ class MyceliumConfig:
         if storage_type == "memory":
             return InMemoryAuditReceiptStorage()
         raise ConfigError(f"unknown audit_receipt storage type: {storage_type!r}")
+
+    @staticmethod
+    def _build_outcome_storage(raw: dict[str, Any]) -> OutcomeStorage:
+        storage_type = raw.get("storage", "memory")
+        if storage_type == "file":
+            path = raw.get("path")
+            if not path:
+                raise ConfigError("outcome_emit storage 'file' requires a 'path'")
+            return FileOutcomeStorage(path)
+        if storage_type == "memory":
+            return InMemoryOutcomeStorage()
+        raise ConfigError(f"unknown outcome_emit storage type: {storage_type!r}")
 
     def wrap_module(self, module: Any) -> Any:
         """
@@ -1223,6 +1262,15 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
 
     audit_auto = bool(audit_receipt_raw and audit_receipt_raw.get("auto", True))
 
+    outcome_emit_raw = data.get("outcome_emit")
+    if outcome_emit_raw is not None and not isinstance(outcome_emit_raw, dict):
+        raise ConfigError("'outcome_emit' must be a mapping")
+    if outcome_emit_raw is not None and outcome_emit_raw.get("agent_id"):
+        raise ConfigError(
+            "'outcome_emit.agent_id' is no longer supported; "
+            "set 'transition.agent_id' instead"
+        )
+
     tools_raw = data.get("tools", {})
     if not isinstance(tools_raw, dict):
         raise ConfigError("'tools' must be a mapping")
@@ -1299,6 +1347,7 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
         message_validator=message_validator,
         state_flush=state_flush_raw,
         audit_receipt=audit_receipt_raw,
+        outcome_emit=outcome_emit_raw,
         transition=transition,
         action_ledger=action_ledger_raw,
         task_ledger_defaults=task_ledger_raw,

@@ -21,6 +21,7 @@ _TEMPLATE_MINIMAL = "mycelium.minimal.yaml"
 _ENV_LEDGER_FILE = "MYCELIUM_LEDGER_FILE"
 _ENV_REDIS_URL = "MYCELIUM_REDIS_URL"
 _ENV_POSTGRES_DSN = "MYCELIUM_POSTGRES_DSN"
+_ENV_OUTCOME_FILE = "MYCELIUM_OUTCOME_FILE"
 
 
 def _load_template(*, full: bool, minimal: bool) -> tuple[str, str]:
@@ -438,6 +439,74 @@ def cmd_transitions_mark_dead(args: argparse.Namespace) -> int:
     return 0
 
 
+def _outcome_storage_config(
+    args: argparse.Namespace,
+) -> tuple[dict[str, Any], float | None]:
+    """Resolve the outcome-log storage config + long_running_after override."""
+    from mycelium.config import ConfigError, load_config
+
+    file_path = args.outcome_file or os.environ.get(_ENV_OUTCOME_FILE)
+    if file_path:
+        return {"storage": "file", "path": str(file_path)}, None
+
+    config_path = args.config if args.config is not None else Path("mycelium.yaml")
+    if not config_path.is_file():
+        raise ConfigError(
+            f"no outcome log specified and config not found: {config_path} "
+            "(pass --file, or --config with an 'outcome_emit' section)"
+        )
+    config = load_config(config_path)
+    if config.outcome_emit is None:
+        raise ConfigError(
+            f"{config_path} declares no 'outcome_emit' section; "
+            "add one (storage: file, path: ...) or pass --file"
+        )
+    long_running_after = config.outcome_emit.get("long_running_after")
+    return config.outcome_emit, long_running_after
+
+
+def cmd_outcomes_dttr(args: argparse.Namespace) -> int:
+    from mycelium.config import ConfigError, MyceliumConfig
+    from mycelium.outcome_emit import compute_dttr
+
+    try:
+        raw, config_long_running = _outcome_storage_config(args)
+        storage = MyceliumConfig._build_outcome_storage(raw)
+    except ConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    long_running_after = args.long_running_after
+    if long_running_after is None:
+        long_running_after = config_long_running
+    report = compute_dttr(
+        storage.list_all(),
+        long_running_after=(
+            float(long_running_after) if long_running_after is not None else None
+        ),
+    )
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2, default=str))
+        return 0
+    print(f"DTTR: {report.dttr:.4f}  (target: 0.0)")
+    print(
+        f"silent duplicates: {report.silent_duplicates}  "
+        f"long-running or redispatched: {report.long_running_or_redispatched}  "
+        f"transitions: {report.transitions}"
+    )
+    for item in report.per_transition:
+        marker = " *" if item.long_running_or_redispatched else ""
+        print(
+            f"  {item.request_id}  {item.tool}  "
+            f"execs={item.body_executions}  silent={item.silent_duplicates}  "
+            f"resolutions={item.resolution_events}  dur={item.duration_seconds:.1f}s"
+            f"{marker}"
+        )
+    if report.long_running_or_redispatched == 0 and report.transitions > 0:
+        print("no long-running or redispatched transitions: DTTR is undefined "
+              "(denominator forced to 1)")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="mycelium",
@@ -576,6 +645,46 @@ def main(argv: list[str] | None = None) -> int:
         "of death — bypass may cause a duplicate effect if worker is alive)",
     )
 
+    outcomes_parser = sub.add_parser(
+        "outcomes",
+        help="Outcome telemetry: compute DTTR over emitted resolution rows",
+    )
+    outcomes_sub = outcomes_parser.add_subparsers(
+        dest="outcomes_command", required=True
+    )
+
+    dttr_parser = outcomes_sub.add_parser(
+        "dttr",
+        help="Compute the Duplicate Tool Transition Rate (DTTR) over an "
+        "outcome log; target is 0.0",
+    )
+    dttr_parser.add_argument(
+        "-c",
+        "--config",
+        type=Path,
+        default=None,
+        help="mycelium.yaml to read the outcome_emit storage from "
+        "(default: ./mycelium.yaml)",
+    )
+    dttr_parser.add_argument(
+        "--file",
+        dest="outcome_file",
+        type=Path,
+        default=None,
+        help=f"NDJSON outcome log path (or ${_ENV_OUTCOME_FILE}); overrides --config",
+    )
+    dttr_parser.add_argument(
+        "--long-running-after",
+        dest="long_running_after",
+        type=float,
+        default=None,
+        help="seconds; transitions older than this count as long-running "
+        "(default: outcome_emit.long_running_after, else disabled)",
+    )
+    dttr_parser.add_argument(
+        "--json", action="store_true", help="Machine-readable JSON output"
+    )
+
     args = parser.parse_args(argv)
     if args.command == "init":
         return cmd_init(args.output, full=args.full, minimal=args.minimal, force=args.force)
@@ -592,6 +701,9 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_transitions_release(args)
         if args.transitions_command == "mark-dead":
             return cmd_transitions_mark_dead(args)
+    if args.command == "outcomes":
+        if args.outcomes_command == "dttr":
+            return cmd_outcomes_dttr(args)
     return 1
 
 
