@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.20.5 (2026-08-01)
+
+Patch: docs-only sync of published surfaces to the v1.20.4 lineage. No code change.
+
+### Docs
+
+- Version sync: PyPI badges (`release=`) and "API-stable (v…)" lines moved
+  from v1.20.1 → v1.20.4 in root `README.md`, `sdk/README.md`, and handbook
+  `docs/index.html`; `sdk/README.md` "Current package" banner → v1.20.4
+  (adds the webhook event-dedupe recipe); `sdk/docs/FAILURE_AND_THREAT_MODEL.md`
+  version note → v1.20.4.
+- Handbook (`docs/index.html`): webhook event-dedupe pointer to
+  `sdk/examples/webhooks/` beside Manual integration; lede "Latest:" now includes
+  the webhook recipe (v1.20.3); boundaries link to the SDK README's
+  "What Mycelium does not do".
+
+## Unreleased
+
 ## 1.20.4 (2026-08-01)
 
 Patch: positioning-only docs — "What Mycelium does not do" boundaries. No code change.
