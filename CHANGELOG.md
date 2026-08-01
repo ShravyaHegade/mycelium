@@ -1,5 +1,54 @@
 # Changelog
 
+## 1.20.0 (2026-08-01)
+
+Minor: opt-in resolution telemetry (`OutcomeEmitter`) + a pinned **Duplicate
+Tool Transition Rate (DTTR)** metric computed after the fact from flat,
+append-only rows — a single number that makes the no-double-execute guarantee
+observable in production.
+
+### Feature
+
+- `OutcomeEmitter` + `OutcomeRow` (`sdk/mycelium/outcome_emit.py`): flat,
+  warehouse-friendly telemetry rows (one JSON object per NDJSON line) emitted
+  only on resolution events — a dispatch resolving to a gate
+  (`ALLOW`/`RETURN`/`HARD_BLOCK`/`SOFT_BLOCK`), tool-body
+  start/complete/fail, and operator release. Poll ticks never emit. Storage is
+  memory or file only (no analytics SaaS deps); emission is fault-tolerant —
+  a storage failure is logged and swallowed so telemetry can never break the
+  tool path or alter claim/CAS/reconcile semantics.
+- Wired through `@ledger` / `@ledger_sync` (new `outcome_emitter=` kwarg) and
+  `ActionLedger(outcome_emitter=...)`; `release()` emits a `release` row.
+  A body run that follows a consumed `NOT_EXECUTED` verdict (reconciler
+  `NOT_EXECUTED` or operator release verified `not_executed`) is tagged
+  `authorized_reexec=True` so it is never counted as a silent duplicate.
+- `compute_dttr()` / `compute_dttr_from_storage()`: `DTTR =
+  silent_duplicates / max(long_running_or_redispatched, 1)`, target 0.
+  Silent duplicate = a tool-body execution not authorized by a consumed
+  `NOT_EXECUTED`; long-running/redispatched = ≥2 resolution events or a span
+  longer than `long_running_after` (default `lease_ttl`).
+- YAML `outcome_emit:` section (off by default; `storage: memory|file`,
+  `path:`, `long_running_after:`) wired through `MyceliumConfig` +
+  `config.apply_tool`, plus a commented stub in the full init template.
+- CLI: `mycelium outcomes dttr [--config|--file] [--long-running-after N]
+  [--json]`.
+
+### Docs
+
+- `sdk/README.md` "Outcome telemetry & DTTR" section (definition + examples).
+- `sdk/docs/FAILURE_AND_THREAT_MODEL.md` residual-risk item: silent duplicates
+  are invisible without opt-in telemetry; DTTR is the observability measure.
+
+### Tests
+
+- `tests/test_outcome_emit.py`: 25 tests — row round-trip, NDJSON file
+  storage (incl. malformed-line tolerance), fault-tolerant emission, the DTTR
+  definitions (clean/authorized/redispatched/long-running/empty), `@ledger` /
+  `@ledger_sync` hook points (incl. redispatch returning the cached result
+  without a body row, body-failure rows, hard-block resolution rows), operator
+  release + reconciler `NOT_EXECUTED` authorization, YAML config wiring, and
+  the `mycelium outcomes dttr` CLI.
+
 ## 1.19.2 (2026-07-31)
 
 Patch: Phase 4 reliability test suite (real-process multiprocess concurrency,

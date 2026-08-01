@@ -280,6 +280,16 @@ Still can go wrong — even with everything above configured correctly:
 - **Wall-clock leases.** Leases rely on `time.time()`. Clock skew can renew or
   expire leases early; extreme skew is a deployment concern, not something the
   runtime compensates for.
+- **Silent duplicates are invisible without opt-in telemetry.** The guard
+  prevents unauthorized re-execution, but a violation (lying reconciler,
+  caller escaping the key, bug in the runtime) only surfaces as
+  business-level weirdness unless you can see it. Enable `outcome_emit` and
+  track the **DTTR** (`mycelium outcomes dttr`, target 0.0) to make the
+  guarantee observable: it counts tool-body executions that were *not*
+  authorized by a consumed `NOT_EXECUTED` verdict, over transitions that were
+  long-running or redispatched. See the
+  [README section](../README.md#outcome-telemetry--dttr-v120) for the exact
+  definition.
 
 ---
 

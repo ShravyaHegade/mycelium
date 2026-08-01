@@ -963,6 +963,75 @@ finds `IN_FLIGHT` with a live lease returns to the claim loop instead of
 raising, and `mark_blocked` is never called on an entry whose lease is
 currently held.
 
+## Outcome telemetry & DTTR (v1.20+)
+
+**Problem:** You run a fleet of agents and want a single number that proves
+the duplicate-side-effect guard is holding in production — and that regresses
+loudly the day it doesn't.
+
+**Solution:** opt-in `OutcomeEmitter` resolution telemetry plus a pinned
+metric, the **Duplicate Tool Transition Rate (DTTR)**, computed after the fact
+from flat append-only rows. Off by default; memory or file storage only in v1
+(no analytics SaaS dependency).
+
+Enable it in YAML and every ledgered tool starts emitting:
+
+```yaml
+outcome_emit:
+  storage: file                 # memory | file
+  path: ./mycelium-outcomes.jsonl
+  long_running_after: 3600      # seconds (default: lease_ttl)
+```
+
+Or pass an emitter directly:
+
+```python
+from mycelium import OutcomeEmitter, ledger_sync
+
+emitter = OutcomeEmitter(agent_id="acme", storage=FileOutcomeStorage("outcomes.jsonl"))
+
+@ledger_sync(storage=..., transition_binding=..., outcome_emitter=emitter)
+def charge(amount):
+    ...
+```
+
+Rows are one JSON object per line, emitted only on resolution events — a
+dispatch resolving to a gate (`ALLOW` / `RETURN` / `HARD_BLOCK` /
+`SOFT_BLOCK`), the tool body starting / completing / failing, and operator
+releases. Poll ticks never emit. Emission is fault-tolerant: a storage
+failure is logged and swallowed, so telemetry can never break the tool path.
+
+Compute the metric with the CLI or the library:
+
+```console
+$ mycelium outcomes dttr --file ./mycelium-outcomes.jsonl
+DTTR: 0.0000  (target: 0.0)
+silent duplicates: 0  long-running or redispatched: 3  transitions: 42
+```
+
+```python
+from mycelium import FileOutcomeStorage, compute_dttr_from_storage
+
+report = compute_dttr_from_storage(FileOutcomeStorage("outcomes.jsonl"), long_running_after=3600)
+```
+
+### DTTR definition
+
+- A **transition** is every row sharing a `request_id` (the transition key).
+- A **silent duplicate** is a tool-body execution for a transition that had
+  already executed, without being authorized by a consumed `NOT_EXECUTED`
+  verdict (reconciler `NOT_EXECUTED` or an operator release verified
+  `not_executed`). The first execution is always authorized; each consumed
+  `NOT_EXECUTED` authorizes exactly one more, so the guarantee to measure is
+  `executions <= 1 + not_executed_verdicts`.
+- A transition is **long-running or redispatched** when it saw ≥2 resolution
+  events (framework redispatches) OR its wall-clock span exceeds
+  `long_running_after`.
+- `DTTR = silent_duplicates / max(long_running_or_redispatched, 1)`. The
+  target is **0.0**. Without Mycelium, two workers racing the same effect
+  produce a silent duplicate (DTTR > 0); with the guard, duplicate body runs
+  only happen through an authorized `NOT_EXECUTED` path.
+
 ## For contributors (repo layout)
 
 Clone the GitHub repo to run proofs and tests. PyPI installs only the `mycelium` package.

@@ -46,6 +46,17 @@ from mycelium.config import (
 )
 from mycelium.history_guard import HistoryGuard, HistoryTruncatedError
 from mycelium.message_validator import MessageValidationError, MessageValidator
+from mycelium.outcome_emit import (
+    DttrReport,
+    FileOutcomeStorage,
+    InMemoryOutcomeStorage,
+    OutcomeEmitter,
+    OutcomeRow,
+    OutcomeStorage,
+    TransitionDttr,
+    compute_dttr,
+    compute_dttr_from_storage,
+)
 from mycelium.protect import protect, protect_sync
 from mycelium.providers import GmailReconciler
 from mycelium.reconcile import Reconciler, ReconcileResult, ReconcileStatus
@@ -103,7 +114,7 @@ from mycelium.transition_resolution import (
     transition_needs_repair,
 )
 
-__version__ = "1.17.0"
+__version__ = "1.20.0"
 
 __all__ = [
     "ActionLedger",
@@ -143,6 +154,15 @@ __all__ = [
     "FileAuditReceiptStorage",
     "InMemoryAuditReceiptStorage",
     "verify_receipt",
+    "OutcomeEmitter",
+    "OutcomeRow",
+    "OutcomeStorage",
+    "FileOutcomeStorage",
+    "InMemoryOutcomeStorage",
+    "DttrReport",
+    "TransitionDttr",
+    "compute_dttr",
+    "compute_dttr_from_storage",
     "TaskFileLedgerStorage",
     "TaskInMemoryLedgerStorage",
     "TaskLedger",

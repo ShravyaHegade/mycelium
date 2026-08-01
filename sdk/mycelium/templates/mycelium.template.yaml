@@ -4,8 +4,8 @@
 #
 # Required vs optional
 #   Required for transition guards:  transition, action_ledger (+ tools entries you ledger)
-#   Optional:  integrations, task_ledger, state_flush, audit_receipt, registry, runner,
-#              history_guard, message_validator — delete unused sections
+#   Optional:  integrations, task_ledger, state_flush, audit_receipt, outcome_emit,
+#              registry, runner, history_guard, message_validator — delete unused sections
 #
 # Next steps
 #   1. Allowlist first: rename tools: / tasks: stubs, then copy those exact
@@ -119,6 +119,21 @@ audit_receipt:
   storage: file                           # <TODO: memory | file>
   path: ./mycelium-receipts.jsonl
   auto: true
+
+# ---------------------------------------------------------------------------
+# outcome_emit  (opt-in resolution telemetry + DTTR; omit if unused)
+#   Emits one flat NDJSON row per resolution event (gate decision, body start/
+#   complete/fail, operator release) — never per poll tick. Off by default.
+#   storage: memory | file (no analytics SaaS deps; v1 is local-only)
+#   long_running_after: seconds; transitions older than this count as
+#     "long-running" in the DTTR denominator (default: lease_ttl). The metric:
+#     DTTR = silent_duplicates / max(long_running_or_redispatched, 1), target 0.
+#   Inspect with: mycelium outcomes dttr
+# ---------------------------------------------------------------------------
+# outcome_emit:
+#   storage: file
+#   path: ./mycelium-outcomes.jsonl
+#   long_running_after: 3600
 
 # ---------------------------------------------------------------------------
 # tools  (add real function names; then list ledgered ones in

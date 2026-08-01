@@ -52,6 +52,7 @@ from mycelium.transition_resolution import (
 
 if TYPE_CHECKING:
     from mycelium.audit_receipt import AuditReceiptEmitter
+    from mycelium.outcome_emit import OutcomeEmitter
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -295,6 +296,16 @@ _active_transition_var: ContextVar[_ActiveTransition | None] = ContextVar(
 # The claim loop checks this flag: if set, an IN_FLIGHT return means "poll",
 # not "this thread won the fresh claim".
 _reconcile_cas_lost: threading.local = threading.local()
+
+# Set when a claim consumed a NOT_EXECUTED verdict (reconciler NOT_EXECUTED or
+# an operator release verified "not_executed") and won the fresh in-flight
+# claim. The @ledger wrapper reads this right after the claim to tag the
+# resulting tool-body run as an *authorized* re-execution (never a silent
+# duplicate). A ContextVar keeps concurrent async tasks isolated.
+_outcome_reexec_authorized: ContextVar[bool] = ContextVar(
+    "mycelium_outcome_reexec_authorized",
+    default=False,
+)
 
 
 def get_active_transition() -> _ActiveTransition | None:
@@ -823,6 +834,7 @@ class ActionLedger:
         reconciler: Reconciler | None = None,
         defer_read_only_unknown: bool = False,
         audit_emitter: AuditReceiptEmitter | None = None,
+        outcome_emitter: OutcomeEmitter | None = None,
         unclassified_policy: str = UNCLASSIFIED_POLICY_WARN,
         reclaim_requires_death_signal: bool = False,
         presumed_dead_after: float | None = None,
@@ -840,6 +852,8 @@ class ActionLedger:
         self._defer_read_only_unknown = defer_read_only_unknown
         # Optional receipt sink for operator releases (release() emits here).
         self._audit_emitter = audit_emitter
+        # Optional resolution-telemetry sink (see mycelium.outcome_emit).
+        self._outcome_emitter = outcome_emitter
         if unclassified_policy not in (
             UNCLASSIFIED_POLICY_WARN,
             UNCLASSIFIED_POLICY_STRICT,
@@ -908,6 +922,63 @@ class ActionLedger:
     def _list_all_entries(self) -> list[LedgerEntry]:
         with _storage_errors("list_all"):
             return self._storage.list_all()
+
+    # --- resolution telemetry (opt-in; never raises, never disturbs the path) ---
+
+    def _emit_outcome(
+        self,
+        *,
+        request_id: str,
+        tool: str,
+        event: str,
+        gate: str | None = None,
+        terminal_outcome: TerminalOutcome | None = None,
+        boundary: SideEffectBoundary | None = None,
+        side_effect_class: SideEffectClass | None = None,
+        tool_body_executed: bool = False,
+        dispatch_attempt: int | None = None,
+        authorized_reexec: bool = False,
+        owner: str | None = None,
+        error_class: str | None = None,
+    ) -> None:
+        """Emit one outcome row, backfilling state from the stored entry.
+
+        Fault-tolerant by design: any failure (including a storage read) is
+        logged and swallowed so telemetry can never alter claim/CAS/reconcile
+        semantics or break the tool path.
+        """
+        if self._outcome_emitter is None:
+            return
+        try:
+            entry = self.get(request_id)
+        except Exception:
+            entry = None
+        if entry is not None:
+            if terminal_outcome is None:
+                terminal_outcome = entry.resolved_terminal_outcome()
+            if boundary is None:
+                boundary = SideEffectBoundary(entry.side_effect_boundary)
+        try:
+            self._outcome_emitter.emit_event(
+                tool=tool,
+                request_id=request_id,
+                event=event,
+                gate=gate,
+                terminal_outcome=(
+                    terminal_outcome.value if terminal_outcome is not None else None
+                ),
+                side_effect_boundary=boundary.value if boundary is not None else None,
+                side_effect_class=(
+                    side_effect_class.value if side_effect_class is not None else None
+                ),
+                tool_body_executed=tool_body_executed,
+                dispatch_attempt=dispatch_attempt,
+                authorized_reexec=authorized_reexec,
+                owner=owner,
+                error_class=error_class,
+            )
+        except Exception:
+            _logger.exception("failed to emit outcome row for %s", request_id)
 
     # --- one-time operator warnings ---
 
@@ -1118,6 +1189,16 @@ class ActionLedger:
                 released_from_outcome=outcome.value,
             )
         self._set_entry(entry)
+        self._emit_outcome(
+            request_id=request_id,
+            tool=entry.tool,
+            event="release",
+            gate="RELEASE",
+            terminal_outcome=entry.resolved_terminal_outcome(now=now),
+            boundary=SideEffectBoundary(entry.side_effect_boundary),
+            authorized_reexec=(verified == OPERATOR_RESOLUTION_NOT_EXECUTED),
+            owner=by,
+        )
         if self._audit_emitter is not None:
             receipt = self._audit_emitter.emit_release_receipt(
                 entry,
@@ -1551,6 +1632,10 @@ class ActionLedger:
                     return None
                 _reconcile_cas_lost.val = True
                 return self.get(request_id)
+            # The fresh claim was won by this caller, which will run the tool
+            # body exactly once — mark that run as an authorized re-execution
+            # so outcome telemetry can tell it apart from a silent duplicate.
+            _outcome_reexec_authorized.set(True)
             return fresh
         return None
 
@@ -2726,21 +2811,75 @@ def _run_ledgered(
         transition_binding=transition_binding,
     )
     clean_kwargs = _drop_ledger_keys(kwargs)
-    existing = _claim_for_transition(
-        ledger,
-        request_id,
-        tool_name,
-        args,
-        clean_kwargs,
-        transition_binding,
-    )
+    _outcome_reexec_authorized.set(False)
+    try:
+        existing = _claim_for_transition(
+            ledger,
+            request_id,
+            tool_name,
+            args,
+            clean_kwargs,
+            transition_binding,
+        )
+    except LedgerHardBlockError:
+        ledger._emit_outcome(
+            request_id=request_id,
+            tool=tool_name,
+            event="resolution",
+            gate="HARD_BLOCK",
+            error_class="LedgerHardBlockError",
+        )
+        raise
+    except LedgerSoftBlockError:
+        ledger._emit_outcome(
+            request_id=request_id,
+            tool=tool_name,
+            event="resolution",
+            gate="SOFT_BLOCK",
+            error_class="LedgerSoftBlockError",
+        )
+        raise
     if existing.is_terminal_completed():
+        ledger._emit_outcome(
+            request_id=request_id,
+            tool=tool_name,
+            event="resolution",
+            gate="RETURN",
+            terminal_outcome=TerminalOutcome.COMPLETED,
+        )
         return existing.result
+
+    owner = _ledger_owner()
+    authorized_reexec = _outcome_reexec_authorized.get()
+    side_effect_class = (
+        transition_binding.side_effect_class
+        if transition_binding is not None
+        else None
+    )
+    ledger._emit_outcome(
+        request_id=request_id,
+        tool=tool_name,
+        event="resolution",
+        gate="ALLOW",
+        terminal_outcome=TerminalOutcome.IN_FLIGHT,
+        side_effect_class=side_effect_class,
+        authorized_reexec=authorized_reexec,
+        owner=owner,
+    )
+    ledger._emit_outcome(
+        request_id=request_id,
+        tool=tool_name,
+        event="body_start",
+        terminal_outcome=TerminalOutcome.IN_FLIGHT,
+        side_effect_class=side_effect_class,
+        tool_body_executed=True,
+        authorized_reexec=authorized_reexec,
+        owner=owner,
+    )
 
     token = _active_transition_var.set(
         _ActiveTransition(ledger, request_id, transition_binding)
     )
-    owner = _ledger_owner()
     try:
         with _lease_auto_renew(ledger, request_id):
             result = func(*args, **clean_kwargs)
@@ -2765,12 +2904,22 @@ def _run_ledgered(
                 "original tool error follows",
                 request_id,
             )
+        ledger._emit_outcome(
+            request_id=request_id,
+            tool=tool_name,
+            event="body_fail",
+            side_effect_class=side_effect_class,
+            authorized_reexec=authorized_reexec,
+            owner=owner,
+            error_class=type(exc).__name__,
+        )
         raise
     finally:
         _active_transition_var.reset(token)
 
     try:
         ledger.complete(request_id, result, _expected_owner=owner)
+        complete_ok = True
     except LedgerOutcomeAlreadySetError:
         _logger.warning(
             "outcome already set for %s while completing "
@@ -2778,7 +2927,17 @@ def _run_ledgered(
             "tool result discarded",
             request_id,
         )
+        complete_ok = False
     _emit_tool_receipt(audit_emitter, ledger, request_id)
+    ledger._emit_outcome(
+        request_id=request_id,
+        tool=tool_name,
+        event="body_complete" if complete_ok else "body_fail",
+        side_effect_class=side_effect_class,
+        authorized_reexec=authorized_reexec,
+        owner=owner,
+        error_class=None if complete_ok else "LedgerOutcomeAlreadySetError",
+    )
     return result
 
 
@@ -2798,21 +2957,75 @@ async def _run_ledgered_async(
         transition_binding=transition_binding,
     )
     clean_kwargs = _drop_ledger_keys(kwargs)
-    existing = await _claim_for_transition_async(
-        ledger,
-        request_id,
-        tool_name,
-        args,
-        clean_kwargs,
-        transition_binding,
-    )
+    _outcome_reexec_authorized.set(False)
+    try:
+        existing = await _claim_for_transition_async(
+            ledger,
+            request_id,
+            tool_name,
+            args,
+            clean_kwargs,
+            transition_binding,
+        )
+    except LedgerHardBlockError:
+        ledger._emit_outcome(
+            request_id=request_id,
+            tool=tool_name,
+            event="resolution",
+            gate="HARD_BLOCK",
+            error_class="LedgerHardBlockError",
+        )
+        raise
+    except LedgerSoftBlockError:
+        ledger._emit_outcome(
+            request_id=request_id,
+            tool=tool_name,
+            event="resolution",
+            gate="SOFT_BLOCK",
+            error_class="LedgerSoftBlockError",
+        )
+        raise
     if existing.is_terminal_completed():
+        ledger._emit_outcome(
+            request_id=request_id,
+            tool=tool_name,
+            event="resolution",
+            gate="RETURN",
+            terminal_outcome=TerminalOutcome.COMPLETED,
+        )
         return existing.result
+
+    owner = _ledger_owner()
+    authorized_reexec = _outcome_reexec_authorized.get()
+    side_effect_class = (
+        transition_binding.side_effect_class
+        if transition_binding is not None
+        else None
+    )
+    ledger._emit_outcome(
+        request_id=request_id,
+        tool=tool_name,
+        event="resolution",
+        gate="ALLOW",
+        terminal_outcome=TerminalOutcome.IN_FLIGHT,
+        side_effect_class=side_effect_class,
+        authorized_reexec=authorized_reexec,
+        owner=owner,
+    )
+    ledger._emit_outcome(
+        request_id=request_id,
+        tool=tool_name,
+        event="body_start",
+        terminal_outcome=TerminalOutcome.IN_FLIGHT,
+        side_effect_class=side_effect_class,
+        tool_body_executed=True,
+        authorized_reexec=authorized_reexec,
+        owner=owner,
+    )
 
     token = _active_transition_var.set(
         _ActiveTransition(ledger, request_id, transition_binding)
     )
-    owner = _ledger_owner()
     try:
         with _lease_auto_renew(ledger, request_id):
             result = await func(*args, **clean_kwargs)
@@ -2837,12 +3050,22 @@ async def _run_ledgered_async(
                 "original tool error follows",
                 request_id,
             )
+        ledger._emit_outcome(
+            request_id=request_id,
+            tool=tool_name,
+            event="body_fail",
+            side_effect_class=side_effect_class,
+            authorized_reexec=authorized_reexec,
+            owner=owner,
+            error_class=type(exc).__name__,
+        )
         raise
     finally:
         _active_transition_var.reset(token)
 
     try:
         ledger.complete(request_id, result, _expected_owner=owner)
+        complete_ok = True
     except LedgerOutcomeAlreadySetError:
         _logger.warning(
             "outcome already set for %s while completing "
@@ -2850,7 +3073,17 @@ async def _run_ledgered_async(
             "tool result discarded",
             request_id,
         )
+        complete_ok = False
     _emit_tool_receipt(audit_emitter, ledger, request_id)
+    ledger._emit_outcome(
+        request_id=request_id,
+        tool=tool_name,
+        event="body_complete" if complete_ok else "body_fail",
+        side_effect_class=side_effect_class,
+        authorized_reexec=authorized_reexec,
+        owner=owner,
+        error_class=None if complete_ok else "LedgerOutcomeAlreadySetError",
+    )
     return result
 
 
@@ -2864,6 +3097,7 @@ def ledger(
     audit_emitter: AuditReceiptEmitter | None = None,
     transition_binding: ToolTransitionBinding | None = None,
     *,
+    outcome_emitter: OutcomeEmitter | None = None,
     lease_ttl: float | None = None,
     lease_renew_interval: float | None = None,
     poll_interval: float | None = None,
@@ -2899,6 +3133,7 @@ def ledger(
         reconciler=reconciler,
         defer_read_only_unknown=defer_read_only_unknown,
         audit_emitter=audit_emitter,
+        outcome_emitter=outcome_emitter,
         unclassified_policy=unclassified_policy,
         **ledger_kwargs,
     )
@@ -2929,6 +3164,7 @@ def ledger_sync(
     audit_emitter: AuditReceiptEmitter | None = None,
     transition_binding: ToolTransitionBinding | None = None,
     *,
+    outcome_emitter: OutcomeEmitter | None = None,
     lease_ttl: float | None = None,
     lease_renew_interval: float | None = None,
     poll_interval: float | None = None,
@@ -2964,6 +3200,7 @@ def ledger_sync(
         reconciler=reconciler,
         defer_read_only_unknown=defer_read_only_unknown,
         audit_emitter=audit_emitter,
+        outcome_emitter=outcome_emitter,
         unclassified_policy=unclassified_policy,
         **ledger_kwargs,
     )
