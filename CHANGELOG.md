@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.20.4 (2026-08-01)
+
+Patch: positioning-only docs — "What Mycelium does not do" boundaries. No code change.
+
+### Docs
+
+- `sdk/README.md`: new **What Mycelium does not do** section beside "What it does" —
+  explicit boundaries (approvals/policy UI, hosted observability, on-chain audit
+  trails, generic webhook hub, rewind/recovery) + the compose line (use Mycelium
+  *under* an approval layer and *beside* a tracer — they don't replace each other).
+- Root `README.md`: boundary summary + link to the SDK section.
+- Handbook `docs/index.html`: one boundary sentence in the lede.
+
+## Unreleased
+
 ## 1.20.3 (2026-08-01)
 
 Patch: webhook event-dedupe recipe — docs + runnable examples only (no core
