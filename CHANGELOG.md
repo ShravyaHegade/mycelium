@@ -58,6 +58,10 @@ external verifiers, request_id identity semantics).
 
 ## Unreleased
 
+### Docs
+
+- New public failure & threat model in `sdk/docs/FAILURE_AND_THREAT_MODEL.md` (link added near "What `@ledger` does" in `sdk/README.md` and the root README): scope, threat actors, the guarantees the transition/ledger core actually provides, the guarantees it deliberately does not (release authorization, runaway loops, trusting the reconciler, in-memory ledgers across processes, identity-conflict rejection), a guarantee → test map pinning every documented promise to a concrete test, and residual risks. Docs only — no API or behavior change.
+
 ## 1.19.0 (2026-07-30)
 
 Minor: fail-closed Gmail sent-log reconciler (design-partner patch from Shadow / agent-contracts).

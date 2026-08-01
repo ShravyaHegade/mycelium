@@ -754,3 +754,73 @@ def test_concurrent_reconcile_not_executed_race_expired_seed(
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Stale-snapshot guard in _raise_hard_block (atomicity contract, v1.18+)
+# ---------------------------------------------------------------------------
+
+
+def test_raise_hard_block_stale_snapshot_returns_inflight_held_lease() -> None:
+    """A hard-block decision made from a stale snapshot must never call
+    ``mark_blocked`` on an entry whose lease is currently held by another
+    worker: ``_raise_hard_block`` re-reads the durable record, sees
+    ``IN_FLIGHT`` with a live lease, and returns to the poll loop instead
+    of raising. (README § Atomicity contract: "the same stale-snapshot guard
+    applies in _raise_hard_block".)
+    """
+    storage = InMemoryLedgerStorage()
+    ledger_inst = ActionLedger(storage=storage)
+    request_id = "stale-hard-block-held"
+    now = time.time()
+
+    # Current durable truth: worker-A holds a live lease.
+    storage.set(
+        LedgerEntry(
+            request_id=request_id,
+            tool="test_tool",
+            args=(),
+            kwargs={},
+            status="in-flight",
+            terminal_outcome=TerminalOutcome.IN_FLIGHT.value,
+            owner="worker-A",
+            lease_until=now + 3600,
+            side_effect_boundary=SideEffectBoundary.NOT_CROSSED.value,
+            idempotency_key=request_id,
+        )
+    )
+
+    # Stale snapshot the resolver saw before the lease was renewed: EXPIRED.
+    stale = LedgerEntry(
+        request_id=request_id,
+        tool="test_tool",
+        args=(),
+        kwargs={},
+        status="in-flight",
+        terminal_outcome=TerminalOutcome.EXPIRED.value,
+        owner="worker-A",
+        lease_until=now - 10,
+        side_effect_boundary=SideEffectBoundary.NOT_CROSSED.value,
+        idempotency_key=request_id,
+    )
+
+    # _reconcile_cas_lost is a thread-local CAS-race latch the claim loop reads;
+    # never leak it into later tests (same hygiene as test_property_transitions).
+    from mycelium import action_ledger as _action_ledger
+
+    _action_ledger._reconcile_cas_lost.val = False
+    try:
+        result = ledger_inst._raise_hard_block(
+            request_id, "test_tool", stale, binding=_BINDING
+        )
+        assert result.terminal_outcome == TerminalOutcome.IN_FLIGHT.value
+        assert result.owner == "worker-A"
+
+        # mark_blocked was never applied: the held entry stays IN_FLIGHT with its
+        # live lease intact.
+        stored = storage.get(request_id)
+        assert stored is not None
+        assert stored.terminal_outcome == TerminalOutcome.IN_FLIGHT.value
+        assert stored.lease_until == now + 3600
+    finally:
+        _action_ledger._reconcile_cas_lost.val = False
+
+

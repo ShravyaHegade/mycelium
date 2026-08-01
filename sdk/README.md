@@ -312,6 +312,17 @@ async def send_payment(amount: float, recipient: str) -> dict:
 - Resolve redispatches through **gates** (see [Resolution gates](#resolution-gates)) instead of re-running blindly
 - Persist failed attempts with **terminal outcomes** (`FAILED_BEFORE_EFFECT`, `FAILED_AFTER_EFFECT`, `UNKNOWN`, `EXPIRED`, etc.) for audit and reconciliation
 
+**Failure & threat model.** What this core can and cannot protect you from is
+documented explicitly in
+[`docs/FAILURE_AND_THREAT_MODEL.md`](docs/FAILURE_AND_THREAT_MODEL.md): the threat
+actors (buggy redispatches, two workers, crash mid-effect, storage outage,
+stalled worker, operator with backend access, provider indexing lag), the
+guarantees the transition/ledger core actually provides, the guarantees it
+deliberately does not (release authorization, runaway loops, trusting the
+reconciler, in-memory ledgers across processes), and a **guarantee → test map**
+so no documented promise is left without a test. It is honest about residual
+risk — read it before relying on the runtime to stop a double payment.
+
 ### Transition identity and the `request_id` caveat
 
 The transition key is a compound of runtime scope + tool name + canonicalised
