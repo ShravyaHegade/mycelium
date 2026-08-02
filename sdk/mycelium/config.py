@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import importlib
 import inspect
 import re
 import warnings
@@ -57,6 +58,12 @@ from mycelium.outcome_emit import (
 )
 from mycelium.protect import protect, protect_sync
 from mycelium.session import Session
+from mycelium.state_authority import (
+    ON_MISMATCH_HARD,
+    ON_MISMATCH_MODES,
+    StateAuthority,
+    apply_state_authority,
+)
 from mycelium.state_flush import (
     FileStateFlushStorage,
     InMemoryStateFlushStorage,
@@ -105,6 +112,7 @@ _GUARD_MARKERS = (
     "_mycelium_bounded",
     "_mycelium_protected",
     "_mycelium_loop_guarded",
+    "_mycelium_state_authority",
     "_mycelium_langgraph_integration",
 )
 
@@ -117,6 +125,25 @@ def _parse_callable_path(raw: Any, *, kind: str, name: str) -> str | None:
             f"{kind} {name!r}.callable must be 'package.module:function'"
         )
     return raw
+
+
+def _import_callable(callable_path: str, *, kind: str) -> Callable[..., Any]:
+    module_name, attribute = callable_path.split(":", 1)
+    try:
+        module = importlib.import_module(module_name)
+    except ImportError as exc:
+        raise ConfigError(
+            f"{kind} {callable_path!r} could not be imported: {exc}"
+        ) from exc
+    try:
+        target = getattr(module, attribute)
+    except AttributeError as exc:
+        raise ConfigError(
+            f"{kind} {callable_path!r} does not exist"
+        ) from exc
+    if not callable(target):
+        raise ConfigError(f"{kind} {callable_path!r} is not callable")
+    return target
 
 
 def _check_existing_config_wrapper(
@@ -195,6 +222,8 @@ class ToolConfig:
     callable_path: str | None = None
     # Per-tool loop_guard: None=inherit global, False=disable, dict=overrides
     loop_guard: dict[str, Any] | bool | None = None
+    # Per-tool state_authority: None=inherit global, False=disable, dict=overrides
+    state_authority: dict[str, Any] | bool | None = None
 
     def is_noop(self) -> bool:
         return (
@@ -203,6 +232,7 @@ class ToolConfig:
             and self.ledger is None
             and not self.audit_receipt
             and self.loop_guard is None
+            and self.state_authority is None
         )
 
 
@@ -246,9 +276,11 @@ class MyceliumConfig:
     task_ledger_defaults: dict[str, Any] | None = None
     integrations: dict[str, dict[str, Any]] | None = None
     loop_guard: dict[str, Any] | None = None
+    state_authority: dict[str, Any] | None = None
     _audit_emitter: AuditReceiptEmitter | None = None
     _outcome_emitter: OutcomeEmitter | None = None
     _loop_guard: LoopGuard | None = None
+    _state_authority: StateAuthority | None = None
     _state_flush: StateFlush | None = None
     _audit_auto: bool = False
 
@@ -260,7 +292,8 @@ class MyceliumConfig:
         function is returned unchanged.
 
         Guard order (outermost first, after optional LangGraph instrument):
-        ``@loop_guard`` -> ``@ledger`` -> ``@bounded`` -> ``@protect`` -> ``func``
+        ``@state_authority`` -> ``@loop_guard`` -> ``@ledger`` -> ``@bounded``
+        -> ``@protect`` -> ``func``
         """
         return self.apply_tool(func.__name__, func)
 
@@ -280,6 +313,24 @@ class MyceliumConfig:
                 return False
         return True
 
+    def state_authority_applies(
+        self, name: str, tool_config: ToolConfig | None = None
+    ) -> bool:
+        """Whether the state-authority execution gate should wrap this tool."""
+        if self.state_authority is None:
+            return False
+        cfg = tool_config if tool_config is not None else self.tools.get(name)
+        if cfg is not None and cfg.state_authority is False:
+            return False
+        exclude = self.state_authority.get("exclude") or []
+        if name in exclude:
+            return False
+        tools_sel = self.state_authority.get("tools", "all")
+        if tools_sel != "all":
+            if not isinstance(tools_sel, list) or name not in tools_sel:
+                return False
+        return True
+
     def apply_tool(
         self,
         name: str,
@@ -290,7 +341,8 @@ class MyceliumConfig:
         if tool_config is None:
             return func
         applies_loop = self.loop_guard_applies(name, tool_config)
-        if tool_config.is_noop() and not applies_loop:
+        applies_state = self.state_authority_applies(name, tool_config)
+        if tool_config.is_noop() and not applies_loop and not applies_state:
             return func
         if _check_existing_config_wrapper(func, kind="tool", name=name):
             return func
@@ -356,9 +408,20 @@ class MyceliumConfig:
                 consecutive_soft=consecutive_override,
             )
 
+        # State authority outside loop/ledger: superseded decisions never claim.
+        if applies_state:
+            authority = self.build_state_authority()
+            assert authority is not None
+            func = apply_state_authority(
+                func,
+                authority,
+                tool_name=name,
+                side_effect_class=tool_config.side_effect_class,
+            )
+
         # LangGraph outermost so it can inject scope/dispatch before inner guards.
         if self.langgraph_enabled and (
-            tool_config.ledger is not None or applies_loop
+            tool_config.ledger is not None or applies_loop or applies_state
         ):
             try:
                 func = instrument_langgraph_tool(func)
@@ -534,6 +597,59 @@ class MyceliumConfig:
                 "use 'memory' or 'file'"
             )
         raise ConfigError(f"unknown loop_guard storage type: {storage_type!r}")
+
+    def build_state_authority(self) -> StateAuthority | None:
+        """Build a shared StateAuthority if the config declares ``state_authority:``."""
+        if self.state_authority is None:
+            return None
+        if self._state_authority is not None:
+            return self._state_authority
+        raw = self.state_authority
+        callable_path = raw.get("canonical_callable")
+        if not isinstance(callable_path, str) or not callable_path:
+            raise ConfigError(
+                "'state_authority.canonical_callable' is required "
+                "(format: 'package.module:function')"
+            )
+        parsed = _parse_callable_path(
+            callable_path, kind="state_authority", name="canonical_callable"
+        )
+        assert parsed is not None
+        resolver = _import_callable(parsed, kind="state_authority.canonical_callable")
+        require_state_ref = bool(raw.get("require_state_ref", False))
+        on_mismatch = str(raw.get("on_mismatch", ON_MISMATCH_HARD))
+        on_missing = str(raw.get("on_missing", ON_MISMATCH_HARD))
+        if on_mismatch not in ON_MISMATCH_MODES:
+            raise ConfigError(
+                f"'state_authority.on_mismatch' must be one of "
+                f"{sorted(ON_MISMATCH_MODES)}"
+            )
+        if on_missing not in ON_MISMATCH_MODES:
+            raise ConfigError(
+                f"'state_authority.on_missing' must be one of "
+                f"{sorted(ON_MISMATCH_MODES)}"
+            )
+        exclude = raw.get("exclude") or []
+        if not isinstance(exclude, list):
+            raise ConfigError("'state_authority.exclude' must be a list of tool names")
+        agent_id = "state-authority"
+        if self.transition is not None and self.transition.agent_id:
+            agent_id = self.transition.agent_id
+        # Per-tool require override is applied via a thin wrapper authority when
+        # needed; global require_state_ref is the default for all wrapped tools.
+        require_override = raw.get("require_state_ref")
+        if require_override is not None and not isinstance(require_override, bool):
+            raise ConfigError("'state_authority.require_state_ref' must be a bool")
+        self._state_authority = StateAuthority(
+            resolver,
+            require_state_ref=require_state_ref,
+            on_mismatch=on_mismatch,
+            on_missing=on_missing,
+            exclude=[str(item) for item in exclude],
+            outcome_emitter=self.build_outcome_emitter(),
+            agent_id=agent_id,
+        )
+        return self._state_authority
 
     def build_message_validator(self) -> MessageValidator | None:
         """Build a MessageValidator if the config declares one."""
@@ -1024,6 +1140,21 @@ def _parse_tool_config(
             f"tool '{name}'.loop_guard must be a bool or a mapping"
         )
 
+    state_authority_raw = raw.get("state_authority")
+    state_authority_cfg: dict[str, Any] | bool | None
+    if state_authority_raw is None:
+        state_authority_cfg = None
+    elif state_authority_raw is False:
+        state_authority_cfg = False
+    elif state_authority_raw is True:
+        state_authority_cfg = {}
+    elif isinstance(state_authority_raw, dict):
+        state_authority_cfg = state_authority_raw
+    else:
+        raise ConfigError(
+            f"tool '{name}'.state_authority must be a bool or a mapping"
+        )
+
     return ToolConfig(
         name=name,
         protect=protect,
@@ -1038,6 +1169,7 @@ def _parse_tool_config(
         provider_idempotency_key_ttl=provider_idempotency_key_ttl,
         callable_path=callable_path,
         loop_guard=loop_guard_cfg,
+        state_authority=state_authority_cfg,
     )
 
 
@@ -1138,6 +1270,7 @@ def _apply_action_ledger_tools(
             provider_idempotency_key_ttl=existing.provider_idempotency_key_ttl,
             callable_path=existing.callable_path,
             loop_guard=existing.loop_guard,
+            state_authority=existing.state_authority,
         )
 
 
@@ -1480,6 +1613,44 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
         if tools_sel != "all" and not isinstance(tools_sel, list):
             raise ConfigError("'loop_guard.tools' must be 'all' or a list of tool names")
 
+    state_authority_raw = data.get("state_authority")
+    if state_authority_raw is not None and not isinstance(state_authority_raw, dict):
+        raise ConfigError("'state_authority' must be a mapping")
+    if state_authority_raw is not None:
+        callable_path = state_authority_raw.get("canonical_callable")
+        if not isinstance(callable_path, str) or not callable_path:
+            raise ConfigError(
+                "'state_authority.canonical_callable' is required "
+                "(format: 'package.module:function')"
+            )
+        _parse_callable_path(
+            callable_path, kind="state_authority", name="canonical_callable"
+        )
+        tools_sel = state_authority_raw.get("tools", "all")
+        if tools_sel != "all" and not isinstance(tools_sel, list):
+            raise ConfigError(
+                "'state_authority.tools' must be 'all' or a list of tool names"
+            )
+        on_mismatch = state_authority_raw.get("on_mismatch", ON_MISMATCH_HARD)
+        if on_mismatch not in ON_MISMATCH_MODES:
+            raise ConfigError(
+                f"'state_authority.on_mismatch' must be one of "
+                f"{sorted(ON_MISMATCH_MODES)}"
+            )
+        on_missing = state_authority_raw.get("on_missing", ON_MISMATCH_HARD)
+        if on_missing not in ON_MISMATCH_MODES:
+            raise ConfigError(
+                f"'state_authority.on_missing' must be one of "
+                f"{sorted(ON_MISMATCH_MODES)}"
+            )
+        if "require_state_ref" in state_authority_raw and not isinstance(
+            state_authority_raw.get("require_state_ref"), bool
+        ):
+            raise ConfigError("'state_authority.require_state_ref' must be a bool")
+        exclude = state_authority_raw.get("exclude") or []
+        if not isinstance(exclude, list):
+            raise ConfigError("'state_authority.exclude' must be a list of tool names")
+
     message_validator_raw = data.get("message_validator", False)
     if isinstance(message_validator_raw, dict):
         message_validator = bool(message_validator_raw.get("enabled", True))
@@ -1507,6 +1678,7 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
         task_ledger_defaults=task_ledger_raw,
         integrations=integrations,
         loop_guard=loop_guard_raw,
+        state_authority=state_authority_raw,
         _audit_auto=audit_auto,
     )
 

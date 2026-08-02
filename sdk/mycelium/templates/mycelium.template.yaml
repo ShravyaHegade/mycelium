@@ -178,6 +178,22 @@ loop_guard:
   # Per-tool: tools.my_tool.loop_guard: { consecutive_soft: 20 }  or  false
 
 # ---------------------------------------------------------------------------
+# state_authority  (refuse tools derived from a superseded state_ref)
+# Opt-in. Claim ≠ state authority: the ledger answers "has this run?"; this
+# gate answers "is the decision still current?" Host freezes state_ref at
+# decide time and passes it on each tool call; canonical_callable returns the
+# current checkpoint / state version for compare-at-execute.
+# ---------------------------------------------------------------------------
+# state_authority:
+#   canonical_callable: your_package.state:get_canonical_state_ref
+#   require_state_ref: true      # missing state_ref → block
+#   on_mismatch: hard            # soft | hard
+#   on_missing: hard             # soft | hard
+#   # tools: all
+#   # exclude: [poll_status]
+#   # Per-tool: tools.my_tool.state_authority: false
+
+# ---------------------------------------------------------------------------
 # registry / runner / history_guard / message_validator  (omit if unused)
 # ---------------------------------------------------------------------------
 registry:

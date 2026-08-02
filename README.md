@@ -1,6 +1,6 @@
 # Mycelium
 
-[![PyPI version](https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&release=1.21.0)](https://pypi.org/project/mycelium-runtime/)
+[![PyPI version](https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&release=1.22.0)](https://pypi.org/project/mycelium-runtime/)
 [![Python](https://img.shields.io/pypi/pyversions/mycelium-runtime.svg)](https://pypi.org/project/mycelium-runtime/)
 [![Downloads](https://static.pepy.tech/badge/mycelium-runtime)](https://pepy.tech/project/mycelium-runtime)
 
@@ -8,7 +8,7 @@
 
 Stops duplicate side effects on retry/redispatch, blocks bad tool args and out-of-scope calls, and keeps tool data fresh. Not recovery after. Not tracing or dashboards.
 
-*Early but API-stable (**v1.21.0**): breaking changes only at major versions. More guards planned.*
+*Early but API-stable (**v1.22.0**): breaking changes only at major versions. More guards planned.*
 
 ## Who it's for
 
@@ -16,7 +16,7 @@ Developers running **agents with side-effect tools** in production (payments, em
 
 Python 3.10+. Framework-agnostic.
 
-## What it does (v1.21.x)
+## What it does (v1.22.x)
 
 These aren't reasoning failures. They're runtime failures. Mycelium sits between your agent loop and your tools (after the LLM returns `tool_calls`):
 
@@ -39,6 +39,7 @@ These aren't reasoning failures. They're runtime failures. Mycelium sits between
 **Opt-in** (configure or call explicitly):
 
 - **Infinite action loops (AF-003):** `loop_guard:` detects the same tool + args across *new* `tool_call_id`s (the ledger only dedupes redispatches of the *same* id). Soft-blocks with `ToolBoundaryError` (`violation=loop_detected`), then hard-blocks the whole run (`LedgerHardBlockError`) until an operator runs `mycelium loops release --verified clear|allow-once|abort-run`. On in `mycelium init --full` / `--minimal`. Details: [sdk/README.md](sdk/README.md#loop-guard-af-003-identical-actions-across-new-tool_call_ids).
+- **Superseded state / state authority:** optional `state_authority:` freezes a `state_ref` at decide time and compares it to a host canonical callback before claim — blocks stale-checkpoint redispatches that mint a *new* `tool_call_id` (claim ≠ state authority). Details: [sdk/README.md](sdk/README.md#state-authority-refuse-decisions-from-superseded-checkpoints).
 - **Stale or broken context:** TTL-fresh tool data (`@protect`); optional message/history validation before the next LLM turn
 - **Bad tool calls:** block invalid inputs and out-of-scope tools before they run (`@bounded` / registry)
 - **Resolution telemetry + DTTR (v1.20.0):** opt-in `OutcomeEmitter` writes flat, append-only rows on resolution events; the **Duplicate Tool Transition Rate** makes the no-double-execute guarantee observable in production. Off by default; memory/file storage only (no analytics dependency); emission failures are logged and swallowed so telemetry never breaks the tool path.

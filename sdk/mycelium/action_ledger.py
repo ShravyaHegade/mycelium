@@ -512,6 +512,11 @@ class LedgerEntry:
     resolved_at: float | None = None
     released_from_outcome: str | None = None
 
+    # Optional state-authority / decision pass-through (audit only — enforcement
+    # lives in ``state_authority.StateAuthority``, not in claim resolution).
+    decision_id: str | None = None
+    state_ref: str | None = None
+
     def __post_init__(self) -> None:
         # Match from_dict / claim: durable key defaults to request_id.
         if self.idempotency_key is None:
@@ -567,6 +572,8 @@ class LedgerEntry:
             "resolution_reason": self.resolution_reason,
             "resolved_at": self.resolved_at,
             "released_from_outcome": self.released_from_outcome,
+            "decision_id": self.decision_id,
+            "state_ref": self.state_ref,
         }
 
     @classmethod
@@ -615,6 +622,14 @@ class LedgerEntry:
             resolution_reason=data.get("resolution_reason"),
             resolved_at=data.get("resolved_at"),
             released_from_outcome=data.get("released_from_outcome"),
+            decision_id=(
+                str(data["decision_id"])
+                if data.get("decision_id") is not None
+                else None
+            ),
+            state_ref=(
+                str(data["state_ref"]) if data.get("state_ref") is not None else None
+            ),
         )
 
 
@@ -1234,6 +1249,8 @@ class ActionLedger:
             pkey_first_attempt: float | None = time.time()
         else:
             pkey_first_attempt = _provider_key_first_attempt_at
+        decision_raw = kwargs.get("decision_id")
+        state_ref_raw = kwargs.get("state_ref")
         return LedgerEntry(
             request_id=request_id,
             tool=tool,
@@ -1246,6 +1263,8 @@ class ActionLedger:
             side_effect_boundary=boundary,
             provider_idempotency_key=provider_key,
             provider_key_first_attempt_at=pkey_first_attempt,
+            decision_id=str(decision_raw) if decision_raw is not None else None,
+            state_ref=str(state_ref_raw) if state_ref_raw is not None else None,
         )
 
     def claim(
@@ -2680,6 +2699,19 @@ def _drop_ledger_keys(kwargs: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in kwargs.items() if k not in LEDGER_KWARG_KEYS}
 
 
+def _claim_kwargs(kwargs: dict[str, Any], clean_kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Kwargs for claim: tool args plus optional state-authority pass-through.
+
+    ``state_ref`` / ``decision_id`` are bookkeeping (excluded from the tool body
+    and args fingerprint) but must still reach ``_new_inflight_entry`` for audit.
+    """
+    claim_kwargs = dict(clean_kwargs)
+    for key in ("decision_id", "state_ref"):
+        if key in kwargs and kwargs[key] is not None:
+            claim_kwargs[key] = kwargs[key]
+    return claim_kwargs
+
+
 def _emit_tool_receipt(
     audit_emitter: AuditReceiptEmitter | None,
     ledger: ActionLedger,
@@ -2811,6 +2843,7 @@ def _run_ledgered(
         transition_binding=transition_binding,
     )
     clean_kwargs = _drop_ledger_keys(kwargs)
+    claim_kwargs = _claim_kwargs(kwargs, clean_kwargs)
     _outcome_reexec_authorized.set(False)
     try:
         existing = _claim_for_transition(
@@ -2818,7 +2851,7 @@ def _run_ledgered(
             request_id,
             tool_name,
             args,
-            clean_kwargs,
+            claim_kwargs,
             transition_binding,
         )
     except LedgerHardBlockError:
@@ -2957,6 +2990,7 @@ async def _run_ledgered_async(
         transition_binding=transition_binding,
     )
     clean_kwargs = _drop_ledger_keys(kwargs)
+    claim_kwargs = _claim_kwargs(kwargs, clean_kwargs)
     _outcome_reexec_authorized.set(False)
     try:
         existing = await _claim_for_transition_async(
@@ -2964,7 +2998,7 @@ async def _run_ledgered_async(
             request_id,
             tool_name,
             args,
-            clean_kwargs,
+            claim_kwargs,
             transition_binding,
         )
     except LedgerHardBlockError:

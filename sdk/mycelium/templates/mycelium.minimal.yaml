@@ -90,6 +90,11 @@ loop_guard:
     non_idempotent_mutate: 2
     irreversible: 2
 
+# state_authority:                    # opt-in superseded-state gate
+#   canonical_callable: your_package.state:get_canonical_state_ref
+#   require_state_ref: true
+#   on_mismatch: hard
+
 registry:
   auto: true
 

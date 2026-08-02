@@ -384,7 +384,7 @@
 
     <h1>Mycelium: runtime guards for AI agents</h1>
     <p class="badges">
-      <a href="https://pypi.org/project/mycelium-runtime/"><img src="https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&amp;release=1.21.0" alt="PyPI version"></a>
+      <a href="https://pypi.org/project/mycelium-runtime/"><img src="https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&amp;release=1.22.0" alt="PyPI version"></a>
       <a href="https://pypi.org/project/mycelium-runtime/"><img src="https://img.shields.io/pypi/pyversions/mycelium-runtime.svg" alt="Python versions"></a>
       <a href="https://pepy.tech/project/mycelium-runtime"><img src="https://static.pepy.tech/badge/mycelium-runtime" alt="PyPI downloads"></a>
       <a href="https://github.com/mycelium-labs/mycelium"><img src="https://img.shields.io/github/license/mycelium-labs/mycelium.svg" alt="MIT license"></a>
@@ -395,16 +395,18 @@
       on retry/redispatch, blocks bad tool args and out-of-scope calls, and keeps
       tool data fresh.
       <strong>Core:</strong> transition envelope (class + lease + terminal + gates / reconcile).
-      <strong>Opt-in:</strong> loop guard (AF-003), stale-context helpers, and tool-boundary checks.
+      <strong>Opt-in:</strong> state authority, loop guard (AF-003), stale-context helpers, and tool-boundary checks.
       YAML callable paths and <code>mycelium run</code> add the core path without
       editing each function. Framework-agnostic. Not an approvals inbox, not hosted
       observability, not on-chain trails, not a recovery tool — a tool-boundary
       guard that composes under an approval layer and beside a tracer.
-      Latest: <strong>v1.21.0</strong> AF-003 loop guard (identical actions across new
-      <code>tool_call_id</code>s → soft then hard → <code>mycelium loops release</code>),
-      fail-closed Gmail sent-log reconciler (v1.19.0), opt-in resolution telemetry
-      with DTTR (v1.20.0), and a webhook event-dedupe recipe (v1.20.3).
-      Early but API-stable (v1.21.0): breaking changes only at major versions.
+      Latest: <strong>v1.22.0</strong> state-authority gate (freeze <code>state_ref</code> at
+      decide time, compare to host canonical before claim) + AF-003 loop guard
+      (identical actions across new <code>tool_call_id</code>s → soft then hard →
+      <code>mycelium loops release</code>), fail-closed Gmail sent-log reconciler (v1.19.0),
+      opt-in resolution telemetry with DTTR (v1.20.0), and a webhook event-dedupe
+      recipe (v1.20.3).
+      Early but API-stable (v1.22.0): breaking changes only at major versions.
     </p>
 
     <section id="architecture">

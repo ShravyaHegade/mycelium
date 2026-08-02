@@ -17,7 +17,16 @@ TRANSITION_SCHEMA = "mycelium.transition/v1"
 SCOPE_FIELDS = ("thread_id", "run_id", "node")
 
 LEDGER_KWARG_KEYS = frozenset(
-    {"request_id", "tool_call_id", "thread_id", "run_id", "node"}
+    {
+        "request_id",
+        "tool_call_id",
+        "thread_id",
+        "run_id",
+        "node",
+        # State-authority / decision metadata — not part of tool-arg identity.
+        "state_ref",
+        "decision_id",
+    }
 )
 
 

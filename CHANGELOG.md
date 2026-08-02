@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.22.0 (2026-08-02)
+
+Minor: state-authority execution gate — refuse tool calls derived from a
+superseded `state_ref` before ledger claim. Backward compatible (opt-in YAML /
+decorator; claim pass-through fields are additive).
+
+### Added
+
+- **StateAuthority:** pre-claim gate that compares a frozen `state_ref` (passed
+  on the tool call) against a host `get_canonical_state_ref` callback.
+  Mismatch / missing ref → `ToolBoundaryError` (`violation=state_superseded` /
+  `state_ref_missing`) or `LedgerHardBlockError`. Wrapper order:
+  `@state_authority` → `@loop_guard` → `@ledger` → `@bounded` → `@protect`.
+- YAML `state_authority:` (`canonical_callable`, `require_state_ref`,
+  `on_mismatch` / `on_missing`, `tools` / `exclude`); per-tool
+  `state_authority: false`.
+- Ledger pass-through: optional `decision_id` / `state_ref` stored on
+  `LedgerEntry` at claim (audit only; not part of transition-key args
+  fingerprint). Bookkeeping keys extended accordingly.
+- Proof test: stale checkpoint + new `tool_call_id` is allowed by the ledger
+  alone and blocked when the gate is wrapped outside it.
+
 ## 1.21.0 (2026-08-01)
 
 Minor: AF-003 loop guard — halt repeated identical tool actions across new

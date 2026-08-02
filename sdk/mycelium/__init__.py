@@ -77,6 +77,19 @@ from mycelium.protect import protect, protect_sync
 from mycelium.providers import GmailReconciler
 from mycelium.reconcile import Reconciler, ReconcileResult, ReconcileStatus
 from mycelium.session import Session
+from mycelium.state_authority import (
+    ON_MISMATCH_HARD,
+    ON_MISMATCH_SOFT,
+    VIOLATION_MISSING,
+    VIOLATION_SUPERSEDED,
+    VIOLATION_UNRESOLVED,
+    StateAuthority,
+    apply_state_authority,
+    extract_decision_id,
+    extract_state_ref,
+    state_authority,
+    state_authority_sync,
+)
 from mycelium.state_flush import (
     FileStateFlushStorage,
     InMemoryStateFlushStorage,
@@ -130,7 +143,7 @@ from mycelium.transition_resolution import (
     transition_needs_repair,
 )
 
-__version__ = "1.21.0"
+__version__ = "1.22.0"
 
 __all__ = [
     "ActionLedger",
@@ -242,6 +255,17 @@ __all__ = [
     "apply_loop_guard",
     "loop_guard",
     "loop_guard_sync",
+    "ON_MISMATCH_HARD",
+    "ON_MISMATCH_SOFT",
+    "VIOLATION_MISSING",
+    "VIOLATION_SUPERSEDED",
+    "VIOLATION_UNRESOLVED",
+    "StateAuthority",
+    "apply_state_authority",
+    "extract_decision_id",
+    "extract_state_ref",
+    "state_authority",
+    "state_authority_sync",
     "bounded",
     "bounded_sync",
     "ToolBoundaryError",

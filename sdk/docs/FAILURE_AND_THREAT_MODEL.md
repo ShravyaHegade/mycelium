@@ -12,9 +12,10 @@ README is the source of truth for how the pieces are used; this file is the
 honest accounting of what can go wrong and which guarantee is pinned to which
 test.
 
-> Version note: this document tracks package **v1.21.0**. The ledger-core
-> guarantees below are unchanged; optional `loop_guard:` (AF-003) is documented
-> in the SDK README / catalog and is outside this core guarantee set.
+> Version note: this document tracks package **v1.22.0**. The ledger-core
+> guarantees below are unchanged; optional `loop_guard:` (AF-003) and
+> `state_authority:` are documented in the SDK README and are outside this
+> core guarantee set.
 
 ---
 
@@ -41,9 +42,14 @@ This document is **explicitly out of scope** for:
   configured — that guard halts consecutive identical action hashes across
   distinct `tool_call_id`s. Without it, a tool that legitimately runs 1,000
   times under 1,000 distinct transition keys is *not* treated as a duplicate.
+- **State authority / superseded checkpoints** *unless* optional
+  `state_authority:` is configured — the ledger does not refuse a *new*
+  `tool_call_id` derived from a stale checkpoint. The pre-claim
+  `StateAuthority` gate (freeze `state_ref` at decide, compare at execute)
+  is documented in the SDK README; not part of the ledger core set below.
 - The optional `@protect` / `HistoryGuard` / `MessageValidator` / `@bounded`
-  / `Session` / `loop_guard` features (loop_guard is documented in the catalog
-  and SDK README; not part of the ledger core guarantee set below).
+  / `Session` / `loop_guard` / `state_authority` features (documented in the
+  catalog and SDK README; not part of the ledger core guarantee set below).
 
 ---
 
@@ -196,6 +202,10 @@ than the code makes.
   distinct transition keys, the ledger does not stop the calls. Optional
   AF-003 `loop_guard:` halts consecutive identical *action* hashes (tool + args)
   across new dispatch ids; it is not a general spend budget.
+- **Superseded state (without `state_authority:`).** A redispatch from a stale
+  checkpoint that mints a new `tool_call_id` / changed args has no prior claim
+  and PROCEEDs. Optional `state_authority:` compares a frozen `state_ref` to the
+  host's canonical ref before claim; see SDK README.
 - **Trusting the reconciler.** If your reconciler returns `NOT_EXECUTED` when
   the effect actually happened, the runtime will re-execute once. Reconcilers
   are read-only *by contract*, not enforced by Mycelium.
