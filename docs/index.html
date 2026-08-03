@@ -8,7 +8,7 @@
   <meta name="keywords" content="reliable AI agents, AI agent reliability, production AI agents, AI agent guardrails, LangGraph reliability, CrewAI reliability, agent idempotency, duplicate tool execution, tool calling, runtime guards, Python LLM agents, prevent agent failures">
   <meta name="author" content="Mycelium Labs">
   <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
-  <meta name="theme-color" content="#181818">
+  <meta name="theme-color" content="#1c1d14">
   <link rel="canonical" href="https://mycelium-labs.github.io/mycelium/">
   <meta property="og:title" content="Mycelium: runtime guards for AI agents">
   <meta property="og:description" content="Runtime guards and zero-touch YAML auto-instrumentation for reliable AI agent tools.">
@@ -106,7 +106,7 @@
   }
   </script>
   <style>
-    :root {
+   :root {
       --ink: #181818;
       --ink-soft: #3d3d3d;
       --ink-muted: #6b6b6b;
@@ -115,6 +115,10 @@
       --wash: #f0efec;
       --line: #d8d6d1;
       --sidebar: 9rem;
+      --product: #1c1d14;
+      --product-ink: #eef0e2;
+      --product-muted: #a3a574;
+      --product-brand: #d8c45a;
     }
 
     * { box-sizing: border-box; }
@@ -127,10 +131,130 @@
 
     body {
       margin: 0;
-      font-family: Charter, "Iowan Old Style", Palatino, Georgia, serif;
+      font-family: "Helvetica Neue", Helvetica, "Segoe UI", sans-serif;
       color: var(--ink);
       background: var(--paper);
-      line-height: 1.65;
+      line-height: 1.55;
+    }
+
+    /* Product: full first screen; docs below on scroll */
+    .product {
+      position: relative;
+      background: var(--product);
+      color: var(--product-ink);
+      min-height: 100vh;
+      min-height: 100dvh;
+      display: flex;
+      align-items: center;
+      padding: 2rem 2rem 4.5rem;
+      box-sizing: border-box;
+    }
+
+    .product-inner {
+      max-width: 54rem;
+      width: 100%;
+      margin: 0 auto;
+    }
+
+    .product-name {
+      font-size: clamp(2.1rem, 4.5vw, 2.75rem);
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      line-height: 1.1;
+      margin: 0 0 0.85rem;
+      color: var(--product-brand);
+    }
+
+    .product-line {
+      font-size: 1.05rem;
+      font-weight: 500;
+      margin: 0 0 0.5rem;
+      color: var(--product-ink);
+      max-width: 28rem;
+    }
+
+    .product-sub {
+      margin: 0 0 1.75rem;
+      color: var(--product-muted);
+      font-size: 0.95rem;
+      max-width: 28rem;
+      line-height: 1.5;
+    }
+
+    .product-install {
+      margin: 0 0 1.25rem;
+      display: inline-block;
+      padding: 0.65rem 0.9rem;
+      background: #12130c;
+      border: 1px solid rgba(238, 240, 226, 0.18);
+      font-family: ui-monospace, Menlo, Consolas, monospace;
+      font-size: 0.82rem;
+      color: var(--product-ink);
+    }
+
+    .product-meta {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.65rem;
+      margin: 0;
+    }
+
+    .product-meta a {
+      line-height: 0;
+      opacity: 0.95;
+    }
+
+    .product-meta img {
+      height: 22px;
+      vertical-align: middle;
+    }
+
+    .product-scroll {
+      position: absolute;
+      left: 50%;
+      bottom: 1.75rem;
+      transform: translateX(-50%);
+      display: inline-flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.35rem;
+      font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+      font-size: 0.68rem;
+      font-weight: 600;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--product-muted);
+      text-decoration: none;
+      animation: product-blink 1.6s ease-in-out infinite;
+    }
+
+    .product-scroll:hover {
+      color: var(--product-ink);
+    }
+
+    .product-scroll span[aria-hidden="true"] {
+      font-size: 1.1rem;
+      line-height: 1;
+    }
+
+    @keyframes product-blink {
+      0%, 100% { opacity: 0.35; }
+      50% { opacity: 1; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .product-scroll { animation: none; opacity: 0.8; }
+    }
+
+    .docs-label {
+      font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+      font-size: 0.62rem;
+      font-weight: 600;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--ink-faint);
+      margin: 0 0 0.75rem;
     }
 
     .layout {
@@ -140,6 +264,7 @@
       max-width: 54rem;
       margin: 0 auto;
       padding: 3rem 2rem 4rem;
+      scroll-margin-top: 1rem;
     }
 
     .sidebar {
@@ -354,15 +479,37 @@
         gap: 0.25rem 1rem;
       }
       h1 { font-size: 2rem; }
+      .product { padding: 1.5rem 1.25rem; }
     }
   </style>
 </head>
 <body>
 
-<div class="layout">
+<header class="product">
+  <div class="product-inner">
+    <p class="product-name">Mycelium</p>
+    <p class="product-line">Runtime guards for agent tools.</p>
+    <p class="product-sub">
+      Sits between your agent loop and your tools. Stops duplicate side effects
+      on retry and redispatch, blocks bad tool calls, and keeps tool data fresh.
+      Not a tracer. Prevention at the tool boundary.
+    </p>
+    <pre class="product-install">pip install mycelium-runtime</pre>
+    <p class="product-meta">
+      <a href="https://pepy.tech/project/mycelium-runtime"><img src="https://static.pepy.tech/badge/mycelium-runtime" alt="PyPI downloads"></a>
+      <a href="https://pypi.org/project/mycelium-runtime/"><img src="https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&amp;release=1.24.0" alt="PyPI version"></a>
+    </p>
+  </div>
+  <a class="product-scroll" href="#how-to-use">
+    How to use
+    <span aria-hidden="true">∨</span>
+  </a>
+</header>
+
+<div class="layout" id="how-to-use">
 
   <aside class="sidebar">
-    <p>Contents</p>
+    <p>How to use</p>
     <ol>
       <li><a href="#architecture">Architecture</a></li>
       <li><a href="#scope">What it does</a></li>
@@ -383,7 +530,8 @@
 
   <div class="main">
 
-    <h1>Mycelium: runtime guards for AI agents</h1>
+    <p class="docs-label">How to use</p>
+    <h1>Install, API, and reference</h1>
     <p class="badges">
       <a href="https://pypi.org/project/mycelium-runtime/"><img src="https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&amp;release=1.22.0" alt="PyPI version"></a>
       <a href="https://pypi.org/project/mycelium-runtime/"><img src="https://img.shields.io/pypi/pyversions/mycelium-runtime.svg" alt="Python versions"></a>
@@ -391,38 +539,25 @@
       <a href="https://github.com/mycelium-labs/mycelium"><img src="https://img.shields.io/github/license/mycelium-labs/mycelium.svg" alt="MIT license"></a>
     </p>
     <p class="lede">
-      Runtime guards for AI agents. Sits between your agent loop and your tools
-      (after the LLM returns <code>tool_calls</code>): stops duplicate side effects
-      on retry/redispatch, blocks bad tool args and out-of-scope calls, and keeps
-      tool data fresh.
-      <strong>Core:</strong> transition envelope (class + lease + terminal + gates / reconcile).
-      <strong>Opt-in:</strong> state authority, loop guard (AF-003), completion
-      contract (AF-007), stale-context helpers, and tool-boundary checks.
-      YAML callable paths and <code>mycelium run</code> add the core path without
-      editing each function. Framework-agnostic. Not an approvals inbox, not hosted
-      observability, not on-chain trails, not a recovery tool — a tool-boundary
-      guard that composes under an approval layer and beside a tracer.
-      Latest: <strong>v1.24.0</strong> SQLite ledger + AF-002 failure-case pack + AF-007 completion contract (refuse terminal
-      while required checklist items are pending) + state-authority gate + AF-003 loop guard
-      (identical actions across new <code>tool_call_id</code>s → soft then hard →
-      <code>mycelium loops release</code>), fail-closed Gmail sent-log reconciler (v1.19.0),
-      opt-in resolution telemetry with DTTR (v1.20.0), and a webhook event-dedupe
-      recipe (v1.20.3).
-      Early but API-stable (v1.24.0): breaking changes only at major versions.
+      Core path: transition envelope (class + lease + terminal + gates).
+      Opt-in: state authority, loop guard, completion contract, stale-context helpers,
+      tool-boundary checks. YAML callable paths and <code>mycelium run</code> add the
+      core path without editing each function. Framework-agnostic.
+      Latest <strong>v1.24.0</strong>. API-stable; breaking changes only at major versions.
     </p>
 
     <section id="architecture">
       <h2>How it fits</h2>
       <p class="arch-caption">
-        Mycelium sits between the agent loop and your tools — after the LLM returns
+        Mycelium sits between the agent loop and your tools: after the LLM returns
         <code>tool_calls</code>, around execution. The transition envelope classifies each
         tool, hashes a durable key per dispatch, and resolves duplicates through gates
-        and terminal outcomes — not by re-running blindly. Optional message/history
+        and terminal outcomes: not by re-running blindly. Optional message/history
         guards run only when you call them before the next LLM turn.
         <strong>Do not redispatch unless the previous transition is proven terminal or
         safely recoverable.</strong>
         Not a framework. Not observability.
-        <a href="https://github.com/mycelium-labs/mycelium/blob/main/sdk/README.md#what-mycelium-does-not-do">Not an approvals inbox, not hosted observability, not on-chain trails, not a webhook hub, not a recovery tool — the full boundaries &amp; compose line.</a>
+        <a href="https://github.com/mycelium-labs/mycelium/blob/main/sdk/README.md#what-mycelium-does-not-do">Not an approvals inbox, not hosted observability, not on-chain trails, not a webhook hub, not a recovery tool ; the full boundaries &amp; compose line.</a>
       </p>
       <div class="arch-flow">
         <div class="arch-box">Your agent loop<br><span style="font-weight:400;color:var(--ink-muted)">LangGraph · CrewAI · Python</span></div>
@@ -442,43 +577,39 @@
       </p>
       <ul>
         <li>
-          <strong>Duplicate side effects on retry</strong> (core) — classify tools
+          <strong>Duplicate side effects on retry</strong> (core): classify tools
           (<code>read</code>, <code>keyed_mutate</code>, <code>non_idempotent_mutate</code>, …),
           hash a durable transition key, hold a lease (auto-extended while ledgered tools
           run), resolve by terminal state and gates
           (poll / repair / soft-block reads; hard-block or reconcile writes).
         </li>
         <li>
-          <strong>Transition envelope fields</strong> (core) —
-          <code>side_effect_class</code> → <code>spendability</code> →
+          <strong>Transition envelope fields</strong> (core): <code>side_effect_class</code> → <code>spendability</code> →
           <code>side_effect_boundary</code> → <code>terminal_outcome</code> →
           <code>external_operation_ref</code> → <code>retry_permission</code>.
           Same system as above; payment/write needs the heavier set.
         </li>
         <li>
-          <strong>Infinite action loops (AF-003)</strong> (opt-in) —
-          <code>loop_guard:</code> halts consecutive identical tool + args across
+          <strong>Infinite action loops (AF-003)</strong> (opt-in): <code>loop_guard:</code> halts consecutive identical tool + args across
           <em>new</em> <code>tool_call_id</code>s (the ledger only dedupes the same
           dispatch). Soft <code>ToolBoundaryError</code>, then hard
           <code>LedgerHardBlockError</code> for the whole run; operator
           <code>mycelium loops release</code>.
         </li>
         <li>
-          <strong>Premature termination (AF-007)</strong> (opt-in) —
-          <code>completion:</code> host checklist; unmarked <strong>required</strong>
+          <strong>Premature termination (AF-007)</strong> (opt-in): <code>completion:</code> host checklist; unmarked <strong>required</strong>
           subtasks refuse terminal (<code>CompletionRefusedError</code>); unmarked
           <strong>optional</strong> warn and allow. Gate via
           <code>complete_run()</code>, LangGraph END, or final-message wrap.
         </li>
         <li>
-          <strong>Stale or broken context</strong> (opt-in) — TTL cache
+          <strong>Stale or broken context</strong> (opt-in): TTL cache
           (<code>@protect</code> / <code>Session</code>); optional
           <code>MessageValidator</code> / <code>HistoryGuard</code> before the next LLM turn.
         </li>
         <li>
-          <strong>Bad tool calls</strong> (opt-in) —
-          <code>@bounded</code> input/output/scope checks; optional
-          <code>ToolRegistry</code> allowlist — block before the tool runs.
+          <strong>Bad tool calls</strong> (opt-in): <code>@bounded</code> input/output/scope checks; optional
+          <code>ToolRegistry</code> allowlist: block before the tool runs.
         </li>
       </ul>
     </section>
@@ -532,7 +663,7 @@ InMemoryLoopGuardStorage, FileLoopGuardStorage
 CompletionContract, CompletionRefusedError, wrap_final_message, gate_graph_end
 InMemoryCompletionStorage, FileCompletionStorage
 
-# Actions (core) — duplicate side effects / transition envelope
+# Actions (core): duplicate side effects / transition envelope
 ledger, ledger_sync, task_ledger, task_ledger_sync
 ActionLedger, TaskLedger, StateFlush, AuditReceiptEmitter, verify_receipt
 LedgerHardBlockError, LedgerPollTimeoutError
@@ -565,7 +696,7 @@ mycelium completion status|mark                    # AF-007 checklist triage</pr
       <h2>Context (opt-in)</h2>
       <p>
         TTL cache and message/history helpers. Not part of the default
-        <code>mycelium init</code> on-ramp — enable in YAML or call from code.
+        <code>mycelium init</code> on-ramp: enable in YAML or call from code.
       </p>
       <pre>from mycelium import protect, protect_sync, Session
 from mycelium import MessageValidator, HistoryGuard
@@ -597,7 +728,7 @@ with Session():
       <h2>Tool boundaries (opt-in)</h2>
       <p>
         Input/output/scope validation and allowlists. Opt-in via YAML
-        <code>bounded</code> / <code>registry</code> or decorators — not the default on-ramp.
+        <code>bounded</code> / <code>registry</code> or decorators: not the default on-ramp.
       </p>
       <pre>from mycelium import bounded, bounded_sync, ToolRegistry, ToolRunner
 
@@ -635,14 +766,14 @@ def fetch_customer(customer_id: str) -> dict:
     <section id="actions">
       <h2>Actions (core)</h2>
       <p>
-        Transition ledger for duplicate side-effect prevention — the default
+        Transition ledger for duplicate side-effect prevention: the default
         <code>mycelium init</code> / <code>mycelium run</code> path.
       </p>
       <p>
         Each ledgered tool gets a <code>side_effect_class</code> and a
         <code>transition_key</code> (scope, tool, args, class, policy version).
         Duplicate dispatches resolve through <a href="#resolution">gates</a> and
-        terminal outcomes — not blind re-execution.
+        terminal outcomes: not blind re-execution.
       </p>
       <pre>from mycelium import load_config
 
@@ -673,8 +804,8 @@ process_invoice(invoice_id="inv-42", amount=200.0)  # returns first result</pre>
       <p>
         <strong>Manual integration (v1.20.1):</strong> if you own the tool runner and
         can't take a decorator or YAML wrap (custom loop, PROCEED/SKIP-style host), call
-        the two phases yourself — <code>claim_side_effecting(...)</code> then
-        <code>complete(...)</code> / <code>fail(...)</code> — same ledger, same gates,
+        the two phases yourself: <code>claim_side_effecting(...)</code> then
+        <code>complete(...)</code> / <code>fail(...)</code> ; same ledger, same gates,
         same hard-block rules. There is no YAML switch; see the SDK README's
         <em>Manual integration (claim → execute → complete)</em> section.
       </p>
@@ -693,8 +824,7 @@ process_invoice(invoice_id="inv-42", amount=200.0)  # returns first result</pre>
         <strong>Invariant:</strong> do not redispatch unless the previous transition is
         proven terminal (e.g. <code>COMPLETED</code> → return stored) or safely
         recoverable (poll in-flight, soft-block/retry a read <code>UNKNOWN</code>, or
-        reconcile via <code>external_operation_ref</code>). Otherwise hard-block —
-        never blind re-execute a side effect.
+        reconcile via <code>external_operation_ref</code>). Otherwise hard-block: never blind re-execute a side effect.
       </p>
       <p>
         Each duplicate dispatch is classified to a <strong>gate</strong>. Read-only and
@@ -710,8 +840,7 @@ SOFT_BLOCK    read UNKNOWN / BLOCKED only        retry by default (v1.9.0)
 HARD_BLOCK    ambiguous mutating transition      stop; reconcile if ref present</pre>
       <p id="sufficiency-gates">
         <strong>Public transition-sufficiency language:</strong> discussions of
-        redispatch (e.g. langgraph#7417) often use a four-gate vocabulary —
-        <code>ALLOW</code> / <code>REPAIR</code> / <code>SOFT_BLOCK</code> /
+        redispatch (e.g. langgraph#7417) often use a four-gate vocabulary: <code>ALLOW</code> / <code>REPAIR</code> / <code>SOFT_BLOCK</code> /
         <code>HARD_BLOCK</code> (sometimes just <code>BLOCK</code>). Mycelium
         implements that public set and adds finer internal gates for the same
         decisions:
@@ -732,7 +861,7 @@ HARD_BLOCK      HARD_BLOCK                                stop; reconcile if ref
       </p>
       <p>
         <strong>Lease validity (v1.10.0) / auto-renew (v1.14.0):</strong> <code>lease_until</code> is resolution
-        metadata — not part of <code>transition_key</code>. Resolution checks
+        metadata: not part of <code>transition_key</code>. Resolution checks
         <code>LeaseValidity</code> (<code>HELD</code> → poll, <code>EXPIRED</code> →
         reclaim / hard-block by class) before allowing another attempt.
         <code>@ledger</code> / <code>@ledger_sync</code> auto-extend the lease while the
@@ -743,8 +872,7 @@ HARD_BLOCK      HARD_BLOCK                                stop; reconcile if ref
       </p>
       <p>
         <strong>REPAIR (v1.13.0):</strong> when the durable record is incomplete but
-        healable, claim loops call <code>repair_transition()</code> then re-resolve —
-        never a second side effect. A held lease is still <code>POLL</code> for peers.
+        healable, claim loops call <code>repair_transition()</code> then re-resolve ; never a second side effect. A held lease is still <code>POLL</code> for peers.
       </p>
       <p>
         <strong>LangGraph Cloud (~180s):</strong> long tool calls may be redispatched
@@ -802,7 +930,7 @@ def send_payment(...): ...</pre>
         <code>GmailReconciler</code> checks the sent-log
         (<code>users.messages.list(q='in:sent rfc822msgid:&lt;Message-ID&gt;')</code>):
         one match → <code>COMPLETED</code>; zero matches → <code>UNKNOWN</code> (indexing
-        lag — never a blind retry); two or more → <code>UNKNOWN</code> (duplicate may
+        lag ; never a blind retry); two or more → <code>UNKNOWN</code> (duplicate may
         already have occurred). The transition stays hard-blocked until reconcile or
         operator release.
       </p>
@@ -817,13 +945,13 @@ EXPIRED + maybe_crossed / crossed            → hard-block</pre>
       <p>
         <strong>Operator release (v1.15.0):</strong> when no <code>Reconciler</code>
         can settle a hard-block, a human verifies with the provider and records
-        the outcome — <code>release(verified="completed", result=...)</code>
+        the outcome ; <code>release(verified="completed", result=...)</code>
         returns the recorded result on redispatch;
         <code>release(verified="not_executed")</code> grants exactly one
         re-execution, consumed through the same machinery as a reconciler
         <code>NOT_EXECUTED</code>. One-shot (never overwritten), fail-closed
         (unknown id / already <code>COMPLETED</code> / held lease refused),
-        audit-stamped on the durable entry — backend access is release
+        audit-stamped on the durable entry: backend access is release
         authority. Triage with <code>list_transitions(stuck=True)</code> or the
         CLI:
       </p>
@@ -838,17 +966,17 @@ mycelium transitions release &lt;request_id&gt; --verified not-executed \
       <p>
         The action ledger deduplicates <strong>retries of the same dispatch</strong>
         (<code>tool_call_id</code>). If the LLM emits a <em>new</em> id each turn with
-        the same tool + args, that is a new transition — the ledger allows it.
+        the same tool + args, that is a new transition: the ledger allows it.
         Optional <code>loop_guard:</code> detects that thrash before claim:
       </p>
       <ol>
         <li>
-          <strong>Soft</strong> — <code>ToolBoundaryError</code>
+          <strong>Soft</strong> ; <code>ToolBoundaryError</code>
           (<code>violation=loop_detected</code>) with an <code>llm_message</code>;
           body does not run.
         </li>
         <li>
-          <strong>Hard</strong> — <code>LedgerHardBlockError</code>; the
+          <strong>Hard</strong> ; <code>LedgerHardBlockError</code>; the
           <strong>entire run</strong> is frozen until an operator releases it.
         </li>
       </ol>
@@ -887,7 +1015,7 @@ mycelium loops release &lt;run_id&gt; --verified clear|allow-once|abort-run \
       <p>
         Premature termination: the agent presents work as done while a
         <strong>host-declared</strong> checklist is still open. Mycelium does
-        not judge open-ended goals (AF-005) — only an explicit contract.
+        not judge open-ended goals (AF-005) ; only an explicit contract.
       </p>
       <ul>
         <li>
@@ -930,7 +1058,7 @@ mycelium completion mark &lt;run_id&gt; send_email --status success</pre>
       <h2>Outcome telemetry &amp; DTTR (v1.20+)</h2>
       <p>
         Opt-in <code>OutcomeEmitter</code> writes flat, append-only rows (one JSON object
-        per line) only on resolution events — a dispatch resolving to a gate
+        per line) only on resolution events: a dispatch resolving to a gate
         (<code>ALLOW</code> / <code>RETURN</code> / <code>HARD_BLOCK</code> /
         <code>SOFT_BLOCK</code>), tool-body start/complete/fail, and operator release.
         Poll ticks never emit. Off by default; memory or file storage only in v1 (no
@@ -939,7 +1067,7 @@ mycelium completion mark &lt;run_id&gt; send_email --status success</pre>
       </p>
       <p>
         From those rows you compute the <strong>Duplicate Tool Transition Rate (DTTR)</strong>
-        — a single number that makes the no-double-execute guarantee observable in production
+        ; a single number that makes the no-double-execute guarantee observable in production
         and regresses loudly the day it doesn't. Enable via <code>outcome_emit:</code> in YAML
         or the <code>outcome_emitter=</code> kwarg on <code>@ledger</code> /
         <code>@ledger_sync</code>; compute the metric with the CLI or the library. See the
