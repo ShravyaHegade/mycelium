@@ -5,7 +5,7 @@ Runtime guards for AI agents (PyPI: `mycelium-runtime`, import: `mycelium`). Pyt
 ## Layout
 
 - The package lives in `sdk/` — not the repo root. Run all Python dev from `sdk/`.
-- `docs/` is a hand-written static handbook (`index.html`); pushing to `main` with `docs/**` changes auto-deploys it to GitHub Pages.
+- Handbook + interactive sandbox live in a separate repo: [mycelium-labs/mycelium-website](https://github.com/mycelium-labs/mycelium-website) (Pages: https://mycelium-labs.github.io/mycelium-website/). Do not re-add a top-level `docs/` or `sandbox/` here.
 - `notes/` (scratch MD, pitch, randm, reading list, etc.) and `.cursor/` are gitignored local-only. Never commit them or reference them from shipped code/docs.
 - `.env` (see `.env.example`) is optional — HF corpus access only. SDK dev and tests need nothing from it.
 
