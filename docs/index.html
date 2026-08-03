@@ -1372,24 +1372,51 @@ mycelium completion status|mark                    # AF-007 checklist triage</pr
     const install = document.getElementById("product-install");
     if (install) {
       const label = install.getAttribute("data-copy") || install.textContent.trim();
-      install.addEventListener("click", async () => {
-        try {
-          await navigator.clipboard.writeText(label);
-        } catch {
-          const range = document.createRange();
-          range.selectNodeContents(install);
-          const sel = window.getSelection();
-          sel.removeAllRanges();
-          sel.addRange(range);
-          document.execCommand("copy");
-          sel.removeAllRanges();
+
+      function copyText(text) {
+        if (navigator.clipboard && window.isSecureContext) {
+          return navigator.clipboard.writeText(text);
         }
-        install.textContent = "Copied";
-        install.classList.add("is-copied");
-        window.setTimeout(() => {
-          install.textContent = label;
-          install.classList.remove("is-copied");
-        }, 1200);
+        return new Promise(function (resolve, reject) {
+          const ta = document.createElement("textarea");
+          ta.value = text;
+          ta.setAttribute("readonly", "");
+          ta.style.position = "fixed";
+          ta.style.top = "0";
+          ta.style.left = "0";
+          ta.style.width = "1px";
+          ta.style.height = "1px";
+          ta.style.padding = "0";
+          ta.style.border = "none";
+          ta.style.outline = "none";
+          ta.style.boxShadow = "none";
+          ta.style.background = "transparent";
+          ta.style.opacity = "0";
+          document.body.appendChild(ta);
+          ta.focus();
+          ta.select();
+          ta.setSelectionRange(0, text.length);
+          const ok = document.execCommand("copy");
+          document.body.removeChild(ta);
+          if (ok) resolve();
+          else reject(new Error("copy failed"));
+        });
+      }
+
+      install.addEventListener("click", function () {
+        copyText(label).then(function () {
+          install.textContent = "Copied";
+          install.classList.add("is-copied");
+          window.setTimeout(function () {
+            install.textContent = label;
+            install.classList.remove("is-copied");
+          }, 1200);
+        }).catch(function () {
+          install.textContent = "Select & copy";
+          window.setTimeout(function () {
+            install.textContent = label;
+          }, 1600);
+        });
       });
     }
 
