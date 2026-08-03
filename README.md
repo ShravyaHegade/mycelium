@@ -140,12 +140,12 @@ hard-block or reconcile against the provider when you record
 Zero-ops single-node durable ledger: YAML `storage: sqlite` + `path:` (stdlib;
 no extra install). Multi-worker / cloud: `pip install 'mycelium-runtime[redis]'`
 or `'mycelium-runtime[postgres]'`. See the
-[handbook](https://mycelium-labs.github.io/try-mycelium/).
+[handbook](https://mycelium-labs.github.io/).
 
 ## Docs
 
-- **Handbook:** https://mycelium-labs.github.io/try-mycelium/ ([website repo](https://github.com/mycelium-labs/try-mycelium))
-- **Sandbox demo:** [mycelium-labs/try-mycelium/sandbox](https://github.com/mycelium-labs/try-mycelium/tree/main/sandbox)
+- **Handbook:** https://mycelium-labs.github.io/ ([website repo](https://github.com/mycelium-labs/mycelium-labs.github.io))
+- **Sandbox demo:** [mycelium-labs/mycelium-labs.github.io/sandbox](https://github.com/mycelium-labs/mycelium-labs.github.io/tree/main/sandbox)
 - **Full API reference:** [sdk/README.md](sdk/README.md)
 - **PyPI:** https://pypi.org/project/mycelium-runtime/
 
