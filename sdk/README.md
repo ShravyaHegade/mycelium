@@ -1,9 +1,9 @@
 # Mycelium runtime
 
-[![PyPI version](https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&release=1.22.0)](https://pypi.org/project/mycelium-runtime/)
+[![PyPI version](https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&release=1.23.0)](https://pypi.org/project/mycelium-runtime/)
 [![Python](https://img.shields.io/pypi/pyversions/mycelium-runtime.svg)](https://pypi.org/project/mycelium-runtime/)
 
-Current package: **mycelium-runtime v1.22.0** (state-authority execution gate + AF-003 loop guard + outcome telemetry / DTTR + fail-closed Gmail sent-log reconciler + webhook event-dedupe recipe + atomicity contract + CAS backends + owner fencing + worker-death signal + operator release + `REPAIR` gate + lease auto-renew + transition envelope).
+Current package: **mycelium-runtime v1.23.0** (AF-007 completion contract + state-authority execution gate + AF-003 loop guard + outcome telemetry / DTTR + fail-closed Gmail sent-log reconciler + webhook event-dedupe recipe + atomicity contract + CAS backends + owner fencing + worker-death signal + operator release + `REPAIR` gate + lease auto-renew + transition envelope).
 
 ## One painful bug → a few lines of config
 
@@ -53,6 +53,7 @@ Mycelium sits between your agent loop and your tools (after the LLM returns `too
 | **Core** | **Duplicate side effects on retry** | Transition envelope: classify tools, durable transition key, lease (+ auto-renew while `@ledger` runs), terminal state, resolution **gates** (`POLL` / `REPAIR` / `SOFT_BLOCK` / `HARD_BLOCK`), `external_operation_ref` + `Reconciler`, ledgers, signed receipts |
 | **Core** | **Transition envelope fields** | `side_effect_class` → `spendability` → `side_effect_boundary` → `terminal_outcome` → `external_operation_ref` → `retry_permission` — same system as above; payment/write needs the heavier set |
 | **Opt-in** | **Infinite action loops (AF-003)** | `loop_guard:` — action-hash streak across *new* `tool_call_id`s; soft (`ToolBoundaryError`) then hard (`LedgerHardBlockError`); operator `mycelium loops release` |
+| **Opt-in** | **Premature termination (AF-007)** | `completion:` — host checklist; unmarked **required** → refuse terminal; unmarked **optional** → warn and allow; `complete_run` / graph END / final-message adapters |
 | **Opt-in** | **Superseded state / state authority** | `state_authority:` — freeze `state_ref` at decide time; compare to host canonical ref before claim; mismatch blocks even when `tool_call_id` is new |
 | **Opt-in** | **Stale or broken context** | TTL cache (`@protect` / `Session`); optional `MessageValidator` / `HistoryGuard` you call before the next LLM turn |
 | **Opt-in** | **Bad tool calls** | `@bounded` input/output/scope checks; optional `ToolRegistry` allowlist — block before the tool runs |
@@ -906,6 +907,59 @@ mycelium loops release <run_id> --verified clear|allow-once|abort-run \
 | `abort-run` | Keep the run frozen |
 
 Demo: `python examples/loop_guard_db_search.py` (from `sdk/`).
+
+### Completion contract (AF-007): refuse terminal while required subtasks pending
+
+AF-007 is when the agent presents work as **done** while a host-declared
+checklist is still open. This is **not** “did we meet the user’s real goal?”
+(that is AF-005 / judgment). Mycelium only gates against an **explicit**
+contract.
+
+| Kind | Still `pending` at terminal | Result |
+|------|-----------------------------|--------|
+| **required** | yes | **refuse** — `CompletionRefusedError` |
+| **optional** | yes | **warn and allow** |
+
+Resolved marks: `success` | `failed` | `abandoned` (abandoned needs a reason).
+Scope: `run_id` (fallback `thread_id`); missing scope → warn and skip.
+
+```yaml
+completion:
+  storage: file
+  path: ./mycelium-completion.json
+  required:
+    - id: send_email
+    - id: write_pr
+  optional:
+    - id: post_slack
+```
+
+```python
+from mycelium import CompletionContract, wrap_final_message, execution_scope
+from mycelium.transition import TransitionScope
+
+contract = CompletionContract(required=["send_email"], optional=["slack"])
+finalize = wrap_final_message(contract, lambda text: text)
+
+with execution_scope(TransitionScope(thread_id="t", run_id="r1", node="end")):
+    contract.mark("send_email", "success")
+    # optional still pending → allow_with_warnings
+    contract.complete_run()
+    finalize("Done.")
+```
+
+Entry points (same gate): `complete_run()`, LangGraph
+`completion_gate_end(contract, config=...)` before END, or
+`wrap_final_message`. Wire at least one or the guard never fires.
+
+```bash
+mycelium completion status <run_id> --config mycelium.yaml
+mycelium completion mark <run_id> send_email --status success
+mycelium completion mark <run_id> post_slack --status abandoned \
+  --reason "channel muted"
+```
+
+Demo: `python examples/completion_contract_checklist.py` (from `sdk/`).
 
 ### State authority: refuse decisions from superseded checkpoints
 

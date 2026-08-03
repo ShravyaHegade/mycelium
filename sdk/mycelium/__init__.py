@@ -37,6 +37,24 @@ from mycelium.audit_receipt import (
     InMemoryAuditReceiptStorage,
     verify_receipt,
 )
+from mycelium.completion_contract import (
+    STATUS_ABANDONED,
+    STATUS_FAILED,
+    STATUS_PENDING,
+    STATUS_SUCCESS,
+    CompleteRunResult,
+    CompletionContract,
+    CompletionError,
+    CompletionMarkError,
+    CompletionRefusedError,
+    CompletionRunState,
+    CompletionStorage,
+    FileCompletionStorage,
+    InMemoryCompletionStorage,
+    SubtaskMark,
+    gate_graph_end,
+    wrap_final_message,
+)
 from mycelium.config import (
     ConfigError,
     MyceliumConfig,
@@ -143,7 +161,7 @@ from mycelium.transition_resolution import (
     transition_needs_repair,
 )
 
-__version__ = "1.22.0"
+__version__ = "1.23.0"
 
 __all__ = [
     "ActionLedger",
@@ -255,6 +273,22 @@ __all__ = [
     "apply_loop_guard",
     "loop_guard",
     "loop_guard_sync",
+    "STATUS_ABANDONED",
+    "STATUS_FAILED",
+    "STATUS_PENDING",
+    "STATUS_SUCCESS",
+    "CompleteRunResult",
+    "CompletionContract",
+    "CompletionError",
+    "CompletionMarkError",
+    "CompletionRefusedError",
+    "CompletionRunState",
+    "CompletionStorage",
+    "FileCompletionStorage",
+    "InMemoryCompletionStorage",
+    "SubtaskMark",
+    "gate_graph_end",
+    "wrap_final_message",
     "ON_MISMATCH_HARD",
     "ON_MISMATCH_SOFT",
     "VIOLATION_MISSING",
