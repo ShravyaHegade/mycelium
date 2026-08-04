@@ -8,8 +8,10 @@ from pathlib import Path
 import pytest
 
 from mycelium import (
+    ARGS_DRIFT_HARD,
     ConfigError,
     ToolBoundaryError,
+    get_ledger,
     ledger_sync,
     load_config,
     load_config_from_string,
@@ -584,3 +586,41 @@ state_flush:
     snapshot = state_flush.load("thread-99")
     assert snapshot is not None
     assert snapshot.state["streamed"] == "chunk"
+
+
+def test_action_ledger_on_args_drift_from_yaml() -> None:
+    config = load_config_from_string(
+        """
+action_ledger:
+  storage: memory
+  on_args_drift: hard
+  tools: [charge]
+tools:
+  charge: {}
+"""
+    )
+
+    def charge(amount: int) -> int:
+        return amount
+
+    wrapped = config.apply_tool("charge", charge)
+    assert get_ledger(wrapped)._on_args_drift == ARGS_DRIFT_HARD
+
+
+def test_action_ledger_on_args_drift_invalid_rejected() -> None:
+    config = load_config_from_string(
+        """
+action_ledger:
+  storage: memory
+  on_args_drift: maybe
+  tools: [charge]
+tools:
+  charge: {}
+"""
+    )
+
+    def charge(amount: int) -> int:
+        return amount
+
+    with pytest.raises(ConfigError, match="on_args_drift"):
+        config.apply_tool("charge", charge)

@@ -1,6 +1,10 @@
 """Mycelium runtime: failure prevention for AI agents."""
 
 from mycelium.action_ledger import (
+    ARGS_DRIFT_HARD,
+    ARGS_DRIFT_OFF,
+    ARGS_DRIFT_POLICIES,
+    ARGS_DRIFT_SOFT,
     OPERATOR_RESOLUTION_COMPLETED,
     OPERATOR_RESOLUTION_NOT_EXECUTED,
     UNCLASSIFIED_POLICY_STRICT,
@@ -177,7 +181,7 @@ from mycelium.transition_resolution import (
     transition_needs_repair,
 )
 
-__version__ = "1.25.0"
+__version__ = "1.26.0"
 
 __all__ = [
     "ActionLedger",
@@ -195,6 +199,10 @@ __all__ = [
     "LedgerSoftBlockError",
     "LedgerStorage",
     "LedgerStorageUnavailableError",
+    "ARGS_DRIFT_OFF",
+    "ARGS_DRIFT_SOFT",
+    "ARGS_DRIFT_HARD",
+    "ARGS_DRIFT_POLICIES",
     "OPERATOR_RESOLUTION_COMPLETED",
     "OPERATOR_RESOLUTION_NOT_EXECUTED",
     "UNCLASSIFIED_POLICY_WARN",

@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.26.0 (2026-08-04)
+
+Minor: opt-in args-drift / identity-conflict gate on the action ledger.
+Same dispatch ticket (`request_id` / `tool_call_id`) with different tool args
+can soft- or hard-block. Default remains off (AF-002 Ring 3; backward
+compatible).
+
+### Added
+
+- **`action_ledger.on_args_drift`:** `off` (default) | `soft` | `hard`.
+  Compares claim-time `args_fingerprint` to prior ledger entries for the same
+  dispatch ticket (same storage key, or same ticket under a different
+  transition key), scoped by `run_id` / `thread_id` so other runs stay
+  isolated. Soft → `ToolBoundaryError`; hard → `LedgerHardBlockError`.
+- Decorator kwarg `on_args_drift=` on `@ledger` / `@ledger_sync`.
+- Tests in `tests/test_args_drift.py`. Default-off contract still pinned by
+  `test_semantic_identity`.
+
 ## 1.25.0 (2026-08-04)
 
 Minor: AF-008 scope-escalation guard — freeze the run tool allowlist and

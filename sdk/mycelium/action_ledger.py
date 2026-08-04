@@ -24,6 +24,7 @@ from mycelium.reconcile import Reconciler, ReconcileResult, ReconcileStatus
 from mycelium.session import Session, _session_var
 from mycelium.storage._helpers import claim_inflight_outcome, default_try_claim_inflight, with_lease
 from mycelium.storage.json_file import LockedJsonDictFile
+from mycelium.tool_boundary import ToolBoundaryError
 from mycelium.transition import (
     LEDGER_KWARG_KEYS,
     LeaseValidity,
@@ -31,9 +32,12 @@ from mycelium.transition import (
     SideEffectClass,
     TerminalOutcome,
     ToolTransitionBinding,
+    args_fingerprint,
+    derive_dispatch_id,
     derive_transition_key_for_call,
     extract_provider_idempotency_key,
     get_active_dispatch_id,
+    get_active_execution_scope,
     has_worker_death_evidence,
     legacy_status_from_terminal,
     resolve_lease_validity,
@@ -176,6 +180,14 @@ _RECONCILE_NOT_EXECUTED_OUTCOMES: frozenset[str] = frozenset({
 # conservative synthesized binding so failed retries hard-block.
 UNCLASSIFIED_POLICY_WARN = "warn"
 UNCLASSIFIED_POLICY_STRICT = "strict"
+
+# Opt-in identity-conflict / args-drift gate (AF-002 Ring 3). Default off
+# preserves the intentional contract that same dispatch ticket + different
+# args is a new transition (see test_semantic_identity).
+ARGS_DRIFT_OFF = "off"
+ARGS_DRIFT_SOFT = "soft"
+ARGS_DRIFT_HARD = "hard"
+ARGS_DRIFT_POLICIES = frozenset({ARGS_DRIFT_OFF, ARGS_DRIFT_SOFT, ARGS_DRIFT_HARD})
 
 # Conservative binding synthesized for "strict" unclassified claims:
 # NON_IDEMPOTENT_MUTATE yields MANUAL_RECONCILIATION_REQUIRED + SINGLE_USE
@@ -851,6 +863,7 @@ class ActionLedger:
         audit_emitter: AuditReceiptEmitter | None = None,
         outcome_emitter: OutcomeEmitter | None = None,
         unclassified_policy: str = UNCLASSIFIED_POLICY_WARN,
+        on_args_drift: str = ARGS_DRIFT_OFF,
         reclaim_requires_death_signal: bool = False,
         presumed_dead_after: float | None = None,
     ) -> None:
@@ -879,6 +892,15 @@ class ActionLedger:
             )
         # Policy for claims without a transition_binding (unclassified tools).
         self._unclassified_policy = unclassified_policy
+        if on_args_drift not in ARGS_DRIFT_POLICIES:
+            raise ValueError(
+                f"on_args_drift must be one of {sorted(ARGS_DRIFT_POLICIES)}, "
+                f"got {on_args_drift!r}"
+            )
+        # Opt-in: same dispatch ticket (request_id / tool_call_id) with
+        # different tool args → soft ToolBoundaryError or hard LedgerHardBlockError.
+        # Default off: same ticket + different args remains a new transition.
+        self._on_args_drift = on_args_drift
         self._memory_warned_tools: set[str] = set()
         self._unclassified_warned_tools: set[str] = set()
         # Worker-death signal: when True, EXPIRED entries cannot be reclaimed
@@ -937,6 +959,93 @@ class ActionLedger:
     def _list_all_entries(self) -> list[LedgerEntry]:
         with _storage_errors("list_all"):
             return self._storage.list_all()
+
+    def _enforce_args_drift(
+        self,
+        tool: str,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        *,
+        request_id: str,
+        existing: LedgerEntry | None,
+    ) -> None:
+        """Block when the same dispatch ticket is reused with different args.
+
+        Default ``on_args_drift="off"`` is a no-op. When enabled:
+
+        1. Same storage key (``request_id``) with a prior entry whose
+           ``args_fingerprint`` differs → conflict.
+        2. Same ``tool_call_id`` / ``request_id`` dispatch ticket under a
+           *different* transition key (args are in the key) → conflict,
+           but only within the same run isolation scope (``run_id``, else
+           ``thread_id``). Other runs are ignored.
+
+        Soft raises :class:`ToolBoundaryError`; hard raises
+        :class:`LedgerHardBlockError`.
+        """
+        if self._on_args_drift == ARGS_DRIFT_OFF:
+            return
+
+        incoming_fp = args_fingerprint(args, kwargs)
+        conflict: LedgerEntry | None = None
+
+        if existing is not None:
+            stored_fp = args_fingerprint(tuple(existing.args), dict(existing.kwargs))
+            if stored_fp != incoming_fp:
+                conflict = existing
+
+        if conflict is None:
+            dispatch_id = derive_dispatch_id(kwargs)
+            if dispatch_id is not None:
+                incoming_scope = _args_drift_scope_key(kwargs)
+                for entry in self._list_all_entries():
+                    if entry.request_id == request_id:
+                        continue
+                    if entry.tool != tool:
+                        continue
+                    entry_kwargs = dict(entry.kwargs)
+                    if not _args_drift_scopes_match(
+                        incoming_scope, _args_drift_scope_key(entry_kwargs)
+                    ):
+                        continue
+                    entry_dispatch = derive_dispatch_id(entry_kwargs)
+                    if entry_dispatch != dispatch_id:
+                        continue
+                    stored_fp = args_fingerprint(
+                        tuple(entry.args), entry_kwargs
+                    )
+                    if stored_fp != incoming_fp:
+                        conflict = entry
+                        break
+
+        if conflict is None:
+            return
+
+        message = (
+            f"Args drift / identity conflict for tool {tool!r}: dispatch ticket "
+            f"already recorded with different arguments "
+            f"(prior request_id={conflict.request_id!r}, "
+            f"incoming request_id={request_id!r}). "
+            f"Set action_ledger.on_args_drift to 'off' to allow, or mint a new "
+            f"tool_call_id / request_id for a genuinely new intent."
+        )
+        if self._on_args_drift == ARGS_DRIFT_SOFT:
+            raise ToolBoundaryError(
+                message,
+                violation="args_drift",
+                tool_name=tool,
+                llm_message=(
+                    f"Identity conflict: {tool!r} was already claimed with different "
+                    "arguments for this dispatch ticket. Mint a new tool_call_id / "
+                    "request_id for a new intent, or reuse the original arguments. "
+                    "The tool body was not executed."
+                ),
+                recovery_hint=(
+                    "Reuse the original arguments for this ticket, or issue a new "
+                    "tool_call_id / request_id."
+                ),
+            )
+        raise LedgerHardBlockError(message)
 
     # --- resolution telemetry (opt-in; never raises, never disturbs the path) ---
 
@@ -1302,10 +1411,17 @@ class ActionLedger:
                 lease_ttl=lease_ttl,
             )
         ttl = self._lease_ttl if lease_ttl is None else lease_ttl
-        self._warn_unclassified_retry(tool, self._get_entry(request_id))
+        prior = self._get_entry(request_id)
+        self._enforce_args_drift(
+            tool, args, kwargs, request_id=request_id, existing=prior
+        )
+        self._warn_unclassified_retry(tool, prior)
         entry = self._new_inflight_entry(request_id, tool, args, kwargs)
         outcome, existing = self._try_claim_inflight(entry, lease_ttl=ttl)
         if outcome == "completed" and existing is not None:
+            self._enforce_args_drift(
+                tool, args, kwargs, request_id=request_id, existing=existing
+            )
             return existing
         if outcome == "in_flight":
             raise LedgerPendingError(
@@ -1340,6 +1456,9 @@ class ActionLedger:
 
         while True:
             existing = self.get(request_id)
+            self._enforce_args_drift(
+                tool, args, kwargs, request_id=request_id, existing=existing
+            )
             if existing is not None:
                 gate = resolve_read_only_gate(existing)
                 if gate == TransitionGate.REPAIR:
@@ -1365,6 +1484,9 @@ class ActionLedger:
             entry = self._new_inflight_entry(request_id, tool, args, kwargs)
             outcome, existing = self._try_claim_inflight(entry, lease_ttl=ttl)
             if outcome == "completed" and existing is not None:
+                self._enforce_args_drift(
+                    tool, args, kwargs, request_id=request_id, existing=existing
+                )
                 return existing
             if outcome == "claimed":
                 claimed = self.get(request_id)
@@ -1454,6 +1576,9 @@ class ActionLedger:
 
         while True:
             existing = self.get(request_id)
+            self._enforce_args_drift(
+                tool, args, kwargs, request_id=request_id, existing=existing
+            )
             if existing is not None:
                 gate = resolve_read_only_gate(existing)
                 if gate == TransitionGate.REPAIR:
@@ -1479,6 +1604,9 @@ class ActionLedger:
             entry = self._new_inflight_entry(request_id, tool, args, kwargs)
             outcome, existing = self._try_claim_inflight(entry, lease_ttl=ttl)
             if outcome == "completed" and existing is not None:
+                self._enforce_args_drift(
+                    tool, args, kwargs, request_id=request_id, existing=existing
+                )
                 return existing
             if outcome == "claimed":
                 claimed = self.get(request_id)
@@ -1822,6 +1950,9 @@ class ActionLedger:
 
         while True:
             existing = self.get(request_id)
+            self._enforce_args_drift(
+                tool, args, kwargs, request_id=request_id, existing=existing
+            )
             if existing is not None:
                 gate = resolve_side_effect_gate(
                     existing,
@@ -2032,6 +2163,9 @@ class ActionLedger:
 
         while True:
             existing = self.get(request_id)
+            self._enforce_args_drift(
+                tool, args, kwargs, request_id=request_id, existing=existing
+            )
             if existing is not None:
                 gate = resolve_side_effect_gate(
                     existing,
@@ -2699,16 +2833,58 @@ def _drop_ledger_keys(kwargs: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in kwargs.items() if k not in LEDGER_KWARG_KEYS}
 
 
-def _claim_kwargs(kwargs: dict[str, Any], clean_kwargs: dict[str, Any]) -> dict[str, Any]:
-    """Kwargs for claim: tool args plus optional state-authority pass-through.
+def _args_drift_scope_key(kwargs: dict[str, Any]) -> str | None:
+    """Return ``run_id`` or fallback ``thread_id`` for args-drift isolation."""
+    scope = get_active_execution_scope()
+    run_id = kwargs.get("run_id") or (scope.run_id if scope else None)
+    if run_id:
+        return str(run_id)
+    thread_id = kwargs.get("thread_id") or (scope.thread_id if scope else None)
+    if thread_id:
+        return str(thread_id)
+    return None
 
-    ``state_ref`` / ``decision_id`` are bookkeeping (excluded from the tool body
-    and args fingerprint) but must still reach ``_new_inflight_entry`` for audit.
+
+def _args_drift_scopes_match(
+    incoming: str | None, stored: str | None
+) -> bool:
+    """True when both sides share a scope, or both are unscoped (legacy)."""
+    if incoming is None and stored is None:
+        return True
+    if incoming is None or stored is None:
+        return False
+    return incoming == stored
+
+
+def _claim_kwargs(kwargs: dict[str, Any], clean_kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Kwargs for claim: tool args plus optional bookkeeping pass-through.
+
+    ``state_ref`` / ``decision_id`` / dispatch and scope ids are bookkeeping
+    (excluded from the tool body and ``args_fingerprint``) but must still reach
+    ``_new_inflight_entry`` for audit and the opt-in args-drift gate (same
+    dispatch ticket + different args, scoped by ``run_id`` / ``thread_id``).
     """
     claim_kwargs = dict(clean_kwargs)
-    for key in ("decision_id", "state_ref"):
+    for key in (
+        "decision_id",
+        "state_ref",
+        "request_id",
+        "tool_call_id",
+        "thread_id",
+        "run_id",
+        "node",
+    ):
         if key in kwargs and kwargs[key] is not None:
             claim_kwargs[key] = kwargs[key]
+    scope = get_active_execution_scope()
+    if scope is not None:
+        for key, value in (
+            ("thread_id", scope.thread_id),
+            ("run_id", scope.run_id),
+            ("node", scope.node),
+        ):
+            if key not in claim_kwargs and value:
+                claim_kwargs[key] = value
     return claim_kwargs
 
 
@@ -3139,6 +3315,7 @@ def ledger(
     reconciler: Reconciler | None = None,
     defer_read_only_unknown: bool = False,
     unclassified_policy: str = UNCLASSIFIED_POLICY_WARN,
+    on_args_drift: str = ARGS_DRIFT_OFF,
     reclaim_requires_death_signal: bool = False,
     presumed_dead_after: float | None = None,
 ) -> Callable[[Callable[P, Awaitable[R]]], Callable[P, Awaitable[R]]]:
@@ -3149,7 +3326,7 @@ def ledger(
     disable; use :func:`renew_lease` for an extra manual bump.
     """
 
-    ledger_kwargs: dict[str, float | bool | None] = {}
+    ledger_kwargs: dict[str, float | bool | None | str] = {}
     if lease_ttl is not None:
         ledger_kwargs["lease_ttl"] = lease_ttl
     if lease_renew_interval is not None:
@@ -3169,6 +3346,7 @@ def ledger(
         audit_emitter=audit_emitter,
         outcome_emitter=outcome_emitter,
         unclassified_policy=unclassified_policy,
+        on_args_drift=on_args_drift,
         **ledger_kwargs,
     )
 
@@ -3206,6 +3384,7 @@ def ledger_sync(
     reconciler: Reconciler | None = None,
     defer_read_only_unknown: bool = False,
     unclassified_policy: str = UNCLASSIFIED_POLICY_WARN,
+    on_args_drift: str = ARGS_DRIFT_OFF,
     reclaim_requires_death_signal: bool = False,
     presumed_dead_after: float | None = None,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
@@ -3216,7 +3395,7 @@ def ledger_sync(
     disable; use :func:`renew_lease` for an extra manual bump.
     """
 
-    ledger_kwargs: dict[str, float | bool | None] = {}
+    ledger_kwargs: dict[str, float | bool | None | str] = {}
     if lease_ttl is not None:
         ledger_kwargs["lease_ttl"] = lease_ttl
     if lease_renew_interval is not None:
@@ -3236,6 +3415,7 @@ def ledger_sync(
         audit_emitter=audit_emitter,
         outcome_emitter=outcome_emitter,
         unclassified_policy=unclassified_policy,
+        on_args_drift=on_args_drift,
         **ledger_kwargs,
     )
 
@@ -3274,6 +3454,10 @@ __all__ = [
     "DEFAULT_PRESUMED_DEAD_AFTER_RATIO",
     "OPERATOR_RESOLUTION_COMPLETED",
     "OPERATOR_RESOLUTION_NOT_EXECUTED",
+    "ARGS_DRIFT_OFF",
+    "ARGS_DRIFT_SOFT",
+    "ARGS_DRIFT_HARD",
+    "ARGS_DRIFT_POLICIES",
     "UNCLASSIFIED_POLICY_WARN",
     "UNCLASSIFIED_POLICY_STRICT",
     "FileLedgerStorage",

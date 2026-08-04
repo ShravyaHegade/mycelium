@@ -16,6 +16,8 @@ from typing import Any
 import yaml
 
 from mycelium.action_ledger import (
+    ARGS_DRIFT_OFF,
+    ARGS_DRIFT_POLICIES,
     UNCLASSIFIED_POLICY_WARN,
     FileLedgerStorage,
     InMemoryLedgerStorage,
@@ -418,10 +420,18 @@ class MyceliumConfig:
             outcome_emitter = self.build_outcome_emitter()
             transition_binding = self.tool_transition_binding(tool_config)
             ledger_kwargs = self._ledger_timing_kwargs()
-            unclassified_policy = (self.action_ledger or {}).get(
+            action_ledger_cfg = self.action_ledger or {}
+            unclassified_policy = action_ledger_cfg.get(
                 "unclassified_policy", UNCLASSIFIED_POLICY_WARN
             )
             ledger_kwargs["unclassified_policy"] = unclassified_policy
+            on_args_drift = action_ledger_cfg.get("on_args_drift", ARGS_DRIFT_OFF)
+            if on_args_drift not in ARGS_DRIFT_POLICIES:
+                raise ConfigError(
+                    "'action_ledger.on_args_drift' must be one of "
+                    f"{sorted(ARGS_DRIFT_POLICIES)}, got {on_args_drift!r}"
+                )
+            ledger_kwargs["on_args_drift"] = on_args_drift
             if is_async:
                 func = ledger(
                     storage=storage,

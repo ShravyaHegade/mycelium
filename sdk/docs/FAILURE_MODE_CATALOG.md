@@ -52,7 +52,8 @@ mid-action with unknown commit; logs that cannot stand as auditor-verifiable
 proof.
 
 **Guards:** transition envelope · `ActionLedger` / `TaskLedger` · reconcile ·
-`StateFlush` · audit receipts. See the [SDK README](../README.md) and
+`StateFlush` · audit receipts · opt-in `on_args_drift` (identity-conflict).
+See the [SDK README](../README.md) and
 [failure & threat model](FAILURE_AND_THREAT_MODEL.md).
 
 ---

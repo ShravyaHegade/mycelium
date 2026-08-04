@@ -12,7 +12,7 @@ README is the source of truth for how the pieces are used; this file is the
 honest accounting of what can go wrong and which guarantee is pinned to which
 test.
 
-> Version note: this document tracks package **v1.25.0**. The ledger-core
+> Version note: this document tracks package **v1.26.0**. The ledger-core
 > guarantees below are unchanged; optional `loop_guard:` (AF-003),
 > `completion:` (AF-007), `scope_guard:` (AF-008), and `state_authority:` are
 > documented in the SDK README and are outside this core guarantee set.
@@ -205,12 +205,13 @@ than the code makes.
   guarantee — see `test_operator_release.py` for the one-shot/fail-closed
   semantics, and `test_audit_receipt.py::test_tampered_receipt_fails_verification`
   for tamper-evidence when receipts are enabled.)*
-- **Identity-conflict rejection.** Same `request_id` + changed args = a
-  *new* transition, by design. Two dispatches with the same ticket but
-  different instructions are different operations. An opt-in rejection mode
-  has been discussed but is **not shipped**; the current contract is pinned by
-  `tests/test_mengchheang_public_repro.py::test_semantic_identity`
-  (continuity-harness scenario). Treat this as an intentional non-guarantee.
+- **Identity-conflict rejection (default off).** Same `request_id` /
+  `tool_call_id` + changed args = a *new* transition by default. Opt in with
+  `action_ledger.on_args_drift: soft|hard` to reject the mismatch within the
+  same run (`run_id` / `thread_id`; other runs isolated)
+  (`ToolBoundaryError` / `LedgerHardBlockError`). Default-off contract pinned by
+  `tests/test_mengchheang_public_repro.py::test_semantic_identity`; opt-in by
+  `tests/test_args_drift.py`.
 - **Budget / runaway loops (without `loop_guard:`).** If a caller produces many
   distinct transition keys, the ledger does not stop the calls. Optional
   AF-003 `loop_guard:` halts consecutive identical *action* hashes (tool + args)
