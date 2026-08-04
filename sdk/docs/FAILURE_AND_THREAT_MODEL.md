@@ -12,10 +12,10 @@ README is the source of truth for how the pieces are used; this file is the
 honest accounting of what can go wrong and which guarantee is pinned to which
 test.
 
-> Version note: this document tracks package **v1.24.0**. The ledger-core
+> Version note: this document tracks package **v1.25.0**. The ledger-core
 > guarantees below are unchanged; optional `loop_guard:` (AF-003),
-> `completion:` (AF-007), and `state_authority:` are documented in the SDK
-> README and are outside this core guarantee set.
+> `completion:` (AF-007), `scope_guard:` (AF-008), and `state_authority:` are
+> documented in the SDK README and are outside this core guarantee set.
 
 ---
 
@@ -52,10 +52,15 @@ This document is **explicitly out of scope** for:
   `tool_call_id` derived from a stale checkpoint. The pre-claim
   `StateAuthority` gate (freeze `state_ref` at decide, compare at execute)
   is documented in the SDK README; not part of the ledger core set below.
+- **Mid-run / handoff tool allowlist widen** *unless* optional
+  `scope_guard:` (AF-008) is configured — the ledger does not freeze which
+  tools a run may call. With `scope_guard:`, the allowlist is snapshotted
+  from `registry` / `tools:` and re-checked every step; entity/path stay on
+  `@bounded`.
 - The optional `@protect` / `HistoryGuard` / `MessageValidator` / `@bounded`
-  / `Session` / `loop_guard` / `completion` / `state_authority` features
-  (documented in the catalog and SDK README; not part of the ledger core
-  guarantee set below).
+  / `Session` / `loop_guard` / `completion` / `scope_guard` /
+  `state_authority` features (documented in the catalog and SDK README; not
+  part of the ledger core guarantee set below).
 
 ---
 
@@ -217,6 +222,10 @@ than the code makes.
   checkpoint that mints a new `tool_call_id` / changed args has no prior claim
   and PROCEEDs. Optional `state_authority:` compares a frozen `state_ref` to the
   host's canonical ref before claim; see SDK README.
+- **Allowlist widen (without `scope_guard:`).** A handoff or
+  `registry.allow(...)` that adds tools mid-run is invisible to the ledger.
+  Optional AF-008 `scope_guard:` freezes the run tool allowlist and
+  re-checks every step; entity/path remain `@bounded`'s job.
 - **Trusting the reconciler.** If your reconciler returns `NOT_EXECUTED` when
   the effect actually happened, the runtime will re-execute once. Reconcilers
   are read-only *by contract*, not enforced by Mycelium.
@@ -232,8 +241,9 @@ than the code makes.
   task ledger entries); it does not re-run a multi-step workflow graph with
   orchestrator recovery semantics.
 - **The optional guard surface.** `@protect` / `HistoryGuard` /
-  `MessageValidator` / `@bounded` / `Session` are documented elsewhere and are
-  not part of this threat model.
+  `MessageValidator` / `@bounded` / `Session` / `loop_guard` / `completion` /
+  `scope_guard` / `state_authority` are documented elsewhere and are not part
+  of this threat model.
 
 ---
 
