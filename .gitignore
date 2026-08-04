@@ -11,7 +11,7 @@ dist/
 build/
 .env
 .env.*
-!.env.example
+AGENTS.md
 .cache/
 proof/fixtures/af002/_hf_af002_index.json
 # Local / private (not for public repo)
