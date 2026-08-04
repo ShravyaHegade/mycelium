@@ -726,14 +726,17 @@ def send_email(to, subject, body):
     return {"message_id": message_id}
 ```
 
-The reconciler queries `users.messages.list(q='in:sent rfc822msgid:<Message-ID>')`:
+The reconciler canonicalizes the Message-ID first (strip whitespace; wrap bare
+ids in `<>`) so bracketed, bare, and padded forms hit the same sent-log query
+and completed receipt (`message_id` is always the canonical form). Then it
+queries `users.messages.list(q='in:sent rfc822msgid:<Message-ID>')`:
 
 | Matches | Result | Reasoning |
 |---------|--------|-----------|
-| 1 | `COMPLETED` | message landed; return the Gmail message object |
+| 1 | `COMPLETED` | message landed; return Gmail message object + canonical `message_id` |
 | 0 | `UNKNOWN` | indexing lag — never authorizes blind retry (`NOT_EXECUTED`) |
 | 2+ | `UNKNOWN` | duplicate may already have occurred |
-| missing ref | `UNKNOWN` | no query made |
+| missing / empty / whitespace-only ref | `UNKNOWN` | no query made |
 
 Like all reconcilers, `GmailReconciler` is strict about indexing lag: zero matches means "not yet visible," not "never sent." The transition stays hard-blocked so an operator releases it when the provider confirms.
 

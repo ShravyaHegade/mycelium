@@ -96,7 +96,7 @@ from mycelium.outcome_emit import (
     compute_dttr_from_storage,
 )
 from mycelium.protect import protect, protect_sync
-from mycelium.providers import GmailReconciler
+from mycelium.providers import GmailReconciler, canonicalize_message_id
 from mycelium.reconcile import Reconciler, ReconcileResult, ReconcileStatus
 from mycelium.scope_guard import (
     ON_VIOLATION_HARD,
@@ -208,6 +208,7 @@ __all__ = [
     "UNCLASSIFIED_POLICY_WARN",
     "UNCLASSIFIED_POLICY_STRICT",
     "GmailReconciler",
+    "canonicalize_message_id",
     "get_ledger",
     "ledger",
     "ledger_sync",

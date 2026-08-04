@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.26.1 (2026-08-04)
+
+Patch: Gmail sent-log reconciler Message-ID canonicalization (strip + wrap
+bare ids in `<>`) so bracketed / bare / whitespace-padded refs share one
+query and completed receipt. Backward compatible.
+
+### Fixed
+
+- **`GmailReconciler`:** canonicalize `external_operation_ref` before the
+  `rfc822msgid:` query; completed receipts include `message_id` in canonical
+  form. Whitespace-only refs stay `UNKNOWN` without calling Gmail.
+- Exported helper: `canonicalize_message_id` (package root + `providers`).
+- Tests: bracketed/bare/whitespace forms + existing 0/1/2+/missing matrix.
+
 ## 1.26.0 (2026-08-04)
 
 Minor: opt-in args-drift / identity-conflict gate on the action ledger.

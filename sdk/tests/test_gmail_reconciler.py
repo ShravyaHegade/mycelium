@@ -3,7 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from mycelium.providers.gmail import GmailReconciler
+import pytest
+
+from mycelium.providers.gmail import GmailReconciler, canonicalize_message_id
 from mycelium.reconcile import ReconcileResult, ReconcileStatus
 
 
@@ -38,6 +40,15 @@ class FakeGmailService:
         return self._list(self._pending_q)
 
 
+def test_canonicalize_message_id_bracketed_bare_whitespace() -> None:
+    assert canonicalize_message_id("<abc@example.com>") == "<abc@example.com>"
+    assert canonicalize_message_id("abc@example.com") == "<abc@example.com>"
+    assert canonicalize_message_id("  <abc@example.com>  ") == "<abc@example.com>"
+    assert canonicalize_message_id("  abc@example.com  ") == "<abc@example.com>"
+    assert canonicalize_message_id("   ") is None
+    assert canonicalize_message_id("") is None
+
+
 def test_missing_external_operation_ref_returns_unknown() -> None:
     service = FakeGmailService()
     reconciler = GmailReconciler(service)
@@ -56,6 +67,15 @@ def test_empty_external_operation_ref_returns_unknown() -> None:
     assert service.list_called == []
 
 
+def test_whitespace_only_external_operation_ref_returns_unknown() -> None:
+    service = FakeGmailService()
+    reconciler = GmailReconciler(service)
+    entry = FakeEntry(external_operation_ref="  \t  ")
+    result = reconciler.reconcile(entry)
+    assert result == ReconcileResult.unknown()
+    assert service.list_called == []
+
+
 def test_zero_matches_returns_unknown() -> None:
     service = FakeGmailService()
     service._store = {}
@@ -63,24 +83,56 @@ def test_zero_matches_returns_unknown() -> None:
     entry = FakeEntry(external_operation_ref="msg-123")
     result = reconciler.reconcile(entry)
     assert result == ReconcileResult.unknown()
-    assert service.list_called == ["in:sent rfc822msgid:msg-123"]
+    assert service.list_called == ["in:sent rfc822msgid:<msg-123>"]
 
 
-def test_one_match_returns_completed() -> None:
+def test_one_match_returns_completed_with_canonical_receipt() -> None:
     service = FakeGmailService()
-    service._store = {"in:sent rfc822msgid:msg-1": [{"id": "18472", "threadId": "t-1"}]}
+    service._store = {
+        "in:sent rfc822msgid:<msg-1>": [{"id": "18472", "threadId": "t-1"}]
+    }
     reconciler = GmailReconciler(service)
     entry = FakeEntry(external_operation_ref="msg-1")
     result = reconciler.reconcile(entry)
     assert result.status == ReconcileStatus.COMPLETED
-    assert result.result == {"id": "18472", "threadId": "t-1"}
-    assert service.list_called == ["in:sent rfc822msgid:msg-1"]
+    assert result.result == {
+        "id": "18472",
+        "threadId": "t-1",
+        "message_id": "<msg-1>",
+    }
+    assert service.list_called == ["in:sent rfc822msgid:<msg-1>"]
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "<abc@example.com>",
+        "abc@example.com",
+        "  <abc@example.com>  ",
+        "  abc@example.com  ",
+    ],
+)
+def test_message_id_forms_share_query_and_receipt(ref: str) -> None:
+    """Bracketed / bare / whitespace-padded forms canonicalize identically."""
+    canonical = "<abc@example.com>"
+    q = f"in:sent rfc822msgid:{canonical}"
+    service = FakeGmailService()
+    service._store = {q: [{"id": "g1", "threadId": "t1"}]}
+    reconciler = GmailReconciler(service)
+    result = reconciler.reconcile(FakeEntry(external_operation_ref=ref))
+    assert result.status == ReconcileStatus.COMPLETED
+    assert service.list_called == [q]
+    assert result.result == {
+        "id": "g1",
+        "threadId": "t1",
+        "message_id": canonical,
+    }
 
 
 def test_two_matches_returns_unknown() -> None:
     service = FakeGmailService()
     service._store = {
-        "in:sent rfc822msgid:msg-2": [
+        "in:sent rfc822msgid:<msg-2>": [
             {"id": "a", "threadId": "t-1"},
             {"id": "b", "threadId": "t-2"},
         ]
@@ -89,7 +141,7 @@ def test_two_matches_returns_unknown() -> None:
     entry = FakeEntry(external_operation_ref="msg-2")
     result = reconciler.reconcile(entry)
     assert result == ReconcileResult.unknown()
-    assert service.list_called == ["in:sent rfc822msgid:msg-2"]
+    assert service.list_called == ["in:sent rfc822msgid:<msg-2>"]
 
 
 def test_api_error_propagates() -> None:
@@ -109,7 +161,6 @@ def test_api_error_propagates() -> None:
     service = _BrokenService()
     reconciler = GmailReconciler(service)
     entry = FakeEntry(external_operation_ref="msg-3")
-    import pytest
 
     with pytest.raises(RuntimeError, match="Gmail API unavailable"):
         reconciler.reconcile(entry)
