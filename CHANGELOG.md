@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.25.0 (2026-08-04)
+
+Minor: AF-008 scope-escalation guard — freeze the run tool allowlist and
+re-check every step so handoffs cannot silently add tools. Backward
+compatible (opt-in YAML / API). Entity/path/output stay on `@bounded`.
+
+### Added
+
+- **Scope guard (AF-008):** run-scoped allowlist freeze. Snapshots
+  `registry.allowed` / `tools:` (or explicit `allowed_tools`) at bind /
+  first step; later tools outside the freeze raise
+  `ToolBoundaryError` (`violation=scope_escalation_tool`) or optional hard
+  `LedgerHardBlockError`. Re-bind may only narrow. Wrapper order:
+  `@state_authority` → `@scope_guard` → `@loop_guard` → `@ledger` →
+  `@bounded` → `@protect`.
+- YAML `scope_guard:`, CLI `mycelium scope status|bind`, example
+  `sdk/examples/scope_guard_allowlist.py`, tests in
+  `tests/test_scope_guard.py`.
+
 ## 1.24.0 (2026-08-03)
 
 Minor: SQLite ledger backend — zero-ops single-node durable storage (stdlib

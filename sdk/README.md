@@ -3,7 +3,7 @@
 [![PyPI version](https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&release=1.24.0)](https://pypi.org/project/mycelium-runtime/)
 [![Python](https://img.shields.io/pypi/pyversions/mycelium-runtime.svg)](https://pypi.org/project/mycelium-runtime/)
 
-Current package: **mycelium-runtime v1.24.0** (SQLite ledger backend + AF-002 failure-case pack + AF-007 completion contract + state-authority execution gate + AF-003 loop guard + outcome telemetry / DTTR + fail-closed Gmail sent-log reconciler + webhook event-dedupe recipe + atomicity contract + CAS backends + owner fencing + worker-death signal + operator release + `REPAIR` gate + lease auto-renew + transition envelope).
+Current package: **mycelium-runtime v1.25.0** (AF-008 scope-escalation guard + SQLite ledger backend + AF-002 failure-case pack + AF-007 completion contract + state-authority execution gate + AF-003 loop guard + outcome telemetry / DTTR + fail-closed Gmail sent-log reconciler + webhook event-dedupe recipe + atomicity contract + CAS backends + owner fencing + worker-death signal + operator release + `REPAIR` gate + lease auto-renew + transition envelope).
 
 ## One painful bug → a few lines of config
 
@@ -54,6 +54,7 @@ Mycelium sits between your agent loop and your tools (after the LLM returns `too
 | **Core** | **Transition envelope fields** | `side_effect_class` → `spendability` → `side_effect_boundary` → `terminal_outcome` → `external_operation_ref` → `retry_permission` — same system as above; payment/write needs the heavier set |
 | **Opt-in** | **Infinite action loops (AF-003)** | `loop_guard:` — action-hash streak across *new* `tool_call_id`s; soft (`ToolBoundaryError`) then hard (`LedgerHardBlockError`); operator `mycelium loops release` |
 | **Opt-in** | **Premature termination (AF-007)** | `completion:` — host checklist; unmarked **required** → refuse terminal; unmarked **optional** → warn and allow; `complete_run` / graph END / final-message adapters |
+| **Opt-in** | **Scope escalation (AF-008)** | `scope_guard:` — freeze run tool allowlist; re-check every step; mid-run / handoff widen → `ToolBoundaryError` (`scope_escalation_tool`); entity/path stay on `@bounded` |
 | **Opt-in** | **Superseded state / state authority** | `state_authority:` — freeze `state_ref` at decide time; compare to host canonical ref before claim; mismatch blocks even when `tool_call_id` is new |
 | **Opt-in** | **Stale or broken context** | TTL cache (`@protect` / `Session`); optional `MessageValidator` / `HistoryGuard` you call before the next LLM turn |
 | **Opt-in** | **Bad tool calls** | `@bounded` input/output/scope checks; optional `ToolRegistry` allowlist — block before the tool runs |
@@ -917,6 +918,39 @@ mycelium loops release <run_id> --verified clear|allow-once|abort-run \
 
 Demo: `python examples/loop_guard_db_search.py` (from `sdk/`).
 
+### Scope guard (AF-008): freeze run tool allowlist
+
+AF-008 is when a narrow grant **widens mid-run** (handoff, dynamic
+`registry.allow`, new tools injected). `@bounded` still owns per-call
+entity/path/output. Scope guard only freezes **which tools this run may
+call** and re-checks every step.
+
+```yaml
+scope_guard:
+  storage: file
+  path: ./mycelium-scope.json
+  # allowed_tools: from_registry   # default → registry.allowed / tools:
+  # on_violation: soft             # soft | hard
+```
+
+```python
+from mycelium import ScopeGrant, ScopeGuard, scope_guard_sync, execution_scope
+from mycelium.transition import TransitionScope
+
+guard = ScopeGuard(default_grant=ScopeGrant(allowed_tools=frozenset({"fetch_customer"})))
+
+@scope_guard_sync(guard)
+def fetch_customer(customer_id: str) -> str:
+    return customer_id
+
+with execution_scope(TransitionScope(run_id="r1", thread_id="t")):
+    fetch_customer(customer_id="c1")  # ok; tools outside the freeze soft-block
+```
+
+Wrapper order: `@scope_guard` → `@loop_guard` → `@ledger` → `@bounded` →
+`@protect`. CLI: `mycelium scope status|bind`. Demo:
+`python examples/scope_guard_allowlist.py` (from `sdk/`).
+
 ### Completion contract (AF-007): refuse terminal while required subtasks pending
 
 AF-007 is when the agent presents work as **done** while a host-declared
@@ -1017,8 +1051,8 @@ def refund(amount: float, *, tool_call_id: str, state_ref: str) -> dict:
     ...
 ```
 
-Wrapper order: `@state_authority` → `@loop_guard` → `@ledger` → `@bounded` →
-`@protect` → `func`.
+Wrapper order: `@state_authority` → `@scope_guard` → `@loop_guard` →
+`@ledger` → `@bounded` → `@protect` → `func`.
 
 `decision_id` / `state_ref` are bookkeeping kwargs (excluded from the args
 fingerprint) and are stored on `LedgerEntry` at claim for audit. Enforcement
