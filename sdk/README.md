@@ -5,6 +5,10 @@
 
 Current package: **mycelium-runtime v1.25.0** (AF-008 scope-escalation guard + SQLite ledger backend + AF-002 failure-case pack + AF-007 completion contract + state-authority execution gate + AF-003 loop guard + outcome telemetry / DTTR + fail-closed Gmail sent-log reconciler + webhook event-dedupe recipe + atomicity contract + CAS backends + owner fencing + worker-death signal + operator release + `REPAIR` gate + lease auto-renew + transition envelope).
 
+**AF-00N** labels refer to the [failure-mode catalog](docs/FAILURE_MODE_CATALOG.md)
+(AF-001…AF-009): what each failure is, shipped vs roadmap, and which Mycelium
+surface maps to it.
+
 ## One painful bug → a few lines of config
 
 **LangGraph Cloud redispatches a long tool call while the first is still running.** Both complete. You pay twice. Side effects run twice. [langgraph#7417](https://github.com/langchain-ai/langgraph/issues/7417)
@@ -467,6 +471,9 @@ See [examples/failure_cases/](examples/failure_cases/)
 - Deduplicate retries and redispatches via a rich **transition key** (scope + tool + args + `side_effect_class` + policy), not only `tool_call_id`
 - Resolve redispatches through **gates** (see [Resolution gates](#resolution-gates)) instead of re-running blindly
 - Persist failed attempts with **terminal outcomes** (`FAILED_BEFORE_EFFECT`, `FAILED_AFTER_EFFECT`, `UNKNOWN`, `EXPIRED`, etc.) for audit and reconciliation
+
+**Failure-mode catalog.** Stable AF-001…AF-009 definitions (shipped vs roadmap)
+live in [`docs/FAILURE_MODE_CATALOG.md`](docs/FAILURE_MODE_CATALOG.md).
 
 **Failure & threat model.** What this core can and cannot protect you from is
 documented explicitly in

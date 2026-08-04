@@ -16,6 +16,8 @@ test.
 > guarantees below are unchanged; optional `loop_guard:` (AF-003),
 > `completion:` (AF-007), `scope_guard:` (AF-008), and `state_authority:` are
 > documented in the SDK README and are outside this core guarantee set.
+> AF-00N labels are defined in
+> [FAILURE_MODE_CATALOG.md](FAILURE_MODE_CATALOG.md).
 
 ---
 
