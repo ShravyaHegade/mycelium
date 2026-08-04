@@ -1,4 +1,4 @@
-"""CLI entrypoint: init, demo, run, transitions, loops, and outcomes."""
+"""CLI entrypoint: init, demo, run, transitions, loops, scope, and outcomes."""
 
 from __future__ import annotations
 
@@ -552,6 +552,107 @@ def _loop_guard_from_args(args: argparse.Namespace) -> Any:
     return guard
 
 
+def _scope_guard_from_args(args: argparse.Namespace) -> Any:
+    """Build a ScopeGuard from --config / --file operator flags."""
+    from mycelium.config import ConfigError, load_config
+    from mycelium.scope_guard import FileScopeGuardStorage, ScopeGrant, ScopeGuard
+
+    if getattr(args, "file", None):
+        allowed = [
+            s.strip()
+            for s in (getattr(args, "allowed_tools", None) or "").split(",")
+            if s.strip()
+        ]
+        grant = ScopeGrant(allowed_tools=frozenset(allowed)) if allowed else None
+        return ScopeGuard(FileScopeGuardStorage(args.file), default_grant=grant)
+
+    config_path = Path(args.config) if args.config else Path("mycelium.yaml")
+    if not config_path.is_file():
+        raise ConfigError(
+            f"no scope_guard storage specified and config not found: {config_path} "
+            "(pass --config or --file)"
+        )
+    config = load_config(config_path)
+    if config.scope_guard is None:
+        raise ConfigError(f"{config_path} declares no scope_guard section")
+    guard = config.build_scope_guard()
+    if guard is None:
+        raise ConfigError(f"{config_path} declares no scope_guard section")
+    storage_type = config.scope_guard.get("storage", "memory")
+    if storage_type == "memory":
+        raise ConfigError(
+            "scope_guard storage is 'memory', which lives inside the agent "
+            "process — the CLI cannot reach it. Use --file or configure "
+            "scope_guard.storage: file"
+        )
+    return guard
+
+
+def cmd_scope_status(args: argparse.Namespace) -> int:
+    from mycelium.config import ConfigError
+
+    try:
+        guard = _scope_guard_from_args(args)
+    except ConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    if args.run_id:
+        state = guard.get_state(args.run_id)
+        states = [state] if state is not None else []
+    else:
+        states = guard.storage.list_all()
+
+    if args.json:
+        print(json.dumps([s.to_dict() for s in states], indent=2, default=str))
+        return 0
+
+    if not states:
+        print("(no scope-guard frozen grants)")
+        return 0
+
+    for state in states:
+        print(f"{state.scope_key}  tools={sorted(state.grant.allowed_tools)}")
+    return 0
+
+
+def cmd_scope_bind(args: argparse.Namespace) -> int:
+    from mycelium.config import ConfigError
+    from mycelium.scope_guard import ScopeGrant, ScopeWidenRefusedError
+
+    try:
+        guard = _scope_guard_from_args(args)
+    except ConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    allowed = [
+        s.strip() for s in (args.allowed_tools or "").split(",") if s.strip()
+    ]
+    if allowed:
+        grant = ScopeGrant(allowed_tools=frozenset(allowed))
+    elif guard.default_grant is not None:
+        grant = guard.default_grant
+    else:
+        print(
+            "error: pass --allowed-tools or configure scope_guard.allowed_tools",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        state = guard.bind(args.run_id, grant)
+    except ScopeWidenRefusedError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"bound {state.scope_key}: tools={sorted(state.grant.allowed_tools)}")
+    return 0
+
+
 def _completion_from_args(args: argparse.Namespace) -> Any:
     """Build a CompletionContract from --config / --file operator flags."""
     from mycelium.completion_contract import (
@@ -1073,6 +1174,66 @@ def main(argv: list[str] | None = None) -> int:
         help="Comma-separated optional ids (with --file, no config)",
     )
 
+    scope_parser = sub.add_parser(
+        "scope",
+        help="AF-008 scope-escalation guard: inspect or bind frozen allowlists",
+    )
+    scope_sub = scope_parser.add_subparsers(dest="scope_command", required=True)
+
+    scope_status = scope_sub.add_parser(
+        "status", help="Show frozen tool allowlists for runs"
+    )
+    scope_status.add_argument(
+        "run_id",
+        nargs="?",
+        default=None,
+        help="Optional run_id / thread_id scope key",
+    )
+    scope_status.add_argument(
+        "-c",
+        "--config",
+        type=Path,
+        default=Path("mycelium.yaml"),
+        help="Config path with scope_guard: (default: ./mycelium.yaml)",
+    )
+    scope_status.add_argument(
+        "--file",
+        type=Path,
+        default=None,
+        help="Direct path to scope-guard JSON file storage",
+    )
+    scope_status.add_argument(
+        "--allowed-tools",
+        default="",
+        help="Comma-separated tools (with --file, optional default grant)",
+    )
+    scope_status.add_argument(
+        "--json", action="store_true", help="Machine-readable JSON output"
+    )
+
+    scope_bind = scope_sub.add_parser(
+        "bind", help="Freeze (or narrow) a tool allowlist for a run_id"
+    )
+    scope_bind.add_argument("run_id", help="run_id / thread_id to freeze")
+    scope_bind.add_argument(
+        "--allowed-tools",
+        default="",
+        help="Comma-separated tool allowlist (default: config grant)",
+    )
+    scope_bind.add_argument(
+        "-c",
+        "--config",
+        type=Path,
+        default=Path("mycelium.yaml"),
+        help="Config path with scope_guard: (default: ./mycelium.yaml)",
+    )
+    scope_bind.add_argument(
+        "--file",
+        type=Path,
+        default=None,
+        help="Direct path to scope-guard JSON file storage",
+    )
+
     outcomes_parser = sub.add_parser(
         "outcomes",
         help="Outcome telemetry: compute DTTR over emitted resolution rows",
@@ -1139,6 +1300,11 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_completion_status(args)
         if args.completion_command == "mark":
             return cmd_completion_mark(args)
+    if args.command == "scope":
+        if args.scope_command == "status":
+            return cmd_scope_status(args)
+        if args.scope_command == "bind":
+            return cmd_scope_bind(args)
     if args.command == "outcomes":
         if args.outcomes_command == "dttr":
             return cmd_outcomes_dttr(args)

@@ -94,6 +94,21 @@ from mycelium.outcome_emit import (
 from mycelium.protect import protect, protect_sync
 from mycelium.providers import GmailReconciler
 from mycelium.reconcile import Reconciler, ReconcileResult, ReconcileStatus
+from mycelium.scope_guard import (
+    ON_VIOLATION_HARD,
+    ON_VIOLATION_SOFT,
+    VIOLATION_TOOL,
+    FileScopeGuardStorage,
+    InMemoryScopeGuardStorage,
+    ScopeGrant,
+    ScopeGuard,
+    ScopeGuardStorage,
+    ScopeRunState,
+    ScopeWidenRefusedError,
+    apply_scope_guard,
+    scope_guard,
+    scope_guard_sync,
+)
 from mycelium.session import Session
 from mycelium.state_authority import (
     ON_MISMATCH_HARD,
@@ -162,7 +177,7 @@ from mycelium.transition_resolution import (
     transition_needs_repair,
 )
 
-__version__ = "1.24.0"
+__version__ = "1.25.0"
 
 __all__ = [
     "ActionLedger",
@@ -276,6 +291,19 @@ __all__ = [
     "apply_loop_guard",
     "loop_guard",
     "loop_guard_sync",
+    "ON_VIOLATION_HARD",
+    "ON_VIOLATION_SOFT",
+    "VIOLATION_TOOL",
+    "FileScopeGuardStorage",
+    "InMemoryScopeGuardStorage",
+    "ScopeGrant",
+    "ScopeGuard",
+    "ScopeGuardStorage",
+    "ScopeRunState",
+    "ScopeWidenRefusedError",
+    "apply_scope_guard",
+    "scope_guard",
+    "scope_guard_sync",
     "STATUS_ABANDONED",
     "STATUS_FAILED",
     "STATUS_PENDING",

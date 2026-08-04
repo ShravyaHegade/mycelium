@@ -200,6 +200,22 @@ loop_guard:
 #     - id: post_slack
 
 # ---------------------------------------------------------------------------
+# scope_guard  (AF-008 — freeze run tool allowlist; block mid-run widen)
+# Opt-in. Snapshots which tools this run may call (from registry.allowed /
+# registry.auto / tools: by default). Re-checks every step so handoffs cannot
+# silently add tools. Entity/path/output stay on bounded: — this is allowlist
+# only. Wrapper: @scope_guard → @loop_guard → @ledger → @bounded → @protect.
+# ---------------------------------------------------------------------------
+# scope_guard:
+#   storage: file
+#   path: ./mycelium-scope.json
+#   # allowed_tools: from_registry   # default; or all | [tool_a, tool_b]
+#   # on_violation: soft             # soft (ToolBoundaryError) | hard
+#   # tools: all
+#   # exclude: []
+#   # Per-tool: tools.my_tool.scope_guard: false
+
+# ---------------------------------------------------------------------------
 # state_authority  (refuse tools derived from a superseded state_ref)
 # Opt-in. Claim ≠ state authority: the ledger answers "has this run?"; this
 # gate answers "is the decision still current?" Host freezes state_ref at

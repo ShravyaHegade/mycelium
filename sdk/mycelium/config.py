@@ -63,6 +63,16 @@ from mycelium.outcome_emit import (
     OutcomeStorage,
 )
 from mycelium.protect import protect, protect_sync
+from mycelium.scope_guard import (
+    ON_VIOLATION_MODES,
+    ON_VIOLATION_SOFT,
+    FileScopeGuardStorage,
+    InMemoryScopeGuardStorage,
+    ScopeGrant,
+    ScopeGuard,
+    ScopeGuardStorage,
+    apply_scope_guard,
+)
 from mycelium.session import Session
 from mycelium.state_authority import (
     ON_MISMATCH_HARD,
@@ -118,6 +128,7 @@ _GUARD_MARKERS = (
     "_mycelium_bounded",
     "_mycelium_protected",
     "_mycelium_loop_guarded",
+    "_mycelium_scope_guarded",
     "_mycelium_state_authority",
     "_mycelium_langgraph_integration",
 )
@@ -228,6 +239,8 @@ class ToolConfig:
     callable_path: str | None = None
     # Per-tool loop_guard: None=inherit global, False=disable, dict=overrides
     loop_guard: dict[str, Any] | bool | None = None
+    # Per-tool scope_guard: None=inherit global, False=disable, dict=overrides
+    scope_guard: dict[str, Any] | bool | None = None
     # Per-tool state_authority: None=inherit global, False=disable, dict=overrides
     state_authority: dict[str, Any] | bool | None = None
 
@@ -238,6 +251,7 @@ class ToolConfig:
             and self.ledger is None
             and not self.audit_receipt
             and self.loop_guard is None
+            and self.scope_guard is None
             and self.state_authority is None
         )
 
@@ -282,11 +296,13 @@ class MyceliumConfig:
     task_ledger_defaults: dict[str, Any] | None = None
     integrations: dict[str, dict[str, Any]] | None = None
     loop_guard: dict[str, Any] | None = None
+    scope_guard: dict[str, Any] | None = None
     state_authority: dict[str, Any] | None = None
     completion: dict[str, Any] | None = None
     _audit_emitter: AuditReceiptEmitter | None = None
     _outcome_emitter: OutcomeEmitter | None = None
     _loop_guard: LoopGuard | None = None
+    _scope_guard: ScopeGuard | None = None
     _state_authority: StateAuthority | None = None
     _completion: CompletionContract | None = None
     _state_flush: StateFlush | None = None
@@ -300,8 +316,8 @@ class MyceliumConfig:
         function is returned unchanged.
 
         Guard order (outermost first, after optional LangGraph instrument):
-        ``@state_authority`` -> ``@loop_guard`` -> ``@ledger`` -> ``@bounded``
-        -> ``@protect`` -> ``func``
+        ``@state_authority`` -> ``@scope_guard`` -> ``@loop_guard`` ->
+        ``@ledger`` -> ``@bounded`` -> ``@protect`` -> ``func``
         """
         return self.apply_tool(func.__name__, func)
 
@@ -316,6 +332,24 @@ class MyceliumConfig:
         if name in exclude:
             return False
         tools_sel = self.loop_guard.get("tools", "all")
+        if tools_sel != "all":
+            if not isinstance(tools_sel, list) or name not in tools_sel:
+                return False
+        return True
+
+    def scope_guard_applies(
+        self, name: str, tool_config: ToolConfig | None = None
+    ) -> bool:
+        """Whether AF-008 scope_guard should wrap this tool."""
+        if self.scope_guard is None:
+            return False
+        cfg = tool_config if tool_config is not None else self.tools.get(name)
+        if cfg is not None and cfg.scope_guard is False:
+            return False
+        exclude = self.scope_guard.get("exclude") or []
+        if name in exclude:
+            return False
+        tools_sel = self.scope_guard.get("tools", "all")
         if tools_sel != "all":
             if not isinstance(tools_sel, list) or name not in tools_sel:
                 return False
@@ -349,8 +383,14 @@ class MyceliumConfig:
         if tool_config is None:
             return func
         applies_loop = self.loop_guard_applies(name, tool_config)
+        applies_scope = self.scope_guard_applies(name, tool_config)
         applies_state = self.state_authority_applies(name, tool_config)
-        if tool_config.is_noop() and not applies_loop and not applies_state:
+        if (
+            tool_config.is_noop()
+            and not applies_loop
+            and not applies_scope
+            and not applies_state
+        ):
             return func
         if _check_existing_config_wrapper(func, kind="tool", name=name):
             return func
@@ -416,6 +456,12 @@ class MyceliumConfig:
                 consecutive_soft=consecutive_override,
             )
 
+        # Scope guard outside loop/ledger: frozen allowlist never claims.
+        if applies_scope:
+            sguard = self.build_scope_guard()
+            assert sguard is not None
+            func = apply_scope_guard(func, sguard, tool_name=name)
+
         # State authority outside loop/ledger: superseded decisions never claim.
         if applies_state:
             authority = self.build_state_authority()
@@ -429,7 +475,10 @@ class MyceliumConfig:
 
         # LangGraph outermost so it can inject scope/dispatch before inner guards.
         if self.langgraph_enabled and (
-            tool_config.ledger is not None or applies_loop or applies_state
+            tool_config.ledger is not None
+            or applies_loop
+            or applies_scope
+            or applies_state
         ):
             try:
                 func = instrument_langgraph_tool(func)
@@ -605,6 +654,57 @@ class MyceliumConfig:
                 "use 'memory' or 'file'"
             )
         raise ConfigError(f"unknown loop_guard storage type: {storage_type!r}")
+
+    def build_scope_guard(self) -> ScopeGuard | None:
+        """Build a shared ScopeGuard if the config declares ``scope_guard:``."""
+        if self.scope_guard is None:
+            return None
+        if self._scope_guard is not None:
+            return self._scope_guard
+        raw = self.scope_guard
+        storage = self._build_scope_guard_storage(raw)
+        grant = _scope_grant_from_config(
+            raw,
+            registry_allowed=self.registry_allowed,
+            tool_names=list(self.tools.keys()),
+        )
+        on_violation = raw.get("on_violation", ON_VIOLATION_SOFT)
+        if on_violation not in ON_VIOLATION_MODES:
+            raise ConfigError(
+                f"'scope_guard.on_violation' must be one of "
+                f"{sorted(ON_VIOLATION_MODES)}"
+            )
+        exclude = raw.get("exclude") or []
+        if not isinstance(exclude, list):
+            raise ConfigError("'scope_guard.exclude' must be a list of tool names")
+        auto_bind = raw.get("auto_bind", True)
+        if not isinstance(auto_bind, bool):
+            raise ConfigError("'scope_guard.auto_bind' must be a bool")
+        self._scope_guard = ScopeGuard(
+            storage,
+            default_grant=grant,
+            on_violation=str(on_violation),
+            exclude=[str(item) for item in exclude],
+            auto_bind=auto_bind,
+        )
+        return self._scope_guard
+
+    @staticmethod
+    def _build_scope_guard_storage(raw: dict[str, Any]) -> ScopeGuardStorage:
+        storage_type = raw.get("storage", "memory")
+        if storage_type == "memory":
+            return InMemoryScopeGuardStorage()
+        if storage_type == "file":
+            path = raw.get("path")
+            if not path:
+                raise ConfigError("scope_guard storage 'file' requires a 'path'")
+            return FileScopeGuardStorage(path)
+        if storage_type in ("redis", "postgres"):
+            raise ConfigError(
+                f"scope_guard storage {storage_type!r} is not implemented yet; "
+                "use 'memory' or 'file'"
+            )
+        raise ConfigError(f"unknown scope_guard storage type: {storage_type!r}")
 
     def build_completion_contract(self) -> CompletionContract | None:
         """Build a CompletionContract if the config declares ``completion:``."""
@@ -1232,6 +1332,21 @@ def _parse_tool_config(
             f"tool '{name}'.loop_guard must be a bool or a mapping"
         )
 
+    scope_guard_raw = raw.get("scope_guard")
+    scope_guard_cfg: dict[str, Any] | bool | None
+    if scope_guard_raw is None:
+        scope_guard_cfg = None
+    elif scope_guard_raw is False:
+        scope_guard_cfg = False
+    elif scope_guard_raw is True:
+        scope_guard_cfg = {}
+    elif isinstance(scope_guard_raw, dict):
+        scope_guard_cfg = scope_guard_raw
+    else:
+        raise ConfigError(
+            f"tool '{name}'.scope_guard must be a bool or a mapping"
+        )
+
     state_authority_raw = raw.get("state_authority")
     state_authority_cfg: dict[str, Any] | bool | None
     if state_authority_raw is None:
@@ -1261,6 +1376,7 @@ def _parse_tool_config(
         provider_idempotency_key_ttl=provider_idempotency_key_ttl,
         callable_path=callable_path,
         loop_guard=loop_guard_cfg,
+        scope_guard=scope_guard_cfg,
         state_authority=state_authority_cfg,
     )
 
@@ -1362,6 +1478,7 @@ def _apply_action_ledger_tools(
             provider_idempotency_key_ttl=existing.provider_idempotency_key_ttl,
             callable_path=existing.callable_path,
             loop_guard=existing.loop_guard,
+            scope_guard=existing.scope_guard,
             state_authority=existing.state_authority,
         )
 
@@ -1535,6 +1652,36 @@ def _parse_completion_id_lists(raw: dict[str, Any]) -> tuple[list[str], list[str
             "'completion' needs at least one id under required: or optional:"
         )
     return required, optional
+
+
+def _scope_grant_from_config(
+    raw: dict[str, Any],
+    *,
+    registry_allowed: list[str],
+    tool_names: list[str] | None = None,
+) -> ScopeGrant:
+    """Build the frozen default allowlist from YAML ``scope_guard:`` keys."""
+    allowed_raw = raw.get("allowed_tools", "from_registry")
+    if allowed_raw == "from_registry":
+        allowed = [str(t) for t in registry_allowed]
+        if not allowed and tool_names:
+            allowed = [str(t) for t in tool_names]
+    elif allowed_raw == "all":
+        names = tool_names if tool_names is not None else list(registry_allowed)
+        allowed = [str(t) for t in names]
+    elif isinstance(allowed_raw, list):
+        allowed = [str(t) for t in allowed_raw]
+    else:
+        raise ConfigError(
+            "'scope_guard.allowed_tools' must be 'from_registry', 'all', "
+            "or a list of tool names"
+        )
+    if not allowed:
+        raise ConfigError(
+            "'scope_guard' needs a non-empty allowlist: set allowed_tools, "
+            "registry.allowed / registry.auto, or tools:"
+        )
+    return ScopeGrant(allowed_tools=frozenset(allowed))
 
 
 def _validate_transition_tools(
@@ -1743,6 +1890,34 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
         if tools_sel != "all" and not isinstance(tools_sel, list):
             raise ConfigError("'loop_guard.tools' must be 'all' or a list of tool names")
 
+    scope_guard_raw = data.get("scope_guard")
+    if scope_guard_raw is not None and not isinstance(scope_guard_raw, dict):
+        raise ConfigError("'scope_guard' must be a mapping")
+    if scope_guard_raw is not None:
+        storage_type = scope_guard_raw.get("storage", "memory")
+        if storage_type == "file" and not scope_guard_raw.get("path"):
+            raise ConfigError("scope_guard storage 'file' requires a 'path'")
+        if storage_type not in ("memory", "file", "redis", "postgres"):
+            raise ConfigError(
+                f"unknown scope_guard storage type: {storage_type!r}"
+            )
+        tools_sel = scope_guard_raw.get("tools", "all")
+        if tools_sel != "all" and not isinstance(tools_sel, list):
+            raise ConfigError(
+                "'scope_guard.tools' must be 'all' or a list of tool names"
+            )
+        on_violation = scope_guard_raw.get("on_violation", ON_VIOLATION_SOFT)
+        if on_violation not in ON_VIOLATION_MODES:
+            raise ConfigError(
+                f"'scope_guard.on_violation' must be one of "
+                f"{sorted(ON_VIOLATION_MODES)}"
+            )
+        _scope_grant_from_config(
+            scope_guard_raw,
+            registry_allowed=registry_allowed,
+            tool_names=list(tools.keys()),
+        )
+
     completion_raw = data.get("completion")
     if completion_raw is not None and not isinstance(completion_raw, dict):
         raise ConfigError("'completion' must be a mapping")
@@ -1821,6 +1996,7 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
         task_ledger_defaults=task_ledger_raw,
         integrations=integrations,
         loop_guard=loop_guard_raw,
+        scope_guard=scope_guard_raw,
         state_authority=state_authority_raw,
         completion=completion_raw,
         _audit_auto=audit_auto,
