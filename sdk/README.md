@@ -1,9 +1,9 @@
 # Mycelium runtime
 
-[![PyPI version](https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&release=1.26.2)](https://pypi.org/project/mycelium-runtime/)
+[![PyPI version](https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&release=1.27.0)](https://pypi.org/project/mycelium-runtime/)
 [![Python](https://img.shields.io/pypi/pyversions/mycelium-runtime.svg)](https://pypi.org/project/mycelium-runtime/)
 
-**The reliability layer for AI agents** — installable as `mycelium-runtime` **v1.26.2**.
+**The reliability layer for AI agents** — installable as `mycelium-runtime` **v1.27.0**.
 
 The public story is the [failure-mode catalog](docs/FAILURE_MODE_CATALOG.md) (**AF-001…AF-009**): each ID is a real runtime failure class; each shipped surface is a deterministic guard. The taxonomy is the product promise; envelope fields and gates are how AF-002 is implemented underneath.
 
@@ -60,6 +60,7 @@ Mycelium sits between your agent loop and your tools (after the LLM returns `too
 |---|---------------|-------------------|
 | **Core** | **AF-002 Duplicate / untraceable side effects** | **Flagship:** any tool, any provider — prove run-or-not, at-most-once. Ledger · lease · gates · `Reconciler` · operator release · receipts (Gmail/Stripe adapters = demos) |
 | **Opt-in** | **AF-003 Infinite action loops** | `loop_guard:` — action-hash streak across *new* `tool_call_id`s; soft then hard; operator `mycelium loops release` |
+| **Opt-in** | **Budget / runaway spend (not AF-010)** | `budget:` — `max_duration` / `max_steps` / `max_tokens` / `max_usd`; `@budget_guard` + host `check("llm")`; atomic `record_usage`; operator `mycelium budget release` |
 | **Opt-in** | **AF-004 Tool misuse** | `@bounded` input/output/scope checks; optional `ToolRegistry` allowlist — block before the tool runs |
 | **Opt-in** | **AF-006 Context corruption** | TTL cache (`@protect` / `Session`); optional `MessageValidator` / `HistoryGuard` before the next LLM turn |
 | **Opt-in** | **AF-007 Premature termination** | `completion:` — host checklist; unmarked **required** → refuse terminal; unmarked **optional** → warn and allow |
@@ -938,7 +939,45 @@ loop_guard:
     irreversible: 2
 ```
 
-Wrapper order: `@loop_guard` → `@ledger` → `@bounded` → `@protect` → `func`.
+Wrapper order: `@budget_guard` → `@loop_guard` → `@ledger` → `@bounded` → `@protect` → `func`.
+
+### Budget guard (not AF-010)
+
+Loop guard stops *identical* action thrash. Budget stops **total burn** when
+every call is different — including pure LLM chat loops with no tools.
+
+```yaml
+budget:
+  storage: file
+  path: ./mycelium-budget.json
+  max_duration: 15m
+  max_steps: 40
+  max_tokens: 200000
+  max_usd: 5.00
+  warn_at: 0.8
+  on_missing_meter: hard   # if max_tokens/max_usd set but host never records
+```
+
+```python
+from mycelium import BudgetGuard, budget_guard_sync, execution_scope
+from mycelium.transition import TransitionScope
+
+guard = BudgetGuard(max_steps=40, max_usd=5.0)
+
+with execution_scope(TransitionScope(thread_id="t", run_id="r1", node="agent")):
+    guard.check("llm")                 # before each model turn
+    # ... call model ...
+    guard.record_usage(tokens_in=1200, tokens_out=400, usd=0.02)
+
+@budget_guard_sync(guard)
+def charge(*, tool_call_id: str) -> None:
+    ...
+```
+
+Soft warn → `ToolBoundaryError` (`budget_warning`); hard → `LedgerHardBlockError`
+on the **next** step (never kill mid-flight). Operator:
+`mycelium budget status|release` (`clear` / `allow-once` / `abort-run`).
+Status exposes deterministic `remaining_budget` (pitch word: runway).
 
 ```bash
 mycelium loops status --stuck --config mycelium.yaml

@@ -178,13 +178,22 @@ mechanically enforceable. Complementary to dedicated prompt-injection products.
 
 ---
 
-## Next feature (not AF-010) — Budget enforcement
+## Budget enforcement (not AF-010)
 
-**MUST:** cost / token / wall-clock budgets that hard-stop a runaway agent run.
-A reliability layer that cannot stop a $500 burn is missing its highest-leverage
-failure mode. Frameworks will not build this. **Do not assign AF-010 yet** —
-ship as `budget:` / `@budget_guard` (same pattern as loop / completion / scope).
-Loop guard (AF-003) ≠ spend budget. See product strengthening plan A4.0 and
+**Class:** Run-level reliability / blast-radius
+
+**One line:** Host-declared cost / token / wall-clock / step ceilings refuse
+the next LLM or tool step when crossed.
+
+**What users hit:** varied-tool overnight burn; pure LLM chat loops with no
+tool boundary; stuck planners with no wall-clock ceiling.
+
+**Guard:** `budget:` / `@budget_guard` — `max_duration`, `max_steps`,
+`max_tokens`, `max_usd` (any subset). Host `check("llm")` before model turns;
+atomic `record_usage` for tokens/USD; soft warn then `LedgerHardBlockError`
+on the next step (never mid-flight kill). Operator
+`mycelium budget status|release`. Loop guard (AF-003) ≠ spend budget.
+**AF-010 not assigned** until corpus naming is settled. See
 `notes/catalog/budget-enforcement.md`.
 
 ---
@@ -197,5 +206,5 @@ Loop guard (AF-003) ≠ spend budget. See product strengthening plan A4.0 and
 - Ledger-core guarantees (AF-002 prevention) are spelled out in
   [FAILURE_AND_THREAT_MODEL.md](FAILURE_AND_THREAT_MODEL.md); other AF modules
   are optional guards documented in the SDK README.
-- **Budget enforcement** is the next shipped guard and is intentionally **not**
-  given an AF-00N id until the module lands.
+- **Budget enforcement** ships as `budget:` / `@budget_guard` and is
+  intentionally **not** given an AF-00N id yet.

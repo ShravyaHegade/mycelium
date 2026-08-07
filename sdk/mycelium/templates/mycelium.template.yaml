@@ -187,6 +187,21 @@ loop_guard:
   # Per-tool: tools.my_tool.loop_guard: { consecutive_soft: 20 }  or  false
 
 # ---------------------------------------------------------------------------
+# budget  (not AF-010 — cost / time / step ceilings; refuse next step)
+# Host check("llm") before model turns; record_usage for tokens/USD.
+# Storage: memory | file | sqlite | redis | postgres (atomic update()).
+# ---------------------------------------------------------------------------
+# budget:
+#   storage: file
+#   path: ./mycelium-budget.json
+#   max_duration: 15m
+#   max_steps: 40
+#   max_tokens: 200000
+#   max_usd: 5.00
+#   warn_at: 0.8
+#   on_missing_meter: hard
+
+# ---------------------------------------------------------------------------
 # completion  (AF-007 — refuse terminal while required subtasks are pending)
 # Opt-in. Host-declared checklist; mark success|failed|abandoned before
 # complete_run() / graph END / final-message adapter. Unmarked required →

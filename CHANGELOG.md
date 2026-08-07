@@ -5,6 +5,22 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
 
 ## Unreleased
 
+## 1.27.0 (2026-08-07)
+
+MINOR: budget enforcement (not AF-010) — run-level cost/time/step ceilings
+that refuse the next LLM or tool step. Batched with atomicity fixes that
+landed under Unreleased.
+
+### Added
+
+- **Budget guard (not AF-010):** run-level `max_duration` / `max_steps` /
+  `max_tokens` / `max_usd` ceilings. YAML `budget:` + `@budget_guard` on tools;
+  host `BudgetGuard.check("llm")` before LLM turns; atomic `record_usage` for
+  host-reported tokens/USD; soft warn → `LedgerHardBlockError` on the next
+  step (no mid-flight kill); `mycelium budget status|release`
+  (`clear` / `allow-once` / `abort-run`); storage `update()` on memory / file /
+  sqlite / redis / postgres. Remaining budget in status; "runway" is pitch-only.
+
 ### Fixed
 
 - **`canonicalize_message_id`:** reject interior whitespace / control chars

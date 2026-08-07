@@ -12,7 +12,7 @@ README is the source of truth for how the pieces are used; this file is the
 honest accounting of what can go wrong and which guarantee is pinned to which
 test.
 
-> Version note: this document tracks package **v1.26.2**. The ledger-core
+> Version note: this document tracks package **v1.27.0**. The ledger-core
 > guarantees below are unchanged; optional `loop_guard:` (AF-003),
 > `completion:` (AF-007), `scope_guard:` (AF-008), and `state_authority:` are
 > documented in the SDK README and are outside this core guarantee set.
@@ -41,13 +41,14 @@ This document is **explicitly out of scope** for:
 - **LLM hallucination, prompt injection, or "is the operator *allowed* to
   release this?"** — see [release authority](../README.md#operator-runbook-your-agent-hard-blocked)
   for the honesty model (`--by` is an audit stamp, not authentication).
-- **Spend / time budget enforcement** — not yet shipped. Optional `loop_guard:`
-  (AF-003) only halts consecutive identical action hashes across distinct
-  `tool_call_id`s; it is **not** a cost or wall-clock ceiling. A tool that
-  legitimately runs 1,000 different calls can still burn unbounded USD.
-  **Planned MUST NEXT** (product strengthening A4.0 / `budget:` guard — not
-  AF-010): host-declared cost/token/duration ceilings with deterministic
-  hard-block. Until that ships, runaway spend is a documented gap.
+- **Spend / time budget enforcement** *unless* optional `budget:` is
+  configured — the ledger does not meter tokens or USD. With `budget:`,
+  host-declared `max_duration` / `max_steps` / `max_tokens` / `max_usd`
+  ceilings soft-warn then hard-block the **next** LLM/tool step (never
+  mid-flight kill). Tokens/USD are host-reported via `record_usage`;
+  `on_missing_meter: hard` fail-closes if those ceilings are declared but
+  never metered. Optional `loop_guard:` (AF-003) only halts consecutive
+  identical action hashes — it is **not** a spend ceiling.
 - **Premature “done” / incomplete checklists** *unless* optional
   `completion:` (AF-007) is configured — the ledger does not gate run-exit.
   With `completion:`, unmarked **required** subtasks refuse terminal;
@@ -64,7 +65,7 @@ This document is **explicitly out of scope** for:
   from `registry` / `tools:` and re-checked every step; entity/path stay on
   `@bounded`.
 - The optional `@protect` / `HistoryGuard` / `MessageValidator` / `@bounded`
-  / `Session` / `loop_guard` / `completion` / `scope_guard` /
+  / `Session` / `loop_guard` / `budget` / `completion` / `scope_guard` /
   `state_authority` features (documented in the catalog and SDK README; not
   part of the ledger core guarantee set below).
 
@@ -216,12 +217,13 @@ than the code makes.
   (`ToolBoundaryError` / `LedgerHardBlockError`). Default-off contract pinned by
   `tests/test_mengchheang_public_repro.py::test_semantic_identity`; opt-in by
   `tests/test_args_drift.py`.
-- **Budget / runaway spend (not yet shipped).** If a caller produces many
+- **Budget / runaway spend (without `budget:`).** If a caller produces many
   distinct transition keys, the ledger does not stop the calls. Optional
   AF-003 `loop_guard:` halts consecutive identical *action* hashes (tool + args)
-  across new dispatch ids; it is **not** a general spend/time budget. Unbounded
-  USD/token/wall-clock burn remains a residual risk until the planned `budget:`
-  guard lands (strengthening plan A4.0 — not AF-010).
+  across new dispatch ids; it is **not** a general spend/time budget. Optional
+  `budget:` (not AF-010) hard-stops on host-declared duration/steps/tokens/USD
+  ceilings before the next step; residual risk remains if the host skips
+  `check("llm")` / `record_usage` wiring.
 - **Premature terminal (without `completion:`).** The ledger does not stop an
   agent from emitting “done” with unfinished work. Optional AF-007
   `completion:` refuses terminal when **required** checklist ids are still

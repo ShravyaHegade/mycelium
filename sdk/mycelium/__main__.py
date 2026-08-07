@@ -1,4 +1,4 @@
-"""CLI entrypoint: init, demo, run, transitions, loops, scope, and outcomes."""
+"""CLI entrypoint: init, demo, run, transitions, loops, budget, scope, outcomes."""
 
 from __future__ import annotations
 
@@ -873,6 +873,114 @@ def cmd_loops_release(args: argparse.Namespace) -> int:
     return 0
 
 
+def _budget_guard_from_args(args: argparse.Namespace) -> Any:
+    """Build a BudgetGuard from --config / --file operator flags."""
+    from mycelium.budget_guard import BudgetGuard, FileBudgetGuardStorage
+    from mycelium.config import ConfigError, load_config
+
+    if getattr(args, "file", None):
+        return BudgetGuard(
+            FileBudgetGuardStorage(args.file),
+            max_steps=10**9,  # CLI inspect/release only; ceilings unused
+        )
+
+    config_path = Path(args.config) if args.config else Path("mycelium.yaml")
+    if not config_path.is_file():
+        raise ConfigError(
+            f"no budget storage specified and config not found: {config_path} "
+            "(pass --config or --file)"
+        )
+    config = load_config(config_path)
+    if config.budget is None:
+        raise ConfigError(f"{config_path} declares no budget section")
+    guard = config.build_budget_guard()
+    if guard is None:
+        raise ConfigError(f"{config_path} declares no budget section")
+    storage_type = config.budget.get("storage", "memory")
+    if storage_type == "memory":
+        raise ConfigError(
+            "budget storage is 'memory', which lives inside the agent "
+            "process — the CLI cannot reach it. Use --file or configure "
+            "budget.storage: file|sqlite|redis|postgres"
+        )
+    return guard
+
+
+def cmd_budget_status(args: argparse.Namespace) -> int:
+    from mycelium.config import ConfigError
+
+    try:
+        guard = _budget_guard_from_args(args)
+    except ConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    if args.run_id:
+        state = guard.get_state(args.run_id)
+        states = [state] if state is not None else []
+    else:
+        states = guard.storage.list_all()
+
+    if args.json:
+        payload = []
+        for state in states:
+            row = state.to_dict()
+            row["remaining_budget"] = state.remaining(guard.ceilings).to_dict()
+            payload.append(row)
+        print(json.dumps(payload, indent=2, default=str))
+        return 0
+
+    if not states:
+        print("(no budget-guard runs)")
+        return 0
+    for state in states:
+        remaining = state.remaining(guard.ceilings)
+        print(
+            f"{state.scope_key}  steps={state.steps}  tokens={state.tokens}  "
+            f"usd={state.usd:.4f}  hard_blocked={state.hard_blocked}  "
+            f"blocked={state.blocked_dimension!r}"
+        )
+        print(
+            f"  remaining_budget: duration={remaining.duration_seconds}  "
+            f"steps={remaining.steps}  tokens={remaining.tokens}  "
+            f"usd={remaining.usd}"
+        )
+        if state.hard_blocked and state.operator_resolution is None:
+            print(
+                f"  → mycelium budget release {state.scope_key} "
+                f"--verified clear|allow-once|abort-run --by … --reason …"
+            )
+    return 0
+
+
+def cmd_budget_release(args: argparse.Namespace) -> int:
+    from mycelium.action_ledger import (
+        LedgerAlreadyResolvedError,
+        LedgerReleaseRefusedError,
+    )
+    from mycelium.config import ConfigError
+
+    try:
+        guard = _budget_guard_from_args(args)
+        state = guard.release(
+            args.run_id,
+            verified=args.verified,
+            by=args.by,
+            reason=args.reason,
+        )
+    except ConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except (LedgerReleaseRefusedError, LedgerAlreadyResolvedError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(
+        f"released run {state.scope_key} --verified {state.operator_resolution} "
+        f"by {state.resolved_by}"
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="mycelium",
@@ -1176,6 +1284,73 @@ def main(argv: list[str] | None = None) -> int:
         help="Comma-separated optional ids (with --file, no config)",
     )
 
+    budget_parser = sub.add_parser(
+        "budget",
+        help="Budget guard: status and release for cost/time/step ceilings",
+    )
+    budget_sub = budget_parser.add_subparsers(dest="budget_command", required=True)
+
+    budget_status = budget_sub.add_parser(
+        "status", help="Show remaining budget and hard-block state for runs"
+    )
+    budget_status.add_argument(
+        "run_id",
+        nargs="?",
+        default=None,
+        help="Optional run_id / scope key (default: list all)",
+    )
+    budget_status.add_argument(
+        "-c",
+        "--config",
+        type=Path,
+        default=Path("mycelium.yaml"),
+        help="Config path with budget: (default: ./mycelium.yaml)",
+    )
+    budget_status.add_argument(
+        "--file",
+        type=Path,
+        default=None,
+        help="Direct path to budget JSON file storage",
+    )
+    budget_status.add_argument(
+        "--json", action="store_true", help="Machine-readable JSON output"
+    )
+
+    budget_release = budget_sub.add_parser(
+        "release",
+        help="Operator release for a hard-blocked budget run",
+    )
+    budget_release.add_argument("run_id")
+    budget_release.add_argument(
+        "--verified",
+        required=True,
+        choices=["clear", "allow-once", "abort-run"],
+        help="clear resets meters; allow-once permits one overage step; abort-run keeps blocked",
+    )
+    budget_release.add_argument(
+        "--by",
+        required=True,
+        help="Operator identity (audit stamp, not authentication)",
+    )
+    budget_release.add_argument(
+        "--reason",
+        required=True,
+        help="Why this overage / abort is authorized",
+    )
+    budget_release.add_argument(
+        "-c",
+        "--config",
+        type=Path,
+        default=Path("mycelium.yaml"),
+        help="Config path with budget: (default: ./mycelium.yaml)",
+    )
+    budget_release.add_argument(
+        "--file",
+        type=Path,
+        default=None,
+        help="Direct path to budget JSON file storage",
+    )
+
     scope_parser = sub.add_parser(
         "scope",
         help="AF-008 scope-escalation guard: inspect or bind frozen allowlists",
@@ -1297,6 +1472,11 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_loops_status(args)
         if args.loops_command == "release":
             return cmd_loops_release(args)
+    if args.command == "budget":
+        if args.budget_command == "status":
+            return cmd_budget_status(args)
+        if args.budget_command == "release":
+            return cmd_budget_release(args)
     if args.command == "completion":
         if args.completion_command == "status":
             return cmd_completion_status(args)

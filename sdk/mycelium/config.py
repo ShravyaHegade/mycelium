@@ -32,6 +32,20 @@ from mycelium.audit_receipt import (
     InMemoryAuditReceiptStorage,
     resolve_signing_key,
 )
+from mycelium.budget_guard import (
+    ON_MISSING_HARD,
+    ON_MISSING_METER_MODES,
+    BudgetCeilings,
+    BudgetGuard,
+    BudgetGuardStorage,
+    FileBudgetGuardStorage,
+    InMemoryBudgetGuardStorage,
+    PostgresBudgetGuardStorage,
+    RedisBudgetGuardStorage,
+    SqliteBudgetGuardStorage,
+    apply_budget_guard,
+    parse_duration_seconds,
+)
 from mycelium.completion_contract import (
     CompletionContract,
     CompletionStorage,
@@ -130,6 +144,7 @@ _GUARD_MARKERS = (
     "_mycelium_bounded",
     "_mycelium_protected",
     "_mycelium_loop_guarded",
+    "_mycelium_budget_guarded",
     "_mycelium_scope_guarded",
     "_mycelium_state_authority",
     "_mycelium_langgraph_integration",
@@ -241,6 +256,8 @@ class ToolConfig:
     callable_path: str | None = None
     # Per-tool loop_guard: None=inherit global, False=disable, dict=overrides
     loop_guard: dict[str, Any] | bool | None = None
+    # Per-tool budget_guard: None=inherit global, False=disable
+    budget_guard: bool | None = None
     # Per-tool scope_guard: None=inherit global, False=disable, dict=overrides
     scope_guard: dict[str, Any] | bool | None = None
     # Per-tool state_authority: None=inherit global, False=disable, dict=overrides
@@ -253,6 +270,7 @@ class ToolConfig:
             and self.ledger is None
             and not self.audit_receipt
             and self.loop_guard is None
+            and self.budget_guard is None
             and self.scope_guard is None
             and self.state_authority is None
         )
@@ -298,12 +316,14 @@ class MyceliumConfig:
     task_ledger_defaults: dict[str, Any] | None = None
     integrations: dict[str, dict[str, Any]] | None = None
     loop_guard: dict[str, Any] | None = None
+    budget: dict[str, Any] | None = None
     scope_guard: dict[str, Any] | None = None
     state_authority: dict[str, Any] | None = None
     completion: dict[str, Any] | None = None
     _audit_emitter: AuditReceiptEmitter | None = None
     _outcome_emitter: OutcomeEmitter | None = None
     _loop_guard: LoopGuard | None = None
+    _budget_guard: BudgetGuard | None = None
     _scope_guard: ScopeGuard | None = None
     _state_authority: StateAuthority | None = None
     _completion: CompletionContract | None = None
@@ -318,8 +338,9 @@ class MyceliumConfig:
         function is returned unchanged.
 
         Guard order (outermost first, after optional LangGraph instrument):
-        ``@state_authority`` -> ``@scope_guard`` -> ``@loop_guard`` ->
-        ``@ledger`` -> ``@bounded`` -> ``@protect`` -> ``func``
+        ``@state_authority`` -> ``@scope_guard`` -> ``@budget_guard`` ->
+        ``@loop_guard`` -> ``@ledger`` -> ``@bounded`` -> ``@protect`` ->
+        ``func``
         """
         return self.apply_tool(func.__name__, func)
 
@@ -357,6 +378,24 @@ class MyceliumConfig:
                 return False
         return True
 
+    def budget_guard_applies(
+        self, name: str, tool_config: ToolConfig | None = None
+    ) -> bool:
+        """Whether budget_guard should wrap this tool."""
+        if self.budget is None:
+            return False
+        cfg = tool_config if tool_config is not None else self.tools.get(name)
+        if cfg is not None and cfg.budget_guard is False:
+            return False
+        exclude = self.budget.get("exclude") or []
+        if name in exclude:
+            return False
+        tools_sel = self.budget.get("tools", "all")
+        if tools_sel != "all":
+            if not isinstance(tools_sel, list) or name not in tools_sel:
+                return False
+        return True
+
     def state_authority_applies(
         self, name: str, tool_config: ToolConfig | None = None
     ) -> bool:
@@ -385,11 +424,13 @@ class MyceliumConfig:
         if tool_config is None:
             return func
         applies_loop = self.loop_guard_applies(name, tool_config)
+        applies_budget = self.budget_guard_applies(name, tool_config)
         applies_scope = self.scope_guard_applies(name, tool_config)
         applies_state = self.state_authority_applies(name, tool_config)
         if (
             tool_config.is_noop()
             and not applies_loop
+            and not applies_budget
             and not applies_scope
             and not applies_state
         ):
@@ -465,6 +506,12 @@ class MyceliumConfig:
                 side_effect_class=tool_config.side_effect_class,
                 consecutive_soft=consecutive_override,
             )
+
+        # Budget guard outside loop/ledger: refuse next step, never mid-flight.
+        if applies_budget:
+            bguard = self.build_budget_guard()
+            assert bguard is not None
+            func = apply_budget_guard(func, bguard, tool_name=name)
 
         # Scope guard outside loop/ledger: frozen allowlist never claims.
         if applies_scope:
@@ -664,6 +711,82 @@ class MyceliumConfig:
                 "use 'memory' or 'file'"
             )
         raise ConfigError(f"unknown loop_guard storage type: {storage_type!r}")
+
+    def build_budget_guard(self) -> BudgetGuard | None:
+        """Build a shared BudgetGuard if the config declares ``budget:``."""
+        if self.budget is None:
+            return None
+        if self._budget_guard is not None:
+            return self._budget_guard
+        raw = self.budget
+        storage = self._build_budget_guard_storage(raw)
+        ceilings = _budget_ceilings_from_config(raw)
+        warn_at = raw.get("warn_at", 0.8)
+        try:
+            warn_at_f = float(warn_at)
+        except (TypeError, ValueError) as exc:
+            raise ConfigError("'budget.warn_at' must be a float in (0, 1]") from exc
+        if not 0.0 < warn_at_f <= 1.0:
+            raise ConfigError("'budget.warn_at' must be a float in (0, 1]")
+        on_missing = raw.get("on_missing_meter", ON_MISSING_HARD)
+        if on_missing not in ON_MISSING_METER_MODES:
+            raise ConfigError(
+                f"'budget.on_missing_meter' must be one of "
+                f"{sorted(ON_MISSING_METER_MODES)}"
+            )
+        exclude = raw.get("exclude") or []
+        if not isinstance(exclude, list):
+            raise ConfigError("'budget.exclude' must be a list of tool names")
+        self._budget_guard = BudgetGuard(
+            storage,
+            ceilings=ceilings,
+            warn_at=warn_at_f,
+            on_missing_meter=str(on_missing),
+            exclude=[str(item) for item in exclude],
+        )
+        return self._budget_guard
+
+    @staticmethod
+    def _build_budget_guard_storage(raw: dict[str, Any]) -> BudgetGuardStorage:
+        storage_type = raw.get("storage", "memory")
+        if storage_type == "memory":
+            return InMemoryBudgetGuardStorage()
+        if storage_type == "file":
+            path = raw.get("path")
+            if not path:
+                raise ConfigError("budget storage 'file' requires a 'path'")
+            return FileBudgetGuardStorage(path)
+        if storage_type == "sqlite":
+            path = raw.get("path")
+            if not path:
+                raise ConfigError("budget storage 'sqlite' requires a 'path'")
+            return SqliteBudgetGuardStorage(
+                path,
+                table=str(raw.get("table", "mycelium_budget")),
+            )
+        if storage_type == "redis":
+            from mycelium.storage._helpers import resolve_storage_url
+
+            try:
+                url = resolve_storage_url(raw)
+            except ValueError as exc:
+                raise ConfigError(str(exc)) from exc
+            return RedisBudgetGuardStorage(
+                url,
+                prefix=str(raw.get("prefix", "mycelium:budget:")),
+            )
+        if storage_type == "postgres":
+            from mycelium.storage._helpers import resolve_storage_url
+
+            try:
+                dsn = resolve_storage_url(raw, url_key="dsn")
+            except ValueError as exc:
+                raise ConfigError(str(exc)) from exc
+            return PostgresBudgetGuardStorage(
+                dsn,
+                table=str(raw.get("table", "mycelium_budget")),
+            )
+        raise ConfigError(f"unknown budget storage type: {storage_type!r}")
 
     def build_scope_guard(self) -> ScopeGuard | None:
         """Build a shared ScopeGuard if the config declares ``scope_guard:``."""
@@ -1227,6 +1350,45 @@ class _NoopRun:
         return False
 
 
+def _budget_ceilings_from_config(raw: dict[str, Any]) -> BudgetCeilings:
+    """Parse ``max_duration`` / ``max_steps`` / ``max_tokens`` / ``max_usd``."""
+    max_duration_raw = raw.get("max_duration")
+    max_steps_raw = raw.get("max_steps")
+    max_tokens_raw = raw.get("max_tokens")
+    max_usd_raw = raw.get("max_usd")
+    max_duration: float | None = None
+    max_steps: int | None = None
+    max_tokens: int | None = None
+    max_usd: float | None = None
+    if max_duration_raw is not None:
+        try:
+            max_duration = parse_duration_seconds(max_duration_raw)
+        except ValueError as exc:
+            raise ConfigError(f"'budget.max_duration': {exc}") from exc
+    if max_steps_raw is not None:
+        if not isinstance(max_steps_raw, int) or isinstance(max_steps_raw, bool):
+            raise ConfigError("'budget.max_steps' must be a positive int")
+        max_steps = max_steps_raw
+    if max_tokens_raw is not None:
+        if not isinstance(max_tokens_raw, int) or isinstance(max_tokens_raw, bool):
+            raise ConfigError("'budget.max_tokens' must be a positive int")
+        max_tokens = max_tokens_raw
+    if max_usd_raw is not None:
+        try:
+            max_usd = float(max_usd_raw)
+        except (TypeError, ValueError) as exc:
+            raise ConfigError("'budget.max_usd' must be a positive number") from exc
+    try:
+        return BudgetCeilings(
+            max_duration=max_duration,
+            max_steps=max_steps,
+            max_tokens=max_tokens,
+            max_usd=max_usd,
+        )
+    except ValueError as exc:
+        raise ConfigError(f"budget: {exc}") from exc
+
+
 def _storage_settings(cfg: dict[str, Any] | None) -> dict[str, Any]:
     """Strip integration-only keys from a global ledger/flush section."""
     if cfg is None:
@@ -1342,6 +1504,15 @@ def _parse_tool_config(
             f"tool '{name}'.loop_guard must be a bool or a mapping"
         )
 
+    budget_guard_raw = raw.get("budget_guard")
+    budget_guard_cfg: bool | None
+    if budget_guard_raw is None:
+        budget_guard_cfg = None
+    elif isinstance(budget_guard_raw, bool):
+        budget_guard_cfg = budget_guard_raw
+    else:
+        raise ConfigError(f"tool '{name}'.budget_guard must be a bool")
+
     scope_guard_raw = raw.get("scope_guard")
     scope_guard_cfg: dict[str, Any] | bool | None
     if scope_guard_raw is None:
@@ -1386,6 +1557,7 @@ def _parse_tool_config(
         provider_idempotency_key_ttl=provider_idempotency_key_ttl,
         callable_path=callable_path,
         loop_guard=loop_guard_cfg,
+        budget_guard=budget_guard_cfg,
         scope_guard=scope_guard_cfg,
         state_authority=state_authority_cfg,
     )
@@ -1488,6 +1660,7 @@ def _apply_action_ledger_tools(
             provider_idempotency_key_ttl=existing.provider_idempotency_key_ttl,
             callable_path=existing.callable_path,
             loop_guard=existing.loop_guard,
+            budget_guard=existing.budget_guard,
             scope_guard=existing.scope_guard,
             state_authority=existing.state_authority,
         )
@@ -1900,6 +2073,41 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
         if tools_sel != "all" and not isinstance(tools_sel, list):
             raise ConfigError("'loop_guard.tools' must be 'all' or a list of tool names")
 
+    budget_raw = data.get("budget")
+    if budget_raw is not None and not isinstance(budget_raw, dict):
+        raise ConfigError("'budget' must be a mapping")
+    if budget_raw is not None:
+        storage_type = budget_raw.get("storage", "memory")
+        if storage_type == "file" and not budget_raw.get("path"):
+            raise ConfigError("budget storage 'file' requires a 'path'")
+        if storage_type == "sqlite" and not budget_raw.get("path"):
+            raise ConfigError("budget storage 'sqlite' requires a 'path'")
+        if storage_type not in (
+            "memory",
+            "file",
+            "sqlite",
+            "redis",
+            "postgres",
+        ):
+            raise ConfigError(f"unknown budget storage type: {storage_type!r}")
+        tools_sel = budget_raw.get("tools", "all")
+        if tools_sel != "all" and not isinstance(tools_sel, list):
+            raise ConfigError("'budget.tools' must be 'all' or a list of tool names")
+        _budget_ceilings_from_config(budget_raw)
+        warn_at = budget_raw.get("warn_at", 0.8)
+        try:
+            warn_at_f = float(warn_at)
+        except (TypeError, ValueError) as exc:
+            raise ConfigError("'budget.warn_at' must be a float in (0, 1]") from exc
+        if not 0.0 < warn_at_f <= 1.0:
+            raise ConfigError("'budget.warn_at' must be a float in (0, 1]")
+        on_missing = budget_raw.get("on_missing_meter", ON_MISSING_HARD)
+        if on_missing not in ON_MISSING_METER_MODES:
+            raise ConfigError(
+                f"'budget.on_missing_meter' must be one of "
+                f"{sorted(ON_MISSING_METER_MODES)}"
+            )
+
     scope_guard_raw = data.get("scope_guard")
     if scope_guard_raw is not None and not isinstance(scope_guard_raw, dict):
         raise ConfigError("'scope_guard' must be a mapping")
@@ -2006,6 +2214,7 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
         task_ledger_defaults=task_ledger_raw,
         integrations=integrations,
         loop_guard=loop_guard_raw,
+        budget=budget_raw,
         scope_guard=scope_guard_raw,
         state_authority=state_authority_raw,
         completion=completion_raw,
