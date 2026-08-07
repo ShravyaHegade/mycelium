@@ -37,7 +37,20 @@ class LockedJsonDictFile:
         tmp = self._path.with_suffix(self._path.suffix + ".tmp")
         with tmp.open("w", encoding="utf-8") as handle:
             json.dump(data, handle, indent=2, default=str)
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(tmp, self._path)
+        # Durability of the rename itself (best-effort; not all platforms).
+        try:
+            dir_fd = os.open(str(self._path.parent), os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            os.fsync(dir_fd)
+        except OSError:
+            pass
+        finally:
+            os.close(dir_fd)
 
     def read_modify_write(
         self,

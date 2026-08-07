@@ -9,13 +9,16 @@ if TYPE_CHECKING:
 
 
 def canonicalize_message_id(ref: str) -> str | None:
-    """Strip whitespace and wrap bare RFC 5322 Message-IDs in ``<>``.
+    """Strip outer whitespace and wrap bare RFC 5322 Message-IDs in ``<>``.
 
-    Returns ``None`` when the ref is missing or empty after strip — callers
-    treat that as ``UNKNOWN`` without querying Gmail.
+    Returns ``None`` when the ref is missing, empty after strip, or contains
+    interior whitespace / control characters — callers treat that as
+    ``UNKNOWN`` without querying Gmail (avoids ``q=`` query-split).
     """
     stripped = ref.strip()
     if not stripped:
+        return None
+    if any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in stripped):
         return None
     if stripped.startswith("<") and stripped.endswith(">"):
         return stripped
@@ -33,7 +36,14 @@ class GmailReconciler:
 
     Message-IDs are canonicalized (strip + wrap bare ids in ``<>``) for the
     sent-log query and the completed receipt so bracketed, bare, and
-    whitespace-padded forms resolve identically.
+    whitespace-padded forms resolve identically. Interior whitespace and
+    control characters are rejected (``UNKNOWN``, no Gmail call).
+
+    **Consumer Gmail constraint:** the Gmail API may rewrite the MIME
+    Message-ID at send (e.g. to ``…@mail.gmail.com``). A pre-transport
+    ``rfc822msgid:`` lookup can then always miss → reconciler stays
+    ``UNKNOWN`` (fail-closed; not a defect). Operator release is still
+    required on that account class.
     """
 
     def __init__(self, service: Any) -> None:

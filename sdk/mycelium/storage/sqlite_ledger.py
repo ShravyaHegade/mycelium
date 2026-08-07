@@ -162,6 +162,7 @@ class SqliteEntryStorage:
         *,
         expected_terminal_outcomes: frozenset[str],
         expected_owner: str | None = None,
+        require_lease_held_at: float | None = None,
     ) -> bool:
         if not expected_terminal_outcomes:
             return False
@@ -177,6 +178,12 @@ class SqliteEntryStorage:
         if expected_owner is not None:
             sql += " AND json_extract(payload, '$.owner') = ?"
             params.append(expected_owner)
+        if require_lease_held_at is not None:
+            sql += (
+                " AND (json_extract(payload, '$.lease_until') IS NULL "
+                "OR json_extract(payload, '$.lease_until') > ?)"
+            )
+            params.append(require_lease_held_at)
 
         with self._lock:
             with self._connect() as conn:
@@ -233,11 +240,13 @@ class SqliteLedgerStorage:
         *,
         expected_terminal_outcomes: frozenset[str],
         expected_owner: str | None = None,
+        require_lease_held_at: float | None = None,
     ) -> bool:
         return self._inner.try_transition(
             entry,
             expected_terminal_outcomes=expected_terminal_outcomes,
             expected_owner=expected_owner,
+            require_lease_held_at=require_lease_held_at,
         )
 
 

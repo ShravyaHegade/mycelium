@@ -118,6 +118,13 @@ def default_try_claim_inflight(
     return "claimed", None
 
 
+def lease_allows_renew(lease_until: float | None, *, now: float) -> bool:
+    """True when a renew CAS may extend the lease (held or unbounded)."""
+    from mycelium.transition import LeaseValidity, resolve_lease_validity
+
+    return resolve_lease_validity(lease_until, now=now) != LeaseValidity.EXPIRED
+
+
 def resolve_storage_url(raw: dict[str, Any], *, url_key: str = "url") -> str:
     """Resolve a connection string from config or an environment variable."""
     if url_key in raw:

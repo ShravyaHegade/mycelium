@@ -104,6 +104,38 @@ def test_renew_lease_rejects_completed() -> None:
         ledger.renew_lease("pay-3")
 
 
+def test_renew_lease_cas_does_not_clobber_concurrent_complete() -> None:
+    """Renew must not overwrite a concurrent complete (TOCTOU)."""
+    storage = InMemoryLedgerStorage()
+    ledger = ActionLedger(storage=storage, lease_ttl=3600.0)
+    ledger.claim("pay-cas", "send_payment", (), {"amount": 1})
+    barrier = threading.Barrier(2)
+    errors: list[BaseException] = []
+
+    def _renew() -> None:
+        barrier.wait()
+        try:
+            ledger.renew_lease("pay-cas", lease_ttl=7200.0)
+        except LedgerError as exc:
+            errors.append(exc)
+
+    def _complete() -> None:
+        barrier.wait()
+        ledger.complete("pay-cas", {"ok": True})
+
+    t1 = threading.Thread(target=_renew, daemon=True)
+    t2 = threading.Thread(target=_complete, daemon=True)
+    t1.start()
+    t2.start()
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+
+    final = storage.get("pay-cas")
+    assert final is not None
+    assert final.terminal_outcome == TerminalOutcome.COMPLETED.value
+    assert final.status == "completed"
+
+
 def test_module_renew_lease_inside_ledgered_tool() -> None:
     storage = InMemoryLedgerStorage()
     binding = ToolTransitionBinding.for_tool(

@@ -49,6 +49,31 @@ def test_canonicalize_message_id_bracketed_bare_whitespace() -> None:
     assert canonicalize_message_id("") is None
 
 
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "abc @example.com",
+        "abc\texample.com",
+        "abc\n@example.com",
+        "<abc @example.com>",
+        "abc\x00@example.com",
+        "abc\x7f@example.com",
+    ],
+)
+def test_canonicalize_message_id_rejects_interior_whitespace_and_controls(
+    ref: str,
+) -> None:
+    assert canonicalize_message_id(ref) is None
+
+
+def test_interior_whitespace_ref_returns_unknown_without_gmail_call() -> None:
+    service = FakeGmailService()
+    reconciler = GmailReconciler(service)
+    result = reconciler.reconcile(FakeEntry(external_operation_ref="abc @x.com"))
+    assert result == ReconcileResult.unknown()
+    assert service.list_called == []
+
+
 def test_missing_external_operation_ref_returns_unknown() -> None:
     service = FakeGmailService()
     reconciler = GmailReconciler(service)

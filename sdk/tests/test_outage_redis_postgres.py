@@ -144,6 +144,7 @@ class FailingRedisStorage(RedisLedgerStorage):
         *,
         expected_terminal_outcomes: frozenset[str],
         expected_owner: str | None = None,
+        require_lease_held_at: float | None = None,
     ) -> bool:
         if self.fail_transition:
             raise ConnectionError("storage backend unreachable")
@@ -151,6 +152,7 @@ class FailingRedisStorage(RedisLedgerStorage):
             entry,
             expected_terminal_outcomes=expected_terminal_outcomes,
             expected_owner=expected_owner,
+            require_lease_held_at=require_lease_held_at,
         )
 
     def list_all(self) -> list[LedgerEntry]:
@@ -342,6 +344,7 @@ class FailingPostgresStorage:
         *,
         expected_terminal_outcomes: frozenset[str],
         expected_owner: str | None = None,
+        require_lease_held_at: float | None = None,
     ) -> bool:
         if self.fail_transition:
             raise ConnectionError("storage backend unreachable")
@@ -349,6 +352,7 @@ class FailingPostgresStorage:
             entry,
             expected_terminal_outcomes=expected_terminal_outcomes,
             expected_owner=expected_owner,
+            require_lease_held_at=require_lease_held_at,
         )
 
     def list_all(self) -> list[LedgerEntry]:

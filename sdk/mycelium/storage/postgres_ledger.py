@@ -151,26 +151,37 @@ class PostgresEntryStorage:
         *,
         expected_terminal_outcomes: frozenset[str],
         expected_owner: str | None = None,
+        require_lease_held_at: float | None = None,
     ) -> bool:
         self._ensure_schema()
         table = self._table_id()
         payload = json.loads(json.dumps(entry.to_dict(), default=str))
         # Build WHERE clause: terminal_outcome IN (...) [AND owner = ...]
-        owner_clause = self._sql.SQL("")
+        # [AND lease held or unbounded]
+        extra_clauses = self._sql.SQL("")
         params: list[Any] = [
             json.dumps(payload),
             entry.request_id,
             list(expected_terminal_outcomes),
         ]
         if expected_owner is not None:
-            owner_clause = self._sql.SQL("AND payload->>'owner' = %s")
+            extra_clauses = self._sql.SQL("{} AND payload->>'owner' = %s").format(
+                extra_clauses
+            )
             params.append(expected_owner)
+        if require_lease_held_at is not None:
+            # NULL lease_until = unbounded; else must still be in the future.
+            extra_clauses = self._sql.SQL(
+                "{} AND (payload->>'lease_until' IS NULL "
+                "OR (payload->>'lease_until')::double precision > %s)"
+            ).format(extra_clauses)
+            params.append(require_lease_held_at)
         query = self._sql.SQL(
             "UPDATE {} SET payload = %s::jsonb "
             "WHERE request_id = %s "
             "AND payload->>'terminal_outcome' = ANY(%s) {} "
             "RETURNING request_id"
-        ).format(table, owner_clause)
+        ).format(table, extra_clauses)
         with self._psycopg.connect(self._dsn) as conn:
             row = conn.execute(query, tuple(params)).fetchone()
             conn.commit()
@@ -224,11 +235,13 @@ class PostgresLedgerStorage:
         *,
         expected_terminal_outcomes: frozenset[str],
         expected_owner: str | None = None,
+        require_lease_held_at: float | None = None,
     ) -> bool:
         return self._inner.try_transition(
             entry,
             expected_terminal_outcomes=expected_terminal_outcomes,
             expected_owner=expected_owner,
+            require_lease_held_at=require_lease_held_at,
         )
 
 

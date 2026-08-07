@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from mycelium.action_ledger import (
@@ -331,3 +333,40 @@ def test_exclude_tool_skips() -> None:
         for i in range(20):
             poll_status(tool_call_id=f"p{i}")
     assert calls["n"] == 20
+
+
+def test_concurrent_check_soft_blocks_at_most_once_body_exec() -> None:
+    """Atomic update: concurrent identical dispatches share one streak counter."""
+    guard = LoopGuard(
+        InMemoryLoopGuardStorage(),
+        consecutive_soft={SideEffectClass.NON_IDEMPOTENT_MUTATE.value: 2},
+    )
+    calls = {"n": 0}
+    barrier = threading.Barrier(8)
+    errors: list[BaseException] = []
+
+    @loop_guard_sync(
+        guard, side_effect_class=SideEffectClass.NON_IDEMPOTENT_MUTATE
+    )
+    def charge(*, tool_call_id: str) -> str:
+        calls["n"] += 1
+        return "ok"
+
+    def _worker(i: int) -> None:
+        try:
+            with execution_scope(_scope("run-race")):
+                barrier.wait()
+                charge(tool_call_id=f"c{i}")
+        except (ToolBoundaryError, LedgerHardBlockError) as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_worker, args=(i,), daemon=True) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+
+    # Threshold 2: at most one body execution before soft/hard; never all 8.
+    assert calls["n"] <= 1
+    assert len(errors) >= 7
+    assert any(isinstance(e, ToolBoundaryError) for e in errors)

@@ -146,8 +146,11 @@ class RedisEntryStorage:
         *,
         expected_terminal_outcomes: frozenset[str],
         expected_owner: str | None = None,
+        require_lease_held_at: float | None = None,
     ) -> bool:
         from redis.exceptions import WatchError
+
+        from mycelium.storage._helpers import lease_allows_renew
 
         key = self._key(entry.request_id)
         payload = json.dumps(entry.to_dict(), default=str)
@@ -162,6 +165,11 @@ class RedisEntryStorage:
                     if existing.get("terminal_outcome") not in expected_terminal_outcomes:
                         return False
                     if expected_owner is not None and existing.get("owner") != expected_owner:
+                        return False
+                    if require_lease_held_at is not None and not lease_allows_renew(
+                        existing.get("lease_until"),
+                        now=require_lease_held_at,
+                    ):
                         return False
                     pipe.multi()
                     pipe.set(key, payload)
@@ -223,11 +231,13 @@ class RedisLedgerStorage:
         *,
         expected_terminal_outcomes: frozenset[str],
         expected_owner: str | None = None,
+        require_lease_held_at: float | None = None,
     ) -> bool:
         return self._inner.try_transition(
             entry,
             expected_terminal_outcomes=expected_terminal_outcomes,
             expected_owner=expected_owner,
+            require_lease_held_at=require_lease_held_at,
         )
 
 
@@ -270,11 +280,13 @@ class RedisTaskLedgerStorage:
         *,
         expected_terminal_outcomes: frozenset[str],
         expected_owner: str | None = None,
+        require_lease_held_at: float | None = None,
     ) -> bool:
         return self._inner.try_transition(
             entry,
             expected_terminal_outcomes=expected_terminal_outcomes,
             expected_owner=expected_owner,
+            require_lease_held_at=require_lease_held_at,
         )
 
     def list_all(self) -> list[Any]:

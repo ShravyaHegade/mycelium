@@ -42,6 +42,7 @@ from mycelium.transition import (
 
 P = ParamSpec("P")
 R = TypeVar("R")
+T = TypeVar("T")
 
 UNCLASSIFIED_POLICY_WARN = "warn"
 UNCLASSIFIED_POLICY_STRICT = "strict"
@@ -152,6 +153,18 @@ class LoopGuardStorage:
     def set(self, state: LoopRunState) -> None:
         raise NotImplementedError
 
+    def update(
+        self,
+        scope_key: str,
+        fn: Callable[[LoopRunState], T],
+    ) -> T:
+        """Atomically load-or-create state, apply ``fn``, persist.
+
+        Closes the check get→set race: streak / soft / hard decisions must
+        observe and write under one lock.
+        """
+        raise NotImplementedError
+
     def list_all(self) -> list[LoopRunState]:
         raise NotImplementedError
 
@@ -172,6 +185,23 @@ class InMemoryLoopGuardStorage(LoopGuardStorage):
         with self._lock:
             state.updated_at = time.time()
             self._entries[state.scope_key] = LoopRunState.from_dict(state.to_dict())
+
+    def update(
+        self,
+        scope_key: str,
+        fn: Callable[[LoopRunState], T],
+    ) -> T:
+        with self._lock:
+            existing = self._entries.get(scope_key)
+            state = (
+                LoopRunState.from_dict(existing.to_dict())
+                if existing is not None
+                else LoopRunState(scope_key=scope_key)
+            )
+            result = fn(state)
+            state.updated_at = time.time()
+            self._entries[scope_key] = LoopRunState.from_dict(state.to_dict())
+            return result
 
     def list_all(self) -> list[LoopRunState]:
         with self._lock:
@@ -200,6 +230,26 @@ class FileLoopGuardStorage(LoopGuardStorage):
 
         with self._lock:
             self._file.read_modify_write(mutate)
+
+    def update(
+        self,
+        scope_key: str,
+        fn: Callable[[LoopRunState], T],
+    ) -> T:
+        def mutate(data: dict[str, dict[str, Any]]) -> T:
+            raw = data.get(scope_key)
+            state = (
+                LoopRunState.from_dict(raw)
+                if raw is not None
+                else LoopRunState(scope_key=scope_key)
+            )
+            result = fn(state)
+            state.updated_at = time.time()
+            data[scope_key] = state.to_dict()
+            return result
+
+        with self._lock:
+            return self._file.read_modify_write(mutate)
 
     def list_all(self) -> list[LoopRunState]:
         def read(data: dict[str, dict[str, Any]]) -> list[LoopRunState]:
@@ -314,99 +364,96 @@ class LoopGuard:
         )
         dispatch_id = derive_dispatch_id(kwargs)
         ahash = action_hash(tool, args, kwargs)
-        state = self._storage.get(scope_key) or LoopRunState(scope_key=scope_key)
 
-        if state.hard_blocked:
-            self._emit(
-                tool=tool,
-                scope_key=scope_key,
-                event=EVENT_RESOLUTION,
-                gate=GATE_HARD_BLOCK,
-                side_effect_class=side_effect_class,
-                error_class="LedgerHardBlockError",
-            )
-            raise LedgerHardBlockError(
-                f"LoopGuard: run {scope_key!r} is hard-blocked after repeated "
-                f"action {tool!r}. Release with: mycelium loops release {scope_key} "
-                f"--verified clear|allow-once|abort-run --by … --reason …"
-            )
+        # Decision + persist under one storage lock (closes get→set race).
+        outcome: dict[str, Any] = {"gate": None, "exc": None}
 
-        if state.allow_once_hash is not None and state.allow_once_hash == ahash:
-            state.allow_once_hash = None
-            state.last_hash = ahash
-            state.streak = 1
-            state.last_dispatch_id = dispatch_id
-            state.soft_issued.pop(ahash, None)
-            self._storage.set(state)
-            return
+        def apply(state: LoopRunState) -> None:
+            if state.hard_blocked:
+                outcome["gate"] = GATE_HARD_BLOCK
+                outcome["exc"] = LedgerHardBlockError(
+                    f"LoopGuard: run {scope_key!r} is hard-blocked after repeated "
+                    f"action {tool!r}. Release with: mycelium loops release {scope_key} "
+                    f"--verified clear|allow-once|abort-run --by … --reason …"
+                )
+                return
 
-        if (
-            dispatch_id is not None
-            and state.last_dispatch_id is not None
-            and dispatch_id == state.last_dispatch_id
-        ):
-            return
+            if state.allow_once_hash is not None and state.allow_once_hash == ahash:
+                state.allow_once_hash = None
+                state.last_hash = ahash
+                state.streak = 1
+                state.last_dispatch_id = dispatch_id
+                state.soft_issued.pop(ahash, None)
+                return
 
-        if state.last_hash == ahash:
-            streak = state.streak + 1
-        else:
-            streak = 1
+            if (
+                dispatch_id is not None
+                and state.last_dispatch_id is not None
+                and dispatch_id == state.last_dispatch_id
+            ):
+                return
 
-        if state.soft_issued.get(ahash):
-            state.hard_blocked = True
-            state.blocked_action_hash = ahash
+            if state.last_hash == ahash:
+                streak = state.streak + 1
+            else:
+                streak = 1
+
+            if state.soft_issued.get(ahash):
+                state.hard_blocked = True
+                state.blocked_action_hash = ahash
+                state.last_hash = ahash
+                state.streak = streak
+                state.last_dispatch_id = dispatch_id
+                state.operator_resolution = None
+                state.resolved_by = None
+                state.reason = None
+                state.resolved_at = None
+                outcome["gate"] = GATE_HARD_BLOCK
+                outcome["exc"] = LedgerHardBlockError(
+                    f"LoopGuard: run {scope_key!r} hard-blocked — {tool!r} repeated "
+                    f"after soft warning. Release with: mycelium loops release "
+                    f"{scope_key} --verified clear|allow-once|abort-run --by … "
+                    f"--reason …"
+                )
+                return
+
+            if streak >= threshold:
+                state.soft_issued[ahash] = True
+                state.last_hash = ahash
+                state.streak = streak
+                state.last_dispatch_id = dispatch_id
+                state.blocked_action_hash = ahash
+                outcome["gate"] = GATE_SOFT_BLOCK
+                outcome["exc"] = ToolBoundaryError(
+                    f"{tool}: loop detected",
+                    violation="loop_detected",
+                    tool_name=tool,
+                    llm_message=(
+                        f"Loop detected: {tool!r} with the same arguments repeated "
+                        f"{streak} times (threshold {threshold}). Change strategy "
+                        "or stop. The tool body was not executed."
+                    ),
+                )
+                return
+
             state.last_hash = ahash
             state.streak = streak
             state.last_dispatch_id = dispatch_id
-            state.operator_resolution = None
-            state.resolved_by = None
-            state.reason = None
-            state.resolved_at = None
-            self._storage.set(state)
-            self._emit(
-                tool=tool,
-                scope_key=scope_key,
-                event=EVENT_RESOLUTION,
-                gate=GATE_HARD_BLOCK,
-                side_effect_class=side_effect_class,
-                error_class="LedgerHardBlockError",
-            )
-            raise LedgerHardBlockError(
-                f"LoopGuard: run {scope_key!r} hard-blocked — {tool!r} repeated "
-                f"after soft warning. Release with: mycelium loops release {scope_key} "
-                f"--verified clear|allow-once|abort-run --by … --reason …"
-            )
 
-        if streak >= threshold:
-            state.soft_issued[ahash] = True
-            state.last_hash = ahash
-            state.streak = streak
-            state.last_dispatch_id = dispatch_id
-            state.blocked_action_hash = ahash
-            self._storage.set(state)
-            self._emit(
-                tool=tool,
-                scope_key=scope_key,
-                event=EVENT_RESOLUTION,
-                gate=GATE_SOFT_BLOCK,
-                side_effect_class=side_effect_class,
-                error_class="ToolBoundaryError",
-            )
-            raise ToolBoundaryError(
-                f"{tool}: loop detected",
-                violation="loop_detected",
-                tool_name=tool,
-                llm_message=(
-                    f"Loop detected: {tool!r} with the same arguments repeated "
-                    f"{streak} times (threshold {threshold}). Change strategy or stop. "
-                    "The tool body was not executed."
-                ),
-            )
-
-        state.last_hash = ahash
-        state.streak = streak
-        state.last_dispatch_id = dispatch_id
-        self._storage.set(state)
+        self._storage.update(scope_key, apply)
+        exc = outcome["exc"]
+        if exc is None:
+            return
+        gate = outcome["gate"]
+        self._emit(
+            tool=tool,
+            scope_key=scope_key,
+            event=EVENT_RESOLUTION,
+            gate=gate,
+            side_effect_class=side_effect_class,
+            error_class=type(exc).__name__,
+        )
+        raise exc
 
     def release(
         self,

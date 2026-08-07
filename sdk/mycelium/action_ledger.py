@@ -22,7 +22,12 @@ from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar
 
 from mycelium.reconcile import Reconciler, ReconcileResult, ReconcileStatus
 from mycelium.session import Session, _session_var
-from mycelium.storage._helpers import claim_inflight_outcome, default_try_claim_inflight, with_lease
+from mycelium.storage._helpers import (
+    claim_inflight_outcome,
+    default_try_claim_inflight,
+    lease_allows_renew,
+    with_lease,
+)
 from mycelium.storage.json_file import LockedJsonDictFile
 from mycelium.tool_boundary import ToolBoundaryError
 from mycelium.transition import (
@@ -680,10 +685,15 @@ class LedgerStorage:
         *,
         expected_terminal_outcomes: frozenset[str],
         expected_owner: str | None = None,
+        require_lease_held_at: float | None = None,
     ) -> bool:
         """Atomically write *entry* only if the stored entry's terminal outcome
         is one of *expected_terminal_outcomes* (and *expected_owner* matches,
         when set).
+
+        When ``require_lease_held_at`` is set, also refuse if the stored lease
+        is already expired at that timestamp (renew path — closes TOCTOU
+        between get and write).
 
         Returns ``True`` when the write succeeds, ``False`` when the pre-condition
         is not met (caller raises ``LedgerOutcomeAlreadySetError``).
@@ -697,6 +707,10 @@ class LedgerStorage:
         if existing.terminal_outcome not in expected_terminal_outcomes:
             return False
         if expected_owner is not None and existing.owner != expected_owner:
+            return False
+        if require_lease_held_at is not None and not lease_allows_renew(
+            existing.lease_until, now=require_lease_held_at
+        ):
             return False
         self.set(entry)
         return True
@@ -741,6 +755,7 @@ class InMemoryLedgerStorage(LedgerStorage):
         *,
         expected_terminal_outcomes: frozenset[str],
         expected_owner: str | None = None,
+        require_lease_held_at: float | None = None,
     ) -> bool:
         with self._lock:
             existing = self._entries.get(entry.request_id)
@@ -750,6 +765,13 @@ class InMemoryLedgerStorage(LedgerStorage):
                 return False
             if expected_owner is not None and existing.owner != expected_owner:
                 return False
+            if require_lease_held_at is not None and not lease_allows_renew(
+                existing.lease_until, now=require_lease_held_at
+            ):
+                return False
+            # Route the write through set() so subclass hooks / failure
+            # injection (and any future durability wrappers) still see it.
+            # RLock allows re-entry from set() while we hold the CAS lock.
             self.set(entry)
             return True
 
@@ -820,6 +842,7 @@ class FileLedgerStorage(LedgerStorage):
         *,
         expected_terminal_outcomes: frozenset[str],
         expected_owner: str | None = None,
+        require_lease_held_at: float | None = None,
     ) -> bool:
         result: list[bool] = []
 
@@ -833,6 +856,11 @@ class FileLedgerStorage(LedgerStorage):
                 result.append(False)
                 return
             if expected_owner is not None and existing.owner != expected_owner:
+                result.append(False)
+                return
+            if require_lease_held_at is not None and not lease_allows_renew(
+                existing.lease_until, now=require_lease_held_at
+            ):
                 result.append(False)
                 return
             data[entry.request_id] = entry.to_dict()
@@ -941,6 +969,7 @@ class ActionLedger:
         *,
         expected_from: frozenset[str] | None = None,
         expected_owner: str | None = None,
+        require_lease_held_at: float | None = None,
     ) -> bool:
         """Atomically write *entry* subject to outcome/owner pre-conditions.
 
@@ -954,6 +983,7 @@ class ActionLedger:
                 entry,
                 expected_terminal_outcomes=outcomes,
                 expected_owner=expected_owner,
+                require_lease_held_at=require_lease_held_at,
             )
 
     def _list_all_entries(self) -> list[LedgerEntry]:
@@ -2480,6 +2510,10 @@ class ActionLedger:
         the lease has already expired raises :class:`LedgerError` — reclaim /
         reconcile must run instead of silently re-asserting ownership.
 
+        Uses CAS (``try_transition``) with owner + lease-held preconditions so
+        a concurrent complete / reclaim / expiry cannot be clobbered by a
+        stale renew (TOCTOU).
+
         Backs :func:`renew_lease`.
         """
         existing = self._get_entry(request_id)
@@ -2506,7 +2540,43 @@ class ActionLedger:
         if ttl <= 0:
             raise LedgerError("lease_ttl must be positive to renew")
         entry = replace(existing, lease_until=now + ttl, last_heartbeat_at=now)
-        self._set_entry(entry)
+        if not self._try_transition(
+            entry,
+            expected_from=_IN_FLIGHT_OUTCOMES,
+            expected_owner=existing.owner,
+            require_lease_held_at=now,
+        ):
+            current = self._get_entry(request_id)
+            if current is None:
+                raise LedgerError(
+                    f"Cannot renew lease for unknown request {request_id!r}"
+                )
+            current_outcome = (
+                current.terminal_outcome
+                if isinstance(current.terminal_outcome, TerminalOutcome)
+                else TerminalOutcome(str(current.terminal_outcome))
+            )
+            if current_outcome != TerminalOutcome.IN_FLIGHT:
+                raise LedgerError(
+                    f"Cannot renew lease for request {request_id!r}: "
+                    f"terminal_outcome is {current_outcome.value}, not IN_FLIGHT"
+                )
+            if current.owner != existing.owner:
+                raise LedgerError(
+                    f"Cannot renew lease for request {request_id!r}: "
+                    "owner changed (reclaimed by peer)"
+                )
+            if resolve_lease_validity(current.lease_until, now=now) == (
+                LeaseValidity.EXPIRED
+            ):
+                raise LedgerError(
+                    f"Cannot renew lease for request {request_id!r}: "
+                    "lease already expired — reclaim or reconcile instead"
+                )
+            raise LedgerError(
+                f"Cannot renew lease for request {request_id!r}: "
+                "concurrent transition rejected renew"
+            )
         return entry
 
     def repair_transition(self, request_id: str) -> LedgerEntry:

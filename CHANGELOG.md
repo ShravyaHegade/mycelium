@@ -3,6 +3,25 @@
 Release policy: **batch; calm over velocity.** Prefer one coherent cut over many
 small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEASE.md).
 
+## Unreleased
+
+### Fixed
+
+- **`canonicalize_message_id`:** reject interior whitespace / control chars
+  (`UNKNOWN`, no Gmail call) — closes `q=` query-split surface flagged on the
+  Shadow lane.
+- **`LockedJsonDictFile.save`:** `flush` + `fsync` the temp file (and
+  best-effort directory fsync) before `os.replace`.
+- **`LoopGuard.check`:** atomic storage `update` so concurrent identical
+  dispatches share one streak counter (closes get→set race).
+- **`ActionLedger.renew_lease`:** CAS via `try_transition` with owner +
+  lease-held preconditions (closes TOCTOU that could clobber a concurrent
+  complete/reclaim).
+
+### Changed
+
+- Gmail reconciler docs: consumer Message-ID rewrite constraint (Finding A).
+
 ## 1.26.2 (2026-08-06)
 
 Patch: adoption blockers + positioning. `mycelium run` can import packages
