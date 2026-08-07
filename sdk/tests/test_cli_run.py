@@ -200,6 +200,57 @@ tools:
     assert result.returncode == 7
 
 
+def test_run_imports_package_from_cwd_without_pythonpath(tmp_path: Path) -> None:
+    """Fresh layout: package under CWD must import without PYTHONPATH=.
+
+    ``sitecustomize`` runs before ``python -c`` / ``-m`` prepend CWD to
+    ``sys.path``; ``mycelium run`` must put CWD on PYTHONPATH itself.
+    """
+    app_dir = tmp_path / "my_app"
+    app_dir.mkdir()
+    _write(app_dir / "__init__.py", "")
+    _write(
+        app_dir / "tools.py",
+        "def my_tool() -> str:\n    return 'ok'\n",
+    )
+    config = tmp_path / "mycelium.yaml"
+    _write(
+        config,
+        """
+action_ledger: {storage: memory, tools: [my_tool]}
+tools:
+  my_tool:
+    callable: my_app.tools:my_tool
+""",
+    )
+
+    env = dict(os.environ)
+    env.pop("PYTHONPATH", None)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "mycelium",
+            "run",
+            "--config",
+            str(config),
+            "--",
+            sys.executable,
+            "-c",
+            "print('hello')",
+        ],
+        cwd=tmp_path,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "hello" in result.stdout
+    assert "No module named 'my_app'" not in result.stderr
+
+
 def test_run_fails_closed_for_missing_target(tmp_path: Path) -> None:
     config = tmp_path / "mycelium.yaml"
     _write(tmp_path / "missing_targets.py", "value = 1\n")

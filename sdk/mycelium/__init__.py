@@ -1,4 +1,7 @@
-"""Mycelium runtime: failure prevention for AI agents."""
+"""Mycelium runtime: the reliability layer for AI agents."""
+
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _package_version
 
 from mycelium.action_ledger import (
     ARGS_DRIFT_HARD,
@@ -181,7 +184,10 @@ from mycelium.transition_resolution import (
     transition_needs_repair,
 )
 
-__version__ = "1.26.0"
+try:
+    __version__ = _package_version("mycelium-runtime")
+except PackageNotFoundError:  # pragma: no cover - editable/source tree edge
+    __version__ = "0.0.0.dev"
 
 __all__ = [
     "ActionLedger",

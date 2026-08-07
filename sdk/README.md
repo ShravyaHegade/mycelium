@@ -1,19 +1,23 @@
 # Mycelium runtime
 
-[![PyPI version](https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&release=1.24.0)](https://pypi.org/project/mycelium-runtime/)
+[![PyPI version](https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&release=1.26.2)](https://pypi.org/project/mycelium-runtime/)
 [![Python](https://img.shields.io/pypi/pyversions/mycelium-runtime.svg)](https://pypi.org/project/mycelium-runtime/)
 
-Current package: **mycelium-runtime v1.26.0** (opt-in args-drift / identity-conflict gate + AF-008 scope-escalation guard + SQLite ledger backend + AF-002 failure-case pack + AF-007 completion contract + state-authority execution gate + AF-003 loop guard + outcome telemetry / DTTR + fail-closed Gmail sent-log reconciler + webhook event-dedupe recipe + atomicity contract + CAS backends + owner fencing + worker-death signal + operator release + `REPAIR` gate + lease auto-renew + transition envelope).
+**The reliability layer for AI agents** — installable as `mycelium-runtime` **v1.26.2**.
 
-**AF-00N** labels refer to the [failure-mode catalog](docs/FAILURE_MODE_CATALOG.md)
-(AF-001…AF-009): what each failure is, shipped vs roadmap, and which Mycelium
-surface maps to it.
+The public story is the [failure-mode catalog](docs/FAILURE_MODE_CATALOG.md) (**AF-001…AF-009**): each ID is a real runtime failure class; each shipped surface is a deterministic guard. The taxonomy is the product promise; envelope fields and gates are how AF-002 is implemented underneath.
+
+**Releases:** batch; calm over velocity — [release policy & pre-release checklist](docs/RELEASE.md).
+
+**AF-002 flagship:** any tool, any provider — prove run-or-not and enforce at-most-once (ledger · lease · `Reconciler` · operator release). Provider adapters (Gmail sent-log, Stripe-shaped examples) are demos of that contract, not the headline.
+
+Also shipping: AF-003 loop guard · AF-004 `@bounded` · AF-006 context guards · AF-007 completion · AF-008 scope guard · SQLite + Redis/Postgres · DTTR · atomicity / CAS / owner fencing · worker-death · lease auto-renew.
 
 ## One painful bug → a few lines of config
 
-**LangGraph Cloud redispatches a long tool call while the first is still running.** Both complete. You pay twice. Side effects run twice. [langgraph#7417](https://github.com/langchain-ai/langgraph/issues/7417)
+**LangGraph Cloud redispatches a long tool call while the first is still running.** Both complete. You pay twice. Side effects run twice. [langgraph#7417](https://github.com/langchain-ai/langgraph/issues/7417) — catalog class **AF-002**.
 
-Mycelium’s answer is a **transition envelope**, not “idempotency key + cached result” alone: classify the tool (**side-effect class**), hold an execution **lease** while work is in flight (auto-extended for long `@ledger` tools), record **terminal state** (`IN_FLIGHT` / `COMPLETED` / `UNKNOWN` / …), and **hard-block** (or reconcile) when a mutating redispatch would be unsafe. Same key while in-flight → poll; completed → return stored; ambiguous payment-class → stop.
+Mycelium’s answer is a provider-reconciled, operator-releaseable, auditable **execution ledger** (the transition envelope under AF-002): **any tool, any provider** — prove run-or-not and enforce **at-most-once**. Claim before the side effect, hold a **lease** while work is in flight, record **terminal state**, and **hard-block** (or reconcile with the provider) when a mutating redispatch would be unsafe. Same key while in-flight → poll; completed → return stored; ambiguous mutate → stop. Not “idempotency key + cached result” alone.
 
 On LangGraph Cloud, long tool calls can be redispatched on the order of **~180s**, aligned with the platform’s **`BG_JOB_HEARTBEAT`** sweep. Mycelium’s lease / auto-renew / poll / hard-block path is the operator-side guard for that window — see [Resolution gates](#resolution-gates).
 
@@ -50,21 +54,22 @@ supported for explicit code-level control.
 
 ## What it does
 
-Mycelium sits between your agent loop and your tools (after the LLM returns `tool_calls`):
+Mycelium sits between your agent loop and your tools (after the LLM returns `tool_calls`). Promise first (catalog), mechanism second:
 
-| | Problem | What Mycelium does |
-|---|---------|-------------------|
-| **Core** | **Duplicate side effects on retry** | Transition envelope: classify tools, durable transition key, lease (+ auto-renew while `@ledger` runs), terminal state, resolution **gates** (`POLL` / `REPAIR` / `SOFT_BLOCK` / `HARD_BLOCK`), `external_operation_ref` + `Reconciler`, ledgers, signed receipts |
-| **Core** | **Transition envelope fields** | `side_effect_class` → `spendability` → `side_effect_boundary` → `terminal_outcome` → `external_operation_ref` → `retry_permission` — same system as above; payment/write needs the heavier set |
-| **Opt-in** | **Infinite action loops (AF-003)** | `loop_guard:` — action-hash streak across *new* `tool_call_id`s; soft (`ToolBoundaryError`) then hard (`LedgerHardBlockError`); operator `mycelium loops release` |
-| **Opt-in** | **Premature termination (AF-007)** | `completion:` — host checklist; unmarked **required** → refuse terminal; unmarked **optional** → warn and allow; `complete_run` / graph END / final-message adapters |
-| **Opt-in** | **Scope escalation (AF-008)** | `scope_guard:` — freeze run tool allowlist; re-check every step; mid-run / handoff widen → `ToolBoundaryError` (`scope_escalation_tool`); entity/path stay on `@bounded` |
-| **Opt-in** | **Args drift / identity conflict (AF-002)** | `action_ledger.on_args_drift: soft\|hard` — same `request_id` / `tool_call_id` + different args within a run → soft `ToolBoundaryError` or hard `LedgerHardBlockError` (default `off`; other runs isolated) |
-| **Opt-in** | **Superseded state / state authority** | `state_authority:` — freeze `state_ref` at decide time; compare to host canonical ref before claim; mismatch blocks even when `tool_call_id` is new |
-| **Opt-in** | **Stale or broken context** | TTL cache (`@protect` / `Session`); optional `MessageValidator` / `HistoryGuard` you call before the next LLM turn |
-| **Opt-in** | **Bad tool calls** | `@bounded` input/output/scope checks; optional `ToolRegistry` allowlist — block before the tool runs |
+| | Catalog class | What Mycelium does |
+|---|---------------|-------------------|
+| **Core** | **AF-002 Duplicate / untraceable side effects** | **Flagship:** any tool, any provider — prove run-or-not, at-most-once. Ledger · lease · gates · `Reconciler` · operator release · receipts (Gmail/Stripe adapters = demos) |
+| **Opt-in** | **AF-003 Infinite action loops** | `loop_guard:` — action-hash streak across *new* `tool_call_id`s; soft then hard; operator `mycelium loops release` |
+| **Opt-in** | **AF-004 Tool misuse** | `@bounded` input/output/scope checks; optional `ToolRegistry` allowlist — block before the tool runs |
+| **Opt-in** | **AF-006 Context corruption** | TTL cache (`@protect` / `Session`); optional `MessageValidator` / `HistoryGuard` before the next LLM turn |
+| **Opt-in** | **AF-007 Premature termination** | `completion:` — host checklist; unmarked **required** → refuse terminal; unmarked **optional** → warn and allow |
+| **Opt-in** | **AF-008 Scope escalation** | `scope_guard:` — freeze run tool allowlist; re-check every step; mid-run / handoff widen → `ToolBoundaryError` |
+| **Opt-in** | **AF-002 Args drift** | `action_ledger.on_args_drift: soft\|hard` — same call id + different args within a run (default `off`) |
+| **Opt-in** | **Superseded state** | `state_authority:` — freeze `state_ref` at decide time; compare to host canonical ref before claim |
 
-`mycelium init` / `mycelium run` center on the core path. Context and tool-boundary guards are available when you configure them.
+Envelope field stack (`side_effect_class` → spendability → boundary → …) is documented under [Transition envelope fields](#transition-envelope-fields) — implementation detail for AF-002, not the product headline.
+
+`mycelium init` / `mycelium run` center on AF-002. Other catalog guards are available when you configure them.
 
 Framework-agnostic. Raw message lists and plain Python functions (LangGraph, CrewAI, OpenAI tool loops, etc.).
 
@@ -677,6 +682,8 @@ The ref is stored on the entry (`external_operation_ref`) across all backends an
 
 ### Reconciling automatically (`Reconciler`)
 
+**This is the AF-002 flagship path:** any tool, any provider — you record a handle, Mycelium asks the provider whether the effect landed, and redispatch is at-most-once. Shipped provider classes are reference adapters; the contract is the story.
+
 Instead of parking an ambiguous transition for a human, give the ledger a **read-only** `Reconciler` that asks the provider "did operation X actually complete?" using the recorded ref. It runs only when a side-effecting transition would otherwise hard-block *and* a ref is present:
 
 ```python
@@ -707,9 +714,9 @@ def send_payment(amount, recipient):
 
 Reconciliation is **fail-closed**: no ref, no reconciler, or a reconciler that raises/times out all resolve to a hard-block — an exception in the reconciler never propagates. Async tools can implement `reconcile_async`; the async claim path prefers it and falls back to `reconcile`. Wire a reconciler via `@ledger` / `@ledger_sync` or `ActionLedger(reconciler=...)`.
 
-#### Gmail sent-log reconciler (`GmailReconciler`)
+#### Demo adapter: Gmail sent-log (`GmailReconciler`)
 
-Email send tools often fail after the provider accepts the message but before the 250 OK reaches the agent. The ambiguous transition hard-blocks. A `GmailReconciler` resolves them automatically by checking the Gmail sent-log:
+Not the product story — a shipped **demo** of the general `Reconciler` contract (prove run-or-not; fail closed on indexing lag). Email send tools often fail after the provider accepts the message but before the 250 OK reaches the agent. The ambiguous transition hard-blocks; `GmailReconciler` asks the Gmail sent-log:
 
 ```python
 from mycelium import ledger_sync, GmailReconciler, ReconcileResult

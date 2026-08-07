@@ -1,58 +1,68 @@
 # Mycelium
 
-[![PyPI version](https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&release=1.24.0)](https://pypi.org/project/mycelium-runtime/)
+[![PyPI version](https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&release=1.26.2)](https://pypi.org/project/mycelium-runtime/)
 [![Python](https://img.shields.io/pypi/pyversions/mycelium-runtime.svg)](https://pypi.org/project/mycelium-runtime/)
 [![Downloads](https://static.pepy.tech/badge/mycelium-runtime)](https://pepy.tech/project/mycelium-runtime)
 
-**Runtime guards and zero-touch YAML auto-instrumentation for AI agents.**
+**The reliability layer for AI agents.**
 
-Stops duplicate side effects on retry/redispatch, blocks bad tool args and out-of-scope calls, and keeps tool data fresh. Not recovery after. Not tracing or dashboards.
+Wrong answers are recoverable. Wrong actions are expensive. Mycelium sits between your agent loop and its tools and prevents the runtime failures that make production agents unsafe — duplicate charges, infinite tool loops, bad args, stale context, early “done,” scope creep.
 
-*Early but API-stable (**v1.24.0**): breaking changes only at major versions. More guards planned.*
+Not recovery after. Not tracing or dashboards. Prevention at the tool boundary.
+
+*Early but API-stable (**v1.26.2**): breaking changes only at major versions. The catalog grows; the promise stays.*
+
+## The promise — failure-mode catalog (AF-00N)
+
+The taxonomy **is** the product story. Each ID is a real failure class from production GitHub issues across LangChain, LangGraph, CrewAI, and related stacks. Mycelium ships a guard (or roadmap module) per class:
+
+| ID | Failure mode | Promise |
+|----|--------------|---------|
+| **AF-002** | Duplicate / untraceable side effects | **Any tool, any provider:** prove run-or-not and enforce at-most-once — ledger, lease, reconcile, operator release |
+| **AF-003** | Infinite reasoning loops | Same tool+args under new call ids soft- then hard-block until an operator releases |
+| **AF-004** | Tool misuse | Invalid args and out-of-scope tools are blocked before they run |
+| **AF-006** | Context corruption | Stale or broken tool/history context is caught before the next turn |
+| **AF-007** | Premature termination | Required checklist items must complete before the run can declare success |
+| **AF-008** | Cascading permission | The run tool allowlist freezes; mid-run / handoff widen is refused |
+| AF-001 / AF-005 / AF-009 | Hallucination · goal misalignment · injection | Roadmap / judgment tier — not claimed as deterministic SDK guards yet |
+
+Full definitions (shipped vs roadmap): [sdk/docs/FAILURE_MODE_CATALOG.md](sdk/docs/FAILURE_MODE_CATALOG.md).
+
+**The SDK is the distribution; the catalog is the company.**
 
 ## Who it's for
 
 Developers running **agents with side-effect tools** in production (payments, emails, API writes, long subagent calls) on **LangGraph, CrewAI, or a plain Python loop**.
 
-Python 3.10+. Framework-agnostic.
+Python 3.10+. Framework-agnostic. Drop in via YAML + `mycelium run`, or decorators.
 
-## What it does (v1.23.x)
+## How it works (v1.26.x)
 
-These aren't reasoning failures. They're runtime failures. Mycelium sits between your agent loop and your tools (after the LLM returns `tool_calls`):
+Mycelium wraps tool calls after the LLM returns `tool_calls` and returns a verdict: run, return a stored result, wait, ask the provider what happened, or hard-stop.
 
-**Core** (`mycelium init` / `mycelium run`):
+**Core — AF-002** (`mycelium init` / `mycelium run`):
 
-- **Duplicate side effects on retry:** classify tools (`read` vs `keyed_mutate` vs `non_idempotent_mutate`, etc.), hash a durable **transition key**, resolve duplicates by **terminal state** — not blind re-execute. **Do not redispatch unless the previous transition is proven terminal or safely recoverable.** This is a **transition envelope** (class + lease + terminal + hard-block / reconcile), not only an idempotency key plus a cached result.
-  - **Read tools:** poll in-flight, reclaim expired leases, **soft-block** ambiguous `UNKNOWN` (safe retry by default)
-  - **Mutating tools:** hard-block ambiguity; **reconcile** via `external_operation_ref` when a provider lookup can prove run-or-not (`COMPLETED` / `NOT_EXECUTED` / still blocked)
-  - **Operator release (v1.15.0):** when a hard-block needs a human, an operator verifies with the provider and records it (`release(verified=...)` / `mycelium transitions release`) — `completed` returns the recorded result, `not_executed` grants exactly one re-execution. One-shot, fail-closed, audit-stamped; triage via `mycelium transitions list --stuck`
-  - **Worker-death signal (v1.16.0, opt-in):** when `reclaim_requires_death_signal: true`, EXPIRED entries cannot be reclaimed or released without affirmative death evidence (`mark_worker_dead()` / `mycelium transitions mark-dead`, or heartbeat older than the grace window). Prevents reclaiming from a worker that is merely paused.
-  - **Provider idempotency-key validity (v1.17.0):** when `provider_idempotency_key_ttl` is set, a same-key retry that exceeds the window hard-blocks instead of retrying — the provider may have purged its deduplication state.
-  - **Atomicity contract (v1.18.0):** every terminal-outcome write uses CAS (`try_transition`) — already-resolved transitions refuse overwrites. Owner fencing in `@ledger`/`@ledger_sync` prevents stale workers from overwriting another worker's outcome.
-  - **Gmail sent-log reconciler (v1.19.0):** email send tools fail after the provider accepts a message but before the 250 OK arrives — the ambiguous transition hard-blocks. `GmailReconciler` resolves it automatically by checking the Gmail sent-log (`in:sent rfc822msgid:<Message-ID>`); zero matches stays `UNKNOWN` (indexing lag), never a blind retry.
-  - **Unclassified tools:** tools without a `transition_binding` have unknown side-effect semantics. `unclassified_policy: strict` routes retries through a conservative binding so failed retries hard-block instead of re-executing (default `warn` emits a one-time `UserWarning`). Side-effecting tools using memory storage get a one-time warning — the duplicate-side-effect guard only holds within the process.
-  - **Stale lease (`EXPIRED`):** strict classes reclaim only when reconcile proves `NOT_EXECUTED` (fail-closed without a ref)
-  - **Lease auto-renew (v1.14.0):** while a `@ledger` / `@ledger_sync` tool runs, Mycelium extends `lease_until` automatically (default every `lease_ttl / 3`) so long work does not look dead to a redispatched peer. Set `lease_renew_interval: 0` to disable; call `renew_lease()` for a manual bump or when claiming outside the decorator.
-  - **LangGraph Cloud:** long tools may be redispatched around **~180s** (`BG_JOB_HEARTBEAT` sweep); Mycelium’s lease/poll/hard-block (with auto-renew) guards that window ([langgraph#7417](https://github.com/langchain-ai/langgraph/issues/7417))
-- **Transition envelope fields** (priority order): `side_effect_class` → `spendability` → `side_effect_boundary` → `terminal_outcome` → `external_operation_ref` → `retry_permission` — payment/write needs the heavier set; without it, redispatch is an unsupported second transition, not a retry
+- Durable **execution ledger** around mutating tools: claim before the side effect, record terminal state, **do not redispatch unless the previous attempt is proven safe**.
+  - **Flagship (AF-002):** any tool, any provider — record a handle, ask the provider what happened, enforce **at-most-once**. Shipped adapters (e.g. Gmail sent-log) are demos of that contract, not the product story.
+  - **Reads:** poll in-flight, reclaim expired leases, soft-block ambiguous `UNKNOWN`
+  - **Mutations:** hard-block ambiguity; **provider reconcile** when a lookup can prove ran-or-not; **operator release** when a human must verify (`mycelium transitions release`)
+  - Crash windows, worker death, lease auto-renew, CAS/atomicity, and fail-closed storage — see [sdk/README.md](sdk/README.md#resolution-gates)
+  - LangGraph Cloud redispatches long tools around **~180s**; the ledger guards that window ([langgraph#7417](https://github.com/langchain-ai/langgraph/issues/7417))
 
-**Opt-in** (configure or call explicitly):
+**Opt-in guards** (configure or call explicitly):
 
-- **Infinite action loops (AF-003):** `loop_guard:` detects the same tool + args across *new* `tool_call_id`s (the ledger only dedupes redispatches of the *same* id). Soft-blocks with `ToolBoundaryError` (`violation=loop_detected`), then hard-blocks the whole run (`LedgerHardBlockError`) until an operator runs `mycelium loops release --verified clear|allow-once|abort-run`. On in `mycelium init --full` / `--minimal`. Details: [sdk/README.md](sdk/README.md#loop-guard-af-003-identical-actions-across-new-tool_call_ids).
-- **Premature termination (AF-007):** optional `completion:` host checklist — unmarked **required** subtasks **refuse** terminal (`CompletionRefusedError`); unmarked **optional** only warn. Mark `success` / `failed` / `abandoned`; gate via `complete_run()`, LangGraph END, or final-message wrap. Details: [sdk/README.md](sdk/README.md#completion-contract-af-007-refuse-terminal-while-required-subtasks-pending).
-- **Scope escalation (AF-008):** optional `scope_guard:` freezes the run tool allowlist (from `registry` / `tools:`) and re-checks every step so handoffs cannot silently add tools. Soft-blocks with `ToolBoundaryError` (`violation=scope_escalation_tool`). Entity/path stay on `@bounded`. Details: [sdk/README.md](sdk/README.md#scope-guard-af-008-freeze-run-tool-allowlist).
-- **Args drift / identity conflict (AF-002):** optional `action_ledger.on_args_drift: soft|hard` rejects the same `request_id` / `tool_call_id` with different tool args within a run (`ToolBoundaryError` / `LedgerHardBlockError`); other runs stay isolated. Default `off` keeps same-ticket + different-args as a new transition. Details: [sdk/README.md](sdk/README.md#transition-identity-and-the-request_id-caveat).
+- **AF-003 Infinite loops** — `loop_guard:` · soft → hard → `mycelium loops release`
+- **AF-004 Tool misuse** — `@bounded` / registry · block bad args and out-of-scope tools
+- **AF-006 Context corruption** — `@protect` / Session · optional message/history validation
+- **AF-007 Premature termination** — `completion:` host checklist · refuse or warn-and-allow
+- **AF-008 Scope escalation** — `scope_guard:` freeze allowlist · re-check every step
+- **AF-002 Args drift** — optional `on_args_drift: soft|hard` for same call id, different args
+- **State authority** — refuse decisions from superseded checkpoints before claim
+- **DTTR telemetry** — opt-in `OutcomeEmitter` so the no-double-execute guarantee is observable
 
-**AF-00N** = failure-mode IDs from the corpus taxonomy. Full definitions
-(shipped vs roadmap): [sdk/docs/FAILURE_MODE_CATALOG.md](sdk/docs/FAILURE_MODE_CATALOG.md).
-- **Superseded state / state authority:** optional `state_authority:` freezes a `state_ref` at decide time and compares it to a host canonical callback before claim — blocks stale-checkpoint redispatches that mint a *new* `tool_call_id` (claim ≠ state authority). Details: [sdk/README.md](sdk/README.md#state-authority-refuse-decisions-from-superseded-checkpoints).
-- **Stale or broken context:** TTL-fresh tool data (`@protect`); optional message/history validation before the next LLM turn
-- **Bad tool calls:** block invalid inputs and out-of-scope tools before they run (`@bounded` / registry)
-- **Resolution telemetry + DTTR (v1.20.0):** opt-in `OutcomeEmitter` writes flat, append-only rows on resolution events; the **Duplicate Tool Transition Rate** makes the no-double-execute guarantee observable in production. Off by default; memory/file storage only (no analytics dependency); emission failures are logged and swallowed so telemetry never breaks the tool path.
+Implementation detail (envelope field stack, gate matrix, payment identity): [sdk/README.md](sdk/README.md#transition-envelope-fields). Failure & threat model: [sdk/docs/FAILURE_AND_THREAT_MODEL.md](sdk/docs/FAILURE_AND_THREAT_MODEL.md).
 
-Not Langfuse. Use both if you want traces and guards. Full resolution rules: [sdk/README.md](sdk/README.md#resolution-gates). Envelope field stack: [sdk/README.md](sdk/README.md#transition-envelope-fields). Payment-class identity guidance: [sdk/README.md](sdk/README.md#payment-class-identity-server-authoritative). Failure & threat model: [sdk/docs/FAILURE_AND_THREAT_MODEL.md](sdk/docs/FAILURE_AND_THREAT_MODEL.md). Inbound webhook event ids: [sdk/README.md](sdk/README.md#webhook-event-dedupe-optional).
-
-Not an approvals/policy inbox, not hosted observability, not on-chain audit trails, not a generic webhook hub, and not a rewind/agent-memory tool. It stops unsafe re-execution of side effects at the tool boundary — prevention, not post-hoc healing. Approvals, traces, and chain anchors are adjacent layers it composes with, not features it competes on: [What Mycelium does not do](sdk/README.md#what-mycelium-does-not-do).
+Not Langfuse. Use both if you want traces and guards. Not an approvals inbox, hosted observability, on-chain audit trail, or agent framework — [What Mycelium does not do](sdk/README.md#what-mycelium-does-not-do).
 
 ## Use it
 
@@ -150,11 +160,22 @@ or `'mycelium-runtime[postgres]'`. See the
 ## Docs
 
 - **Handbook:** https://mycelium-labs.github.io/ ([website repo](https://github.com/mycelium-labs/mycelium-labs.github.io))
+- **Try in 5 minutes:** https://mycelium-labs.github.io/try.html
 - **Sandbox demo:** [mycelium-labs/mycelium-labs.github.io/sandbox](https://github.com/mycelium-labs/mycelium-labs.github.io/tree/main/sandbox)
 - **Full API reference:** [sdk/README.md](sdk/README.md)
+- **Release policy & checklist:** [sdk/docs/RELEASE.md](sdk/docs/RELEASE.md) (batch; calm over velocity)
 - **PyPI:** https://pypi.org/project/mycelium-runtime/
 
 ## Release process
+
+**Batch. Calm over velocity.** A reliability layer is trusted by infrequent,
+coherent PyPI cuts — not by many versions per day. Full policy + **pre-release
+checklist:** [sdk/docs/RELEASE.md](sdk/docs/RELEASE.md).
+
+**Default workflow:** merge feature/fix/docs PRs to `main` **without** bumping
+the version. When a batch is ready (≈ weekly or slower), open one release PR
+that bumps `sdk/pyproject.toml` + `CHANGELOG.md` and passes the checklist.
+Same-day multiple publishes are forbidden except critical hotfixes.
 
 ### One-time setup
 
@@ -162,10 +183,12 @@ Create a GitHub Personal Access Token with `contents: write` scope on this repo 
 
 ### Per-release steps
 
-1. Create a feature branch, make changes, open a PR to `main`.
-2. CI (pytest + ruff on Python 3.10–3.13) must pass.
-3. To release, bump the version in `sdk/pyproject.toml` and add a `## X.Y.Z (date)` section to `CHANGELOG.md` in the **same PR**.
-4. Merge the PR. On push to `main`, automation:
+1. Land work on `main` via PRs (no version bump required on each PR).
+2. When batching a cut: open a **release PR** — bump `sdk/pyproject.toml`, add
+   `## X.Y.Z (date)` to `CHANGELOG.md`, sync user-facing version lines, complete
+   the [pre-release checklist](sdk/docs/RELEASE.md#before-you-bump-the-version-checklist).
+3. CI (pytest + ruff on Python 3.10–3.13) must pass on that PR.
+4. Merge the release PR. On push to `main`, automation:
    - Reads the version from `sdk/pyproject.toml`.
    - Checks whether tag `v{version}` already exists — if it does, exits quietly (doc-only or non-version merges release nothing).
    - Runs the SDK tests and ruff (Python 3.12) as a safety gate before tagging.

@@ -111,12 +111,14 @@ def cmd_run(config_path: Path, command: list[str]) -> int:
         / "site_bootstrap"
     )
     env = dict(os.environ)
+    # sitecustomize imports tools before the interpreter prepends CWD to
+    # sys.path (``python -m`` / ``-c``). Keep CWD importable for fresh
+    # project layouts like ``my_app.tools`` without requiring PYTHONPATH=.
+    pythonpath_parts = [str(bootstrap_dir), os.getcwd()]
     current_pythonpath = env.get("PYTHONPATH")
-    env["PYTHONPATH"] = (
-        str(bootstrap_dir)
-        if not current_pythonpath
-        else os.pathsep.join((str(bootstrap_dir), current_pythonpath))
-    )
+    if current_pythonpath:
+        pythonpath_parts.append(current_pythonpath)
+    env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
     env[AUTO_ENABLED_ENV] = "1"
     env[AUTO_CONFIG_ENV] = str(resolved_config)
 

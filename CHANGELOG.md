@@ -1,5 +1,31 @@
 # Changelog
 
+Release policy: **batch; calm over velocity.** Prefer one coherent cut over many
+small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEASE.md).
+
+## 1.26.2 (2026-08-06)
+
+Patch: adoption blockers + positioning. `mycelium run` can import packages
+from CWD without `PYTHONPATH=.`; `__version__` tracks installed package
+metadata. PyPI/README lead with **the reliability layer for AI agents** and
+the AF-00N catalog; AF-002 flagship is any tool / any provider prove
+run-or-not + at-most-once; Gmail adapter framed as a demo, not the headline.
+
+### Fixed
+
+- **`mycelium run`:** put CWD on `PYTHONPATH` so sitecustomize can import
+  project packages (e.g. `my_app.tools`) before the interpreter would have
+  prepended CWD — no more `No module named 'my_app'` on first trial.
+- **`__version__`:** read from `importlib.metadata` (`mycelium-runtime`)
+  instead of a hardcoded string that drifted from `pyproject.toml`.
+
+### Changed
+
+- Root / SDK README, failure-mode catalog, failure & threat model: catalog-first
+  product story; demote envelope-field jargon and Gmail-as-flagship framing.
+- `pyproject.toml` package description updated for PyPI.
+- Release cadence policy documented in `sdk/docs/RELEASE.md`.
+
 ## 1.26.1 (2026-08-04)
 
 Patch: Gmail sent-log reconciler Message-ID canonicalization (strip + wrap

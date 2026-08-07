@@ -1,3 +1,6 @@
+# Tags + GitHub Release when sdk/pyproject.toml version is new on main.
+# Cadence policy (batch; calm over velocity): sdk/docs/RELEASE.md
+# — do not bump the version on every merge; accumulate, then cut one release.
 name: Release
 
 on:

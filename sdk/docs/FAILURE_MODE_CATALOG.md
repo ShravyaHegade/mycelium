@@ -1,13 +1,14 @@
 # Failure-mode catalog (AF-001…AF-009)
 
-Stable IDs used across the SDK README, handbook, and changelogs. Sourced from
-a GitHub-issue corpus across LangChain, LangGraph, CrewAI, AutoGen, Cline,
-OpenHands, and related stacks.
+**The taxonomy is the product story.** Mycelium is the reliability layer for AI
+agents; these IDs are the public promise. Stable across the SDK README,
+handbook, and changelogs. Sourced from a GitHub-issue corpus across LangChain,
+LangGraph, CrewAI, AutoGen, Cline, OpenHands, and related stacks.
 
 | ID | Failure mode | Mycelium surface |
 |----|--------------|------------------|
 | AF-001 | Hallucination cascade | (judgment / evals; not in SDK) |
-| AF-002 | Observability black hole | Transition envelope · ledgers · reconcile · receipts |
+| AF-002 | Observability black hole | Any tool / any provider: prove run-or-not · at-most-once (ledgers · reconcile · receipts; adapters are demos) |
 | AF-003 | Infinite reasoning loops | `loop_guard:` / `@loop_guard` |
 | AF-004 | Tool misuse | `@bounded` · `ToolRegistry` · `ToolRunner` |
 | AF-005 | Goal misalignment | (judgment / evals; not in SDK) |
@@ -50,6 +51,10 @@ spans/dashboards.
 **What users hit:** framework redispatch doubles a payment/email/write; crash
 mid-action with unknown commit; logs that cannot stand as auditor-verifiable
 proof.
+
+**Flagship promise:** any tool, any provider — prove run-or-not and enforce
+at-most-once. Provider adapters (e.g. Gmail sent-log) are demos of the
+`Reconciler` contract, not the product story.
 
 **Guards:** transition envelope · `ActionLedger` / `TaskLedger` · reconcile ·
 `StateFlush` · audit receipts · opt-in `on_args_drift` (identity-conflict).
@@ -173,6 +178,17 @@ mechanically enforceable. Complementary to dedicated prompt-injection products.
 
 ---
 
+## Next feature (not AF-010) — Budget enforcement
+
+**MUST:** cost / token / wall-clock budgets that hard-stop a runaway agent run.
+A reliability layer that cannot stop a $500 burn is missing its highest-leverage
+failure mode. Frameworks will not build this. **Do not assign AF-010 yet** —
+ship as `budget:` / `@budget_guard` (same pattern as loop / completion / scope).
+Loop guard (AF-003) ≠ spend budget. See product strengthening plan A4.0 and
+`notes/catalog/budget-enforcement.md`.
+
+---
+
 ## How to read the IDs
 
 - **AF-00N** = failure *class* from the corpus taxonomy, not a PyPI version.
@@ -181,3 +197,5 @@ mechanically enforceable. Complementary to dedicated prompt-injection products.
 - Ledger-core guarantees (AF-002 prevention) are spelled out in
   [FAILURE_AND_THREAT_MODEL.md](FAILURE_AND_THREAT_MODEL.md); other AF modules
   are optional guards documented in the SDK README.
+- **Budget enforcement** is the next shipped guard and is intentionally **not**
+  given an AF-00N id until the module lands.

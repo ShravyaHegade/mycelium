@@ -12,7 +12,7 @@ README is the source of truth for how the pieces are used; this file is the
 honest accounting of what can go wrong and which guarantee is pinned to which
 test.
 
-> Version note: this document tracks package **v1.26.0**. The ledger-core
+> Version note: this document tracks package **v1.26.2**. The ledger-core
 > guarantees below are unchanged; optional `loop_guard:` (AF-003),
 > `completion:` (AF-007), `scope_guard:` (AF-008), and `state_authority:` are
 > documented in the SDK README and are outside this core guarantee set.
@@ -23,27 +23,31 @@ test.
 
 ## A. Scope
 
-Mycelium's core promise is narrow and specific:
+Mycelium's core promise is narrow and specific (AF-002 flagship):
 
-> **When a side-effecting tool is configured with a durable ledger and a
-> transition binding, Mycelium prevents the same side effect from executing
-> twice on retry, crash, or concurrent redispatch.**
+> **Any tool, any provider: when a side-effecting tool is configured with a
+> durable ledger and a transition binding, Mycelium proves run-or-not and
+> enforces at-most-once on retry, crash, or concurrent redispatch.**
 
 "Prevent" means: at most one tool body run per transition, plus exactly one
 extra run per **provably not executed** verdict (an operator release
 `--verified not-executed` or a reconciler returning `NOT_EXECUTED`). The
 tool's *outcome* is decided by the transition state machine, never by
-blindly re-running the body.
+blindly re-running the body. Provider adapters (e.g. Gmail sent-log) are
+demos of the `Reconciler` contract, not a separate product promise.
 
 This document is **explicitly out of scope** for:
 
 - **LLM hallucination, prompt injection, or "is the operator *allowed* to
   release this?"** — see [release authority](../README.md#operator-runbook-your-agent-hard-blocked)
   for the honesty model (`--by` is an audit stamp, not authentication).
-- Budget / runaway-loop control *unless* optional `loop_guard:` (AF-003) is
-  configured — that guard halts consecutive identical action hashes across
-  distinct `tool_call_id`s. Without it, a tool that legitimately runs 1,000
-  times under 1,000 distinct transition keys is *not* treated as a duplicate.
+- **Spend / time budget enforcement** — not yet shipped. Optional `loop_guard:`
+  (AF-003) only halts consecutive identical action hashes across distinct
+  `tool_call_id`s; it is **not** a cost or wall-clock ceiling. A tool that
+  legitimately runs 1,000 different calls can still burn unbounded USD.
+  **Planned MUST NEXT** (product strengthening A4.0 / `budget:` guard — not
+  AF-010): host-declared cost/token/duration ceilings with deterministic
+  hard-block. Until that ships, runaway spend is a documented gap.
 - **Premature “done” / incomplete checklists** *unless* optional
   `completion:` (AF-007) is configured — the ledger does not gate run-exit.
   With `completion:`, unmarked **required** subtasks refuse terminal;
@@ -155,11 +159,11 @@ section; the tests are concrete `file::test_name` entries.
     mid-call hard-blocks instead of double-spending.
     *Where:* [Marking the side-effect boundary](../README.md#marking-the-side-effect-boundary-side_effect).
 
-11. **Gmail reconciler is conservative about indexing lag.** 0 or 2+ sent-log
+11. **Demo Gmail adapter is conservative about indexing lag.** 0 or 2+ sent-log
     matches → `UNKNOWN` (hard-block, operator release); exactly 1 → `COMPLETED`;
     missing ref → `UNKNOWN`. Zero matches is "not yet visible," never a blind
-    `NOT_EXECUTED`.
-    *Where:* [Gmail sent-log reconciler](../README.md#gmail-sent-log-reconciler-gmailreconciler).
+    `NOT_EXECUTED`. Same fail-closed rule every `Reconciler` should follow.
+    *Where:* [Demo adapter: Gmail sent-log](../README.md#demo-adapter-gmail-sent-log-gmailreconciler).
 
 12. **Operator release is one-shot and fail-closed.** `--verified not-executed`
     grants **exactly one** re-execution; `--verified completed` returns the
@@ -212,10 +216,12 @@ than the code makes.
   (`ToolBoundaryError` / `LedgerHardBlockError`). Default-off contract pinned by
   `tests/test_mengchheang_public_repro.py::test_semantic_identity`; opt-in by
   `tests/test_args_drift.py`.
-- **Budget / runaway loops (without `loop_guard:`).** If a caller produces many
+- **Budget / runaway spend (not yet shipped).** If a caller produces many
   distinct transition keys, the ledger does not stop the calls. Optional
   AF-003 `loop_guard:` halts consecutive identical *action* hashes (tool + args)
-  across new dispatch ids; it is not a general spend budget.
+  across new dispatch ids; it is **not** a general spend/time budget. Unbounded
+  USD/token/wall-clock burn remains a residual risk until the planned `budget:`
+  guard lands (strengthening plan A4.0 — not AF-010).
 - **Premature terminal (without `completion:`).** The ledger does not stop an
   agent from emitting “done” with unfinished work. Optional AF-007
   `completion:` refuses terminal when **required** checklist ids are still
@@ -269,7 +275,7 @@ are cited once. "Where documented" links the README section.
 | Resolution gate matrix (POLL / RETURN / ALLOW / HARD_BLOCK / reconcile) | README § [Resolution gates](../README.md#resolution-gates) | `test_conformance_tsc007.py` (5 cases) · `test_side_effect_resolution.py::test_resolve_side_effect_gate_matrix` · `test_read_only_resolution.py::test_resolve_read_only_gate_matrix` |
 | Reconciliation fail-closed | README § [Reconciling automatically](../README.md#reconciling-automatically-reconciler) | `test_reconcile.py::test_reconcile_failure_is_fail_closed` · `test_reconcile.py::test_reconcile_skipped_without_external_ref` · `test_reconcile.py::test_reconcile_unknown_hard_blocks` · `test_outage_redis_postgres.py::test_mid_reconcile_storage_outage_fail_closed` |
 | Boundary classification + monotonic, durable `maybe_crossed` | README § [Marking the side-effect boundary](../README.md#marking-the-side-effect-boundary-side_effect) | `test_side_effect_boundary.py::test_advance_boundary_is_monotonic` · `test_side_effect_boundary.py::test_side_effect_marks_maybe_crossed_midflight` · `test_side_effect_boundary.py::test_exception_inside_side_effect_marks_unknown_and_hard_blocks` · `test_side_effect_boundary.py::test_exception_before_marker_is_failed_before_effect` · `test_side_effect_boundary.py::test_mark_crossed_then_exception_is_failed_after_effect` · `test_side_effect_boundary.py::test_async_side_effect_marks_unknown_on_error` |
-| Gmail reconciler matrix (0/1/2+/missing ref + Message-ID canonicalize) | README § [Gmail sent-log reconciler](../README.md#gmail-sent-log-reconciler-gmailreconciler) | `test_gmail_reconciler.py::test_zero_matches_returns_unknown` · `test_gmail_reconciler.py::test_one_match_returns_completed_with_canonical_receipt` · `test_gmail_reconciler.py::test_two_matches_returns_unknown` · `test_gmail_reconciler.py::test_missing_external_operation_ref_returns_unknown` · `test_gmail_reconciler.py::test_empty_external_operation_ref_returns_unknown` · `test_gmail_reconciler.py::test_message_id_forms_share_query_and_receipt` |
+| Demo Gmail adapter matrix (0/1/2+/missing ref + Message-ID canonicalize) | README § [Demo adapter: Gmail sent-log](../README.md#demo-adapter-gmail-sent-log-gmailreconciler) | `test_gmail_reconciler.py::test_zero_matches_returns_unknown` · `test_gmail_reconciler.py::test_one_match_returns_completed_with_canonical_receipt` · `test_gmail_reconciler.py::test_two_matches_returns_unknown` · `test_gmail_reconciler.py::test_missing_external_operation_ref_returns_unknown` · `test_gmail_reconciler.py::test_empty_external_operation_ref_returns_unknown` · `test_gmail_reconciler.py::test_message_id_forms_share_query_and_receipt` |
 | Operator release one-shot + fail-closed | README § [Operator runbook](../README.md#operator-runbook-your-agent-hard-blocked) | `test_operator_release.py::test_release_is_one_shot` · `test_operator_release.py::test_release_not_executed_grants_exactly_one_reexecution` · `test_operator_release.py::test_release_completed_returns_result_without_reexecution` · `test_operator_release.py::test_release_refused_while_lease_held_allowed_once_expired` · `test_operator_release.py::test_release_refused_on_completed_and_unknown_request` · `test_operator_release.py::test_keyed_mutate_still_enforces_provider_key_after_release` |
 | Release stamps the record (never deleted) | README § [Operator runbook](../README.md#operator-runbook-your-agent-hard-blocked) | `test_operator_release.py::test_release_not_executed_grants_exactly_one_reexecution` (asserts `operator_resolution`/`resolved_by`) · `test_operator_release.py::test_postgres_release_not_executed_round_trip` |
 | Release emits signed audit receipts when configured | README § [Operator runbook](../README.md#operator-runbook-your-agent-hard-blocked) | `test_operator_release.py::test_release_emits_audit_receipt_when_emitter_configured` · `test_audit_receipt.py::test_emitter_signs_and_verifies_tool_receipt` · `test_audit_receipt.py::test_tampered_receipt_fails_verification` |
@@ -297,7 +303,7 @@ Still can go wrong — even with everything above configured correctly:
 - **A reconciler that lies.** If your reconciler returns `NOT_EXECUTED` for an
   effect that actually happened, the runtime re-executes once. Reconcilers are
   read-only *by contract*; verify them with the same care as the tools
-  themselves. The Gmail reconciler's conservative "0 matches → UNKNOWN" is the
+  themselves. The demo Gmail adapter's conservative "0 matches → UNKNOWN" is the
   model to copy.
 - **No death-signal opt-in.** `reclaim_requires_death_signal` defaults off, so
   reclaim/release proceeds on lease expiry even if the worker is merely paused
@@ -308,7 +314,7 @@ Still can go wrong — even with everything above configured correctly:
   hard-blocks or waits on a reconciler. Safe (no second effect), but the
   operation may park for an operator.
 - **Provider indexing lag.** A reconciler that treats "not visible" as "never
-  happened" would allow a duplicate. The shipped Gmail reconciler returns
+  happened" would allow a duplicate. The demo Gmail adapter returns
   `UNKNOWN` on 0 matches; third-party reconcilers must do the same.
 - **Caller tweaking "fluff" args to escape the key.** Mycelium's compound key
   cannot, on its own, distinguish a real field change from an evasion. The
