@@ -8,6 +8,24 @@ opposite of the product story.
 
 ---
 
+## Why this policy exists (honest)
+
+Through mid-2026 Mycelium cut a high volume of package versions while landing
+the AF-00N catalog (on the order of **~26 MINOR bumps in ~3.5 months**). That
+pace answered “are you building?” and failed the trust test for a reliability
+layer: a thrashy changelog looks unstable.
+
+**Fixing that is operational discipline, not a new SDK feature.** We keep
+shipping code to `main`; we stop treating every merge as a PyPI event.
+Semantic versioning applies only when a cut has **real user-facing change**
+(behavior, API, packaging). Docs-only and positioning wait for the next real
+batch. Quiet weeks with no PyPI cut are healthy.
+
+Company milestone ≠ release count. One public production user on payment /
+consequential tools beats the whole version arithmetic.
+
+---
+
 ## Cadence rules (must follow)
 
 1. **Batch by default.** Merge work to `main` without bumping
@@ -24,11 +42,18 @@ opposite of the product story.
 5. **Version bump = intentional release.** The only signal that tags/publishes
    is a new version in `sdk/pyproject.toml` (plus matching `CHANGELOG.md`).
    Merging without a bump publishes nothing — use that.
-6. **Hotfix exception:** production-breaking ledger/reconcile bug or security
+6. **Semver on real change only.**
+   - **PATCH** — bugfixes, proofs, packaging, docs that ship *with* a real
+     fix batch (no new schema/policy concepts).
+   - **MINOR** — new backward-compatible durable fields or resolution
+     behavior (batch several related landings into one MINOR when possible).
+   - **MAJOR** — breaking defaults or removed paths.
+   Do **not** mint a MINOR per merged feature PR. That is how ~26 minors
+   happens.
+7. **Hotfix exception:** production-breaking ledger/reconcile bug or security
    issue → ship a focused PATCH immediately; still one cut, clear notes, no
    pile-on features in the same tag.
 
-Semver still applies (`notes/rules.md` / AGENTS.md): PATCH / MINOR / MAJOR.
 Cadence is orthogonal to semver — batch *what* goes into each bump.
 
 ---
