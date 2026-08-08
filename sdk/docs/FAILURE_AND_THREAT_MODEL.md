@@ -12,8 +12,8 @@ README is the source of truth for how the pieces are used; this file is the
 honest accounting of what can go wrong and which guarantee is pinned to which
 test.
 
-> Version note: this document tracks package **v2.0.0**. Ledger-core
-> guarantees below hold; **v2.0.0** makes `on_args_drift: soft` the default
+> Version note: this document tracks package **v1.28.0**. Ledger-core
+> guarantees below hold; **v1.28.0** makes `on_args_drift: soft` the default
 > (identity-conflict refuse). Optional `loop_guard:` (AF-003),
 > `completion:` (AF-007), `scope_guard:` (AF-008), and `state_authority:` are
 > documented in the SDK README and are outside this core guarantee set.

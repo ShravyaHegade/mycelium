@@ -5,14 +5,13 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
 
 ## Unreleased
 
-## 2.0.0 (2026-08-08)
+## 1.28.0 (2026-08-08)
 
-MAJOR: fail-closed by default — `@bounded` can express list/dict args, and
+MINOR: fail-closed defaults — `@bounded` can express list/dict args, and
 same dispatch ticket + different args is refused unless you explicitly opt
-out. Pre-PMF blast radius is near zero; one coherent story instead of three
-awkward bumps.
+out. Batched as one coherent cut (Honey / langchain#39150).
 
-### Breaking
+### Changed
 
 - **`action_ledger.on_args_drift` default is `soft`** (was `off`). Same
   `request_id` / `tool_call_id` with different tool args raises
@@ -20,6 +19,10 @@ awkward bumps.
   `on_args_drift: hard` to freeze for a human, or `off` for the old
   "new args = new transition" escape hatch. Pinned by
   `tests/test_args_drift.py::test_default_is_soft_not_off`.
+- `mycelium init` template scaffolds `on_args_drift: soft`.
+- Provider idempotency-key kwargs are excluded from the args-drift
+  fingerprint (same as transition-key derivation) so the dedicated
+  provider-key gate still owns key mismatches.
 
 ### Added
 
@@ -35,13 +38,6 @@ awkward bumps.
 - **`@bounded` bind failures:** undeclared kwargs / bind `TypeError` →
   `ToolBoundaryError` (`unexpected_kwarg` / `missing_required_field`), not a
   raw Python crash.
-
-### Changed
-
-- `mycelium init` template scaffolds `on_args_drift: soft`.
-- Provider idempotency-key kwargs are excluded from the args-drift
-  fingerprint (same as transition-key derivation) so the dedicated
-  provider-key gate still owns key mismatches.
 
 ## 1.27.0 (2026-08-07)
 
