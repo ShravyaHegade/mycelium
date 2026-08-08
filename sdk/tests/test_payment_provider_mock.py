@@ -182,7 +182,8 @@ def _seed_crashed_charge(
         LedgerEntry(
             request_id=derived,
             tool="charge",
-            args=[10.0],
+            # Match decorator call shape: charge(amount=10.0, tool_call_id="c1")
+            args=[],
             kwargs={"amount": 10.0, "tool_call_id": "c1"},
             status="in-flight",
             terminal_outcome=TerminalOutcome.IN_FLIGHT.value,
@@ -286,7 +287,7 @@ def test_reconcile_canceled_or_missing_grants_one_recharge(storage) -> None:
                 LedgerEntry(
                     request_id=derived,
                     tool="charge",
-                    args=[10.0],
+                    args=[],
                     kwargs={"amount": 10.0, "tool_call_id": "c1"},
                     status="in-flight",
                     terminal_outcome=TerminalOutcome.IN_FLIGHT.value,

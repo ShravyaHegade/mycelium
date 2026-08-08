@@ -162,6 +162,7 @@ def _pydantic_error_to_boundary(
 
 
 def _bind_kwargs_for_schema(
+    tool_name: str,
     schema: type[BaseModel],
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
@@ -172,9 +173,82 @@ def _bind_kwargs_for_schema(
         for name in field_names
     ]
     sig = inspect.Signature(params)
-    bound = sig.bind_partial(*args, **kwargs)
+    try:
+        bound = sig.bind_partial(*args, **kwargs)
+    except TypeError as exc:
+        raise _bind_type_error_to_boundary(tool_name, exc, field_names) from exc
     bound.apply_defaults()
     return {name: bound.arguments[name] for name in field_names if name in bound.arguments}
+
+
+def _bind_type_error_to_boundary(
+    tool_name: str,
+    exc: TypeError,
+    field_names: list[str],
+) -> ToolBoundaryError:
+    """Convert inspect.bind TypeError into a recoverable ToolBoundaryError."""
+    msg = str(exc)
+    if "unexpected keyword argument" in msg:
+        # e.g. "got an unexpected keyword argument 'ids'"
+        field: str | None = None
+        marker = "unexpected keyword argument '"
+        if marker in msg:
+            start = msg.index(marker) + len(marker)
+            end = msg.find("'", start)
+            if end > start:
+                field = msg[start:end]
+        declared = ", ".join(field_names) if field_names else "(none)"
+        return _make_boundary_error(
+            tool_name,
+            "unexpected_kwarg",
+            [
+                f"Tool {tool_name!r} failed input validation.",
+                f"Field: {field}." if field else "Unexpected keyword argument.",
+                "Received an undeclared argument.",
+                f"Expected: one of [{declared}].",
+            ],
+            field=field,
+            expected=f"one of [{declared}]",
+            actual=field,
+            recovery_hint=(
+                f"Remove undeclared argument {field!r} or add it to the tool schema."
+                if field
+                else "Remove undeclared arguments or add them to the tool schema."
+            ),
+        )
+    if "missing a required argument" in msg or "missing a required keyword-only argument" in msg:
+        field = None
+        for token in ("argument '", "argument "):
+            if token in msg:
+                start = msg.rfind(token) + len(token)
+                rest = msg[start:].strip().strip("'\"")
+                field = rest.split()[0].rstrip("'\".,)") if rest else None
+                break
+        return _make_boundary_error(
+            tool_name,
+            "missing_required_field",
+            [
+                f"Tool {tool_name!r} failed input validation.",
+                f"Field: {field}." if field else "A required argument is missing.",
+                "Expected: a value for this field.",
+            ],
+            field=field,
+            expected="a value for this field",
+            recovery_hint=(
+                f"Provide {field} when calling {tool_name}."
+                if field
+                else f"Provide all required fields when calling {tool_name}."
+            ),
+        )
+    return _make_boundary_error(
+        tool_name,
+        "bind_failed",
+        [
+            f"Tool {tool_name!r} failed input validation.",
+            str(exc),
+        ],
+        recovery_hint=f"Fix the arguments and call {tool_name} again.",
+    )
 
 
 def _validate_input(tool_name: str, schema: type[BaseModel], raw: dict[str, Any]) -> None:
@@ -244,7 +318,7 @@ def _validate_before_call(
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
 ) -> None:
-    raw = _bind_kwargs_for_schema(config.input_schema, args, kwargs)
+    raw = _bind_kwargs_for_schema(tool_name, config.input_schema, args, kwargs)
     _validate_input(tool_name, config.input_schema, raw)
     _validate_scope(tool_name, raw, config)
 

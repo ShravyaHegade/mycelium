@@ -79,6 +79,7 @@ def _seed_ambiguous_payment(
     Returns the request_id that a ``@ledger_sync`` dispatch derives (seeded
     entries must use the same derived key to be seen by the gate).
     """
+    # Match decorator call shape: send_payment(10.0) → args=(10.0,), kwargs={}
     with execution_scope(_scope()):
         derived = ActionLedger(
             storage=InMemoryLedgerStorage()
@@ -90,8 +91,8 @@ def _seed_ambiguous_payment(
         LedgerEntry(
             request_id=rid,
             tool=tool_name,
-            args=[],
-            kwargs={"amount": 10},
+            args=[10.0],
+            kwargs={},
             status="in-flight",
             terminal_outcome=TerminalOutcome.IN_FLIGHT.value,
             lease_until=time.time() - 1,

@@ -12,8 +12,9 @@ README is the source of truth for how the pieces are used; this file is the
 honest accounting of what can go wrong and which guarantee is pinned to which
 test.
 
-> Version note: this document tracks package **v1.27.0**. The ledger-core
-> guarantees below are unchanged; optional `loop_guard:` (AF-003),
+> Version note: this document tracks package **v2.0.0**. Ledger-core
+> guarantees below hold; **v2.0.0** makes `on_args_drift: soft` the default
+> (identity-conflict refuse). Optional `loop_guard:` (AF-003),
 > `completion:` (AF-007), `scope_guard:` (AF-008), and `state_authority:` are
 > documented in the SDK README and are outside this core guarantee set.
 > AF-00N labels are defined in
@@ -210,13 +211,14 @@ than the code makes.
   guarantee — see `test_operator_release.py` for the one-shot/fail-closed
   semantics, and `test_audit_receipt.py::test_tampered_receipt_fails_verification`
   for tamper-evidence when receipts are enabled.)*
-- **Identity-conflict rejection (default off).** Same `request_id` /
-  `tool_call_id` + changed args = a *new* transition by default. Opt in with
-  `action_ledger.on_args_drift: soft|hard` to reject the mismatch within the
-  same run (`run_id` / `thread_id`; other runs isolated)
-  (`ToolBoundaryError` / `LedgerHardBlockError`). Default-off contract pinned by
-  `tests/test_mengchheang_public_repro.py::test_semantic_identity`; opt-in by
-  `tests/test_args_drift.py`.
+- **Identity-conflict rejection (default soft).** Same `request_id` /
+  `tool_call_id` + changed args → refuse the second body within the same run
+  (`run_id` / `thread_id`; other runs isolated): soft → `ToolBoundaryError`,
+  hard → `LedgerHardBlockError`. Transition keys still differ by args; set
+  `on_args_drift: off` for the old dual-execute escape hatch. Default soft
+  pinned by `tests/test_args_drift.py::test_default_is_soft_not_off`; key
+  split + `off` escape hatch by
+  `tests/test_mengchheang_public_repro.py::test_semantic_identity`.
 - **Budget / runaway spend (without `budget:`).** If a caller produces many
   distinct transition keys, the ledger does not stop the calls. Optional
   AF-003 `loop_guard:` halts consecutive identical *action* hashes (tool + args)

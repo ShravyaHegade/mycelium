@@ -891,7 +891,7 @@ class ActionLedger:
         audit_emitter: AuditReceiptEmitter | None = None,
         outcome_emitter: OutcomeEmitter | None = None,
         unclassified_policy: str = UNCLASSIFIED_POLICY_WARN,
-        on_args_drift: str = ARGS_DRIFT_OFF,
+        on_args_drift: str = ARGS_DRIFT_SOFT,
         reclaim_requires_death_signal: bool = False,
         presumed_dead_after: float | None = None,
     ) -> None:
@@ -925,8 +925,9 @@ class ActionLedger:
                 f"on_args_drift must be one of {sorted(ARGS_DRIFT_POLICIES)}, "
                 f"got {on_args_drift!r}"
             )
-        # Opt-in: same dispatch ticket (request_id / tool_call_id) with
-        # different tool args → soft ToolBoundaryError or hard LedgerHardBlockError.
+        # Default soft: same dispatch ticket (request_id / tool_call_id) with
+        # different tool args → ToolBoundaryError (hard → LedgerHardBlockError;
+        # off restores the old "new args = new transition" escape hatch).
         # Default off: same ticket + different args remains a new transition.
         self._on_args_drift = on_args_drift
         self._memory_warned_tools: set[str] = set()
@@ -998,10 +999,13 @@ class ActionLedger:
         *,
         request_id: str,
         existing: LedgerEntry | None,
+        binding: ToolTransitionBinding | None = None,
     ) -> None:
         """Block when the same dispatch ticket is reused with different args.
 
-        Default ``on_args_drift="off"`` is a no-op. When enabled:
+        Default ``on_args_drift="soft"`` refuses the second body (pitch:
+        corrupted upstream args must not double-execute). ``off`` is an
+        explicit escape hatch; ``hard`` freezes for a human.
 
         1. Same storage key (``request_id``) with a prior entry whose
            ``args_fingerprint`` differs → conflict.
@@ -1010,17 +1014,24 @@ class ActionLedger:
            but only within the same run isolation scope (``run_id``, else
            ``thread_id``). Other runs are ignored.
 
+        Provider idempotency-key kwargs are excluded from the fingerprint
+        (same as transition-key derivation) so the dedicated provider-key
+        gate can still hard-block a key mismatch.
+
         Soft raises :class:`ToolBoundaryError`; hard raises
         :class:`LedgerHardBlockError`.
         """
         if self._on_args_drift == ARGS_DRIFT_OFF:
             return
 
-        incoming_fp = args_fingerprint(args, kwargs)
+        exclude = _args_drift_exclude_keys(binding)
+        incoming_fp = _args_drift_fingerprint(args, kwargs, exclude=exclude)
         conflict: LedgerEntry | None = None
 
         if existing is not None:
-            stored_fp = args_fingerprint(tuple(existing.args), dict(existing.kwargs))
+            stored_fp = _args_drift_fingerprint(
+                tuple(existing.args), dict(existing.kwargs), exclude=exclude
+            )
             if stored_fp != incoming_fp:
                 conflict = existing
 
@@ -1041,8 +1052,8 @@ class ActionLedger:
                     entry_dispatch = derive_dispatch_id(entry_kwargs)
                     if entry_dispatch != dispatch_id:
                         continue
-                    stored_fp = args_fingerprint(
-                        tuple(entry.args), entry_kwargs
+                    stored_fp = _args_drift_fingerprint(
+                        tuple(entry.args), entry_kwargs, exclude=exclude
                     )
                     if stored_fp != incoming_fp:
                         conflict = entry
@@ -1981,7 +1992,12 @@ class ActionLedger:
         while True:
             existing = self.get(request_id)
             self._enforce_args_drift(
-                tool, args, kwargs, request_id=request_id, existing=existing
+                tool,
+                args,
+                kwargs,
+                request_id=request_id,
+                existing=existing,
+                binding=binding,
             )
             if existing is not None:
                 gate = resolve_side_effect_gate(
@@ -2194,7 +2210,12 @@ class ActionLedger:
         while True:
             existing = self.get(request_id)
             self._enforce_args_drift(
-                tool, args, kwargs, request_id=request_id, existing=existing
+                tool,
+                args,
+                kwargs,
+                request_id=request_id,
+                existing=existing,
+                binding=binding,
             )
             if existing is not None:
                 gate = resolve_side_effect_gate(
@@ -2903,6 +2924,27 @@ def _drop_ledger_keys(kwargs: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in kwargs.items() if k not in LEDGER_KWARG_KEYS}
 
 
+def _args_drift_exclude_keys(
+    binding: ToolTransitionBinding | None,
+) -> frozenset[str]:
+    """Keys omitted from args-drift fingerprints (provider-key gate owns these)."""
+    if binding is None or binding.provider_idempotency_key_param is None:
+        return frozenset()
+    return frozenset({binding.provider_idempotency_key_param})
+
+
+def _args_drift_fingerprint(
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    *,
+    exclude: frozenset[str],
+) -> str:
+    if not exclude:
+        return args_fingerprint(args, kwargs)
+    filtered = {key: value for key, value in kwargs.items() if key not in exclude}
+    return args_fingerprint(args, filtered)
+
+
 def _args_drift_scope_key(kwargs: dict[str, Any]) -> str | None:
     """Return ``run_id`` or fallback ``thread_id`` for args-drift isolation."""
     scope = get_active_execution_scope()
@@ -3385,7 +3427,7 @@ def ledger(
     reconciler: Reconciler | None = None,
     defer_read_only_unknown: bool = False,
     unclassified_policy: str = UNCLASSIFIED_POLICY_WARN,
-    on_args_drift: str = ARGS_DRIFT_OFF,
+    on_args_drift: str = ARGS_DRIFT_SOFT,
     reclaim_requires_death_signal: bool = False,
     presumed_dead_after: float | None = None,
 ) -> Callable[[Callable[P, Awaitable[R]]], Callable[P, Awaitable[R]]]:
@@ -3454,7 +3496,7 @@ def ledger_sync(
     reconciler: Reconciler | None = None,
     defer_read_only_unknown: bool = False,
     unclassified_policy: str = UNCLASSIFIED_POLICY_WARN,
-    on_args_drift: str = ARGS_DRIFT_OFF,
+    on_args_drift: str = ARGS_DRIFT_SOFT,
     reclaim_requires_death_signal: bool = False,
     presumed_dead_after: float | None = None,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:

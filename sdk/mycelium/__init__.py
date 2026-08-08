@@ -126,6 +126,7 @@ from mycelium.outcome_emit import (
 from mycelium.protect import protect, protect_sync
 from mycelium.providers import GmailReconciler, canonicalize_message_id
 from mycelium.reconcile import Reconciler, ReconcileResult, ReconcileStatus
+from mycelium.schema import SchemaBuildError
 from mycelium.scope_guard import (
     ON_VIOLATION_HARD,
     ON_VIOLATION_SOFT,
@@ -396,6 +397,7 @@ __all__ = [
     "state_authority_sync",
     "bounded",
     "bounded_sync",
+    "SchemaBuildError",
     "ToolBoundaryError",
     "ToolBoundaryExhaustedError",
     "tool_error_message",

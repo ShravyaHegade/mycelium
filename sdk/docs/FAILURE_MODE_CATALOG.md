@@ -57,7 +57,8 @@ at-most-once. Provider adapters (e.g. Gmail sent-log) are demos of the
 `Reconciler` contract, not the product story.
 
 **Guards:** transition envelope · `ActionLedger` / `TaskLedger` · reconcile ·
-`StateFlush` · audit receipts · opt-in `on_args_drift` (identity-conflict).
+`StateFlush` · audit receipts · default-on `on_args_drift` (identity-conflict;
+default `soft`).
 See the [SDK README](../README.md) and
 [failure & threat model](FAILURE_AND_THREAT_MODEL.md).
 

@@ -1,6 +1,6 @@
 # Mycelium
 
-[![PyPI version](https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&release=1.27.0)](https://pypi.org/project/mycelium-runtime/)
+[![PyPI version](https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&release=2.0.0)](https://pypi.org/project/mycelium-runtime/)
 [![Python](https://img.shields.io/pypi/pyversions/mycelium-runtime.svg)](https://pypi.org/project/mycelium-runtime/)
 [![Downloads](https://static.pepy.tech/badge/mycelium-runtime)](https://pepy.tech/project/mycelium-runtime)
 
@@ -10,7 +10,7 @@ Wrong answers are recoverable. Wrong actions are expensive. Mycelium sits betwee
 
 Not recovery after. Not tracing or dashboards. Prevention at the tool boundary.
 
-*Early but API-stable (**v1.27.0**): breaking changes only at major versions. The catalog grows; the promise stays.*
+*Early but API-stable (**v2.0.0**): breaking changes only at major versions. The catalog grows; the promise stays.*
 
 ## The promise — failure-mode catalog (AF-00N)
 
@@ -56,7 +56,7 @@ Mycelium wraps tool calls after the LLM returns `tool_calls` and returns a verdi
 - **AF-006 Context corruption** — `@protect` / Session · optional message/history validation
 - **AF-007 Premature termination** — `completion:` host checklist · refuse or warn-and-allow
 - **AF-008 Scope escalation** — `scope_guard:` freeze allowlist · re-check every step
-- **AF-002 Args drift** — optional `on_args_drift: soft|hard` for same call id, different args
+- **AF-002 Args drift** — default `on_args_drift: soft` (same call id, different args refused; `hard` / `off` opt-in)
 - **State authority** — refuse decisions from superseded checkpoints before claim
 - **DTTR telemetry** — opt-in `OutcomeEmitter` so the no-double-execute guarantee is observable
 

@@ -163,3 +163,121 @@ async def test_output_validation_blocks_bad_return() -> None:
 
     assert exc.value.violation == "output_validation_failed"
     assert calls == 1
+
+
+# --- Honey / langchain#39150 shapes: array + object + bind failures ---
+
+TOOL_USE_IDS_SCHEMA = {
+    "ids": {
+        "type": "array",
+        "items": {"type": "integer"},
+        "required": True,
+    },
+}
+
+TOOL_USE_INPUT_SCHEMA = {
+    "input": {"type": "object", "required": True},
+}
+
+
+async def test_bounded_accepts_array_of_integers() -> None:
+    """Honey shape: {"type": "tool_use", "input": {"ids": [1,2,3]}}."""
+    calls = 0
+
+    @bounded(schema=TOOL_USE_IDS_SCHEMA)
+    async def tool_use(ids: list[int]) -> dict:
+        nonlocal calls
+        calls += 1
+        return {"ids": ids}
+
+    assert await tool_use(ids=[1, 2, 3]) == {"ids": [1, 2, 3]}
+    assert calls == 1
+
+
+async def test_bounded_rejects_array_item_type_mismatch() -> None:
+    calls = 0
+
+    @bounded(schema=TOOL_USE_IDS_SCHEMA)
+    async def tool_use(ids: list[int]) -> dict:
+        nonlocal calls
+        calls += 1
+        return {"ids": ids}
+
+    with pytest.raises(ToolBoundaryError) as exc:
+        await tool_use(ids=["a", "b"])
+
+    assert calls == 0
+    assert exc.value.tool_name == "tool_use"
+    assert exc.value.field is not None and exc.value.field.startswith("ids")
+
+
+async def test_bounded_accepts_object_field() -> None:
+    @bounded(schema=TOOL_USE_INPUT_SCHEMA)
+    async def tool_use(input: dict) -> dict:
+        return input
+
+    payload = {"ids": [1, 2, 3]}
+    assert await tool_use(input=payload) == payload
+
+
+async def test_bounded_accepts_array_of_objects() -> None:
+    schema = {
+        "rows": {
+            "type": "array",
+            "items": {"type": "object"},
+            "required": True,
+        }
+    }
+
+    @bounded(schema=schema)
+    async def batch_write(rows: list[dict]) -> dict:
+        return {"n": len(rows)}
+
+    assert await batch_write(rows=[{"a": 1}, {"b": 2}]) == {"n": 2}
+
+
+async def test_unknown_schema_type_raises_at_decoration_time() -> None:
+    from mycelium.schema import SchemaBuildError
+
+    with pytest.raises(SchemaBuildError, match="unknown type 'sting'"):
+
+        @bounded(schema={"name": {"type": "sting", "required": True}})
+        async def bad_tool(name: str) -> dict:
+            return {"name": name}
+
+
+async def test_undeclared_kwarg_is_tool_boundary_error() -> None:
+    calls = 0
+
+    @bounded(schema=FETCH_CUSTOMER_SCHEMA)
+    async def fetch_customer(customer_id: str) -> dict:
+        nonlocal calls
+        calls += 1
+        return {"customer_id": customer_id}
+
+    with pytest.raises(ToolBoundaryError) as exc:
+        await fetch_customer(customer_id="c1", ids=[1, 2, 3])
+
+    assert isinstance(exc.value, ToolBoundaryError)
+    assert not isinstance(exc.value, TypeError)
+    assert exc.value.violation == "unexpected_kwarg"
+    assert exc.value.field == "ids"
+    assert "ids" in exc.value.llm_message
+    assert calls == 0
+
+
+async def test_required_missing_is_tool_boundary_error_not_type_error() -> None:
+    calls = 0
+
+    @bounded(schema=TOOL_USE_IDS_SCHEMA)
+    async def tool_use(ids: list[int]) -> dict:
+        nonlocal calls
+        calls += 1
+        return {"ids": ids}
+
+    with pytest.raises(ToolBoundaryError) as exc:
+        await tool_use()
+
+    assert exc.value.violation == "missing_required_field"
+    assert exc.value.field == "ids"
+    assert calls == 0

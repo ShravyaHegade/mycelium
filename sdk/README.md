@@ -1,9 +1,9 @@
 # Mycelium runtime
 
-[![PyPI version](https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&release=1.27.0)](https://pypi.org/project/mycelium-runtime/)
+[![PyPI version](https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&release=2.0.0)](https://pypi.org/project/mycelium-runtime/)
 [![Python](https://img.shields.io/pypi/pyversions/mycelium-runtime.svg)](https://pypi.org/project/mycelium-runtime/)
 
-**The reliability layer for AI agents** — installable as `mycelium-runtime` **v1.27.0**.
+**The reliability layer for AI agents** — installable as `mycelium-runtime` **v2.0.0**.
 
 The public story is the [failure-mode catalog](docs/FAILURE_MODE_CATALOG.md) (**AF-001…AF-009**): each ID is a real runtime failure class; each shipped surface is a deterministic guard. The taxonomy is the product promise; envelope fields and gates are how AF-002 is implemented underneath.
 
@@ -65,7 +65,7 @@ Mycelium sits between your agent loop and your tools (after the LLM returns `too
 | **Opt-in** | **AF-006 Context corruption** | TTL cache (`@protect` / `Session`); optional `MessageValidator` / `HistoryGuard` before the next LLM turn |
 | **Opt-in** | **AF-007 Premature termination** | `completion:` — host checklist; unmarked **required** → refuse terminal; unmarked **optional** → warn and allow |
 | **Opt-in** | **AF-008 Scope escalation** | `scope_guard:` — freeze run tool allowlist; re-check every step; mid-run / handoff widen → `ToolBoundaryError` |
-| **Opt-in** | **AF-002 Args drift** | `action_ledger.on_args_drift: soft\|hard` — same call id + different args within a run (default `off`) |
+| **Default-on** | **AF-002 Args drift** | `action_ledger.on_args_drift` — same call id + different args within a run (default `soft`; `hard` / `off` opt-in) |
 | **Opt-in** | **Superseded state** | `state_authority:` — freeze `state_ref` at decide time; compare to host canonical ref before claim |
 
 Envelope field stack (`side_effect_class` → spendability → boundary → …) is documented under [Transition envelope fields](#transition-envelope-fields) — implementation detail for AF-002, not the product headline.
@@ -504,32 +504,36 @@ args + `side_effect_class` + policy version — not `request_id` alone (or
 | Same `request_id` + same args | → | Same key — deduplicated, replayed, or polled as usual |
 | Same `request_id` + **changed** args | → | **Different** key — the tool may execute again |
 
-This is **intentional by default**: `request_id` / `tool_call_id` records
-*which dispatch ticket* the framework sent; it does not mean *what the tool
-is supposed to do*. Two dispatches with the same ticket but different
-instructions are different operations, not a conflict — unless you opt in.
+Transition keys still encode args (same ticket + different args → different
+key). **By default Mycelium also refuses the second body** so a corrupted
+upstream redispatch cannot double-execute.
 
-**Opt-in identity-conflict / args-drift gate (AF-002):** set
-`action_ledger.on_args_drift` to `soft` or `hard` (default `off`). Mycelium
-compares claim-time `args_fingerprint` to prior entries for the same dispatch
-ticket (same storage key, or same ticket under a different transition key),
-scoped to the same run (`run_id`, else `thread_id`) — other runs are isolated.
-Soft → `ToolBoundaryError`; hard → `LedgerHardBlockError`. Same ticket + same
-args still idempotently returns.
+**Args-drift / identity-conflict gate (AF-002):** default
+`action_ledger.on_args_drift: soft`. Mycelium compares claim-time
+`args_fingerprint` to prior entries for the same dispatch ticket (same storage
+key, or same ticket under a different transition key), scoped to the same run
+(`run_id`, else `thread_id`) — other runs are isolated. Soft →
+`ToolBoundaryError` (loop can retry with original args or a new ticket); hard →
+`LedgerHardBlockError` (freeze for a human); `off` → escape hatch restoring
+"new args = new transition" dual execution. Same ticket + same args still
+idempotently returns.
 
 ```yaml
 action_ledger:
-  on_args_drift: hard   # off | soft | hard
+  on_args_drift: soft   # soft (default) | hard | off
 ```
 
 ```python
-@ledger_sync(storage=storage, transition_binding=binding, on_args_drift="hard")
+@ledger_sync(storage=storage, transition_binding=binding)  # soft by default
 def charge(amount: int) -> int: ...
+
+@ledger_sync(storage=storage, transition_binding=binding, on_args_drift="hard")
+def charge_strict(amount: int) -> int: ...
 ```
 
-The default-off contract is pinned in
-`tests/test_mengchheang_public_repro.py::test_semantic_identity`; the opt-in
-gate is covered by `tests/test_args_drift.py`:
+Default soft is pinned by `tests/test_args_drift.py::test_default_is_soft_not_off`.
+Key split + the `off` escape hatch are covered by
+`tests/test_mengchheang_public_repro.py::test_semantic_identity`:
 
 ```python
 kwargs_a = {"amount": 10, "request_id": "intent-1"}
@@ -537,7 +541,8 @@ kwargs_b = {"amount": 11, "request_id": "intent-1"}
 key_a = derive_transition_key_for_call("charge", (), kwargs_a, _BINDING)
 key_b = derive_transition_key_for_call("charge", (), kwargs_b, _BINDING)
 assert key_a != key_b       # changed args → different key
-assert executions == [10, 11]  # both calls execute when on_args_drift is off
+# default soft: second body raises ToolBoundaryError (does not run)
+# on_args_drift="off": both execute (escape hatch)
 ```
 
 ### Resolution gates
@@ -1200,7 +1205,7 @@ action_ledger:
   storage: redis
   url_env: MYCELIUM_REDIS_URL
   unclassified_policy: strict
-  # on_args_drift: hard   # off (default) | soft | hard — identity-conflict gate
+  on_args_drift: soft   # soft (default) | hard | off — identity-conflict gate
 ```
 
 When `transition:` is configured and a side-effecting tool uses memory storage, a one-time warning is emitted at YAML load time — the duplicate-side-effect guard only holds within the process.

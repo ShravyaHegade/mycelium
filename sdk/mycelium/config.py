@@ -16,8 +16,8 @@ from typing import Any
 import yaml
 
 from mycelium.action_ledger import (
-    ARGS_DRIFT_OFF,
     ARGS_DRIFT_POLICIES,
+    ARGS_DRIFT_SOFT,
     UNCLASSIFIED_POLICY_WARN,
     FileLedgerStorage,
     InMemoryLedgerStorage,
@@ -466,7 +466,7 @@ class MyceliumConfig:
                 "unclassified_policy", UNCLASSIFIED_POLICY_WARN
             )
             ledger_kwargs["unclassified_policy"] = unclassified_policy
-            on_args_drift = action_ledger_cfg.get("on_args_drift", ARGS_DRIFT_OFF)
+            on_args_drift = action_ledger_cfg.get("on_args_drift", ARGS_DRIFT_SOFT)
             if on_args_drift not in ARGS_DRIFT_POLICIES:
                 raise ConfigError(
                     "'action_ledger.on_args_drift' must be one of "

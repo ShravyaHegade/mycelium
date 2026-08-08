@@ -32,6 +32,7 @@ from typing import Any
 import pytest
 
 from mycelium import (
+    ARGS_DRIFT_OFF,
     InMemoryLedgerStorage,
     LedgerEntry,
     ReconcileResult,
@@ -60,11 +61,20 @@ _BINDING = ToolTransitionBinding.for_tool(
 
 
 def test_semantic_identity() -> None:
-    """Same caller request_id + changed args → different transition key."""
+    """Same caller request_id + changed args → different transition key.
+
+    Key split is intentional. Dual execution requires the explicit
+    ``on_args_drift=off`` escape hatch (default is now soft — see
+    ``test_args_drift.py``).
+    """
     storage = InMemoryLedgerStorage()
     executions: list[int] = []
 
-    @ledger_sync(storage=storage, transition_binding=_BINDING)
+    @ledger_sync(
+        storage=storage,
+        transition_binding=_BINDING,
+        on_args_drift=ARGS_DRIFT_OFF,
+    )
     def charge(amount: int) -> int:
         executions.append(amount)
         return amount
@@ -79,7 +89,7 @@ def test_semantic_identity() -> None:
     # Same caller request_id, but keys differ because args differ
     assert key_a != key_b, "changed args should produce different transition key"
     assert executions == [10, 11], (
-        f"both calls should execute, got {executions}"
+        f"both calls should execute under on_args_drift=off, got {executions}"
     )
 
 

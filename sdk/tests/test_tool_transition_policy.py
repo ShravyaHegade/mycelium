@@ -84,12 +84,13 @@ tools:
     assert binding is not None
 
     request_id = "pay-retry"
+    claim_kwargs = {"amount": 1.0}
     storage.set(
         LedgerEntry(
             request_id=request_id,
             tool="send_payment",
             args=[],
-            kwargs={},
+            kwargs=dict(claim_kwargs),
             status="failed",
             terminal_outcome=TerminalOutcome.FAILED_BEFORE_EFFECT.value,
             side_effect_boundary=SideEffectBoundary.NOT_CROSSED.value,
@@ -101,7 +102,7 @@ tools:
         request_id,
         "send_payment",
         (),
-        {"amount": 1.0},
+        claim_kwargs,
         binding,
     )
     assert claimed.terminal_outcome == TerminalOutcome.IN_FLIGHT.value

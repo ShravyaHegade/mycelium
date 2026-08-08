@@ -392,7 +392,7 @@ def test_keyed_mutate_blocks_different_key_without_release(storage) -> None:
             request_id="req-keyed",
             tool="charge",
             args=[],
-            kwargs={"amount": 5.0},
+            kwargs={"amount": 5.0, "idempotency_key": "key-1"},
             status="failed",
             terminal_outcome=TerminalOutcome.FAILED_BEFORE_EFFECT.value,
             side_effect_boundary=SideEffectBoundary.NOT_CROSSED.value,

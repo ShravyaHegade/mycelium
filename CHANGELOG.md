@@ -5,6 +5,44 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
 
 ## Unreleased
 
+## 2.0.0 (2026-08-08)
+
+MAJOR: fail-closed by default — `@bounded` can express list/dict args, and
+same dispatch ticket + different args is refused unless you explicitly opt
+out. Pre-PMF blast radius is near zero; one coherent story instead of three
+awkward bumps.
+
+### Breaking
+
+- **`action_ledger.on_args_drift` default is `soft`** (was `off`). Same
+  `request_id` / `tool_call_id` with different tool args raises
+  `ToolBoundaryError` and the tool body does **not** run. Set
+  `on_args_drift: hard` to freeze for a human, or `off` for the old
+  "new args = new transition" escape hatch. Pinned by
+  `tests/test_args_drift.py::test_default_is_soft_not_off`.
+
+### Added
+
+- **`@bounded` array / object schema types:** `{"type": "array", "items": …}`
+  and `{"type": "object"}` (optional `additional_properties`) compile
+  recursively; unknown type names raise `SchemaBuildError` at decorate time
+  (no silent fallback to `str`). Type-aware `pattern` / `min_length` /
+  `max_length`. Honey / langchain#39150 shapes covered in
+  `tests/test_schema.py` + `tests/test_tool_boundary.py`.
+
+### Fixed
+
+- **`@bounded` bind failures:** undeclared kwargs / bind `TypeError` →
+  `ToolBoundaryError` (`unexpected_kwarg` / `missing_required_field`), not a
+  raw Python crash.
+
+### Changed
+
+- `mycelium init` template scaffolds `on_args_drift: soft`.
+- Provider idempotency-key kwargs are excluded from the args-drift
+  fingerprint (same as transition-key derivation) so the dedicated
+  provider-key gate still owns key mismatches.
+
 ## 1.27.0 (2026-08-07)
 
 MINOR: budget enforcement (not AF-010) — run-level cost/time/step ceilings

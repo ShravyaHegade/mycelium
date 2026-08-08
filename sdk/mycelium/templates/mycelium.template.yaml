@@ -88,9 +88,10 @@ action_ledger:
   path: ./mycelium-ledger.json
   # unclassified_policy: warn   # warn (default): one-time warning on failed retry
                                 # strict: hard-block unclassified failed retries
-  # on_args_drift: off          # off (default) | soft | hard — same dispatch
+  on_args_drift: soft           # soft (default) | hard | off — same dispatch
                                 # ticket + different args → ToolBoundaryError /
-                                # LedgerHardBlockError (identity-conflict gate)
+                                # LedgerHardBlockError (identity-conflict gate);
+                                # off = escape hatch for "new args = new transition"
   # sqlite (zero-ops single-node durable):
   # storage: sqlite
   # path: ./mycelium-ledger.db

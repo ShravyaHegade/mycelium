@@ -166,13 +166,14 @@ def test_payment_hard_blocks_failed_after_effect_retry() -> None:
     storage = InMemoryLedgerStorage()
     ledger = ActionLedger(storage=storage)
     request_id = "failed-payment"
+    claim_kwargs = {"amount": 10.0}
 
     storage.set(
         LedgerEntry(
             request_id=request_id,
             tool="send_payment",
             args=[],
-            kwargs={},
+            kwargs=dict(claim_kwargs),
             status="failed",
             terminal_outcome=TerminalOutcome.FAILED_AFTER_EFFECT.value,
             error="RuntimeError: charged",
@@ -185,7 +186,7 @@ def test_payment_hard_blocks_failed_after_effect_retry() -> None:
             request_id,
             "send_payment",
             (),
-            {"amount": 10.0},
+            claim_kwargs,
             _payment_binding(),
         )
 
@@ -196,13 +197,14 @@ def test_payment_hard_blocks_failed_before_effect_retry() -> None:
     storage = InMemoryLedgerStorage()
     ledger = ActionLedger(storage=storage)
     request_id = "failed-before"
+    claim_kwargs = {"amount": 10.0}
 
     storage.set(
         LedgerEntry(
             request_id=request_id,
             tool="send_payment",
             args=[],
-            kwargs={},
+            kwargs=dict(claim_kwargs),
             status="failed",
             terminal_outcome=TerminalOutcome.FAILED_BEFORE_EFFECT.value,
             error="RuntimeError: gateway",
@@ -215,7 +217,7 @@ def test_payment_hard_blocks_failed_before_effect_retry() -> None:
             request_id,
             "send_payment",
             (),
-            {"amount": 10.0},
+            claim_kwargs,
             _payment_binding(),
         )
 
@@ -247,13 +249,14 @@ def test_idempotent_write_hard_blocks_failed_after_effect() -> None:
     storage = InMemoryLedgerStorage()
     ledger = ActionLedger(storage=storage)
     request_id = "failed-after"
+    claim_kwargs = {"record_id": "r1"}
 
     storage.set(
         LedgerEntry(
             request_id=request_id,
             tool="upsert_record",
             args=[],
-            kwargs={},
+            kwargs=dict(claim_kwargs),
             status="failed",
             terminal_outcome=TerminalOutcome.FAILED_AFTER_EFFECT.value,
             idempotency_key=request_id,
@@ -265,7 +268,7 @@ def test_idempotent_write_hard_blocks_failed_after_effect() -> None:
             request_id,
             "upsert_record",
             (),
-            {"record_id": "r1"},
+            claim_kwargs,
             _idempotent_binding(),
         )
 

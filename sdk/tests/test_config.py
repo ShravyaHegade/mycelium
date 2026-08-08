@@ -9,6 +9,7 @@ import pytest
 
 from mycelium import (
     ARGS_DRIFT_HARD,
+    ARGS_DRIFT_SOFT,
     ConfigError,
     ToolBoundaryError,
     get_ledger,
@@ -605,6 +606,24 @@ tools:
 
     wrapped = config.apply_tool("charge", charge)
     assert get_ledger(wrapped)._on_args_drift == ARGS_DRIFT_HARD
+
+
+def test_action_ledger_on_args_drift_yaml_default_is_soft() -> None:
+    config = load_config_from_string(
+        """
+action_ledger:
+  storage: memory
+  tools: [charge]
+tools:
+  charge: {}
+"""
+    )
+
+    def charge(amount: int) -> int:
+        return amount
+
+    wrapped = config.apply_tool("charge", charge)
+    assert get_ledger(wrapped)._on_args_drift == ARGS_DRIFT_SOFT
 
 
 def test_action_ledger_on_args_drift_invalid_rejected() -> None:
