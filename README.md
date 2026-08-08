@@ -36,7 +36,7 @@ Developers running **agents with side-effect tools** in production (payments, em
 
 Python 3.10+. Framework-agnostic. Drop in via YAML + `mycelium run`, or decorators.
 
-## How it works (v1.26.x)
+## How it works (v1.28.x)
 
 Mycelium wraps tool calls after the LLM returns `tool_calls` and returns a verdict: run, return a stored result, wait, ask the provider what happened, or hard-stop.
 
@@ -52,7 +52,8 @@ Mycelium wraps tool calls after the LLM returns `tool_calls` and returns a verdi
 **Opt-in guards** (configure or call explicitly):
 
 - **AF-003 Infinite loops** — `loop_guard:` · soft → hard → `mycelium loops release`
-- **AF-004 Tool misuse** — `@bounded` / registry · block bad args and out-of-scope tools
+- **AF-004 Tool misuse** — `@bounded` / registry · block bad args (incl. `array` / `object`) and out-of-scope tools / paths
+- **Budget / runaway spend (not AF-010)** — `budget:` · `max_duration` / `max_steps` / `max_tokens` / `max_usd` · `mycelium budget release`
 - **AF-006 Context corruption** — `@protect` / Session · optional message/history validation
 - **AF-007 Premature termination** — `completion:` host checklist · refuse or warn-and-allow
 - **AF-008 Scope escalation** — `scope_guard:` freeze allowlist · re-check every step

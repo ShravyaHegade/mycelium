@@ -201,7 +201,11 @@ def fetch_customer(customer_id: str) -> dict:
     return db.get(customer_id)
 ```
 
-Field spec keys: `type` (`string`, `integer`, `number`, `boolean`), `required`, `pattern`, `min_length`, `max_length`. You pass plain dicts; Mycelium validates internally; no Pydantic imports in your code.
+Field spec keys: `type` (`string`, `integer`, `number`, `boolean`, `array`
+with `items`, `object` with optional `additional_properties`), `required`,
+`pattern`, `min_length`, `max_length`. Unknown type names raise
+`SchemaBuildError` at decorate time. You pass plain dicts; Mycelium validates
+internally; no Pydantic imports in your code.
 
 ## What `@bounded` / `bounded_sync` do
 
