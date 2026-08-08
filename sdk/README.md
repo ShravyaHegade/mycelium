@@ -60,7 +60,7 @@ Mycelium sits between your agent loop and your tools (after the LLM returns `too
 |---|---------------|-------------------|
 | **Core** | **AF-002 Duplicate / untraceable side effects** | **Flagship:** any tool, any provider — prove run-or-not, at-most-once. Ledger · lease · gates · `Reconciler` · operator release · receipts (Gmail/Stripe adapters = demos) |
 | **Opt-in** | **AF-003 Infinite action loops** | `loop_guard:` — action-hash streak across *new* `tool_call_id`s; soft then hard; operator `mycelium loops release` |
-| **Opt-in** | **Budget / runaway spend (not AF-010)** | `budget:` — `max_duration` / `max_steps` / `max_tokens` / `max_usd`; `@budget_guard` + host `check("llm")`; atomic `record_usage`; operator `mycelium budget release` |
+| **Opt-in** | **Budget / runaway spend (not AF-010)** | `budget:` — `max_duration` / `max_steps` / `max_tokens` / `max_usd`; `@budget_guard` on tools + **one-shot LLM wrap** (`instrument_llm` / `@budget_llm`); atomic `record_usage`; operator `mycelium budget release` |
 | **Opt-in** | **AF-004 Tool misuse** | `@bounded` input/output/scope checks; optional `ToolRegistry` allowlist — block before the tool runs |
 | **Opt-in** | **AF-006 Context corruption** | TTL cache (`@protect` / `Session`); optional `MessageValidator` / `HistoryGuard` before the next LLM turn |
 | **Opt-in** | **AF-007 Premature termination** | `completion:` — host checklist; unmarked **required** → refuse terminal; unmarked **optional** → warn and allow |
@@ -969,21 +969,38 @@ budget:
 ```
 
 ```python
-from mycelium import BudgetGuard, budget_guard_sync, execution_scope
+from mycelium import (
+    BudgetGuard,
+    budget_guard_sync,
+    budget_llm,
+    execution_scope,
+    instrument_langgraph_llm,
+    instrument_crewai_llm,
+)
 from mycelium.transition import TransitionScope
 
 guard = BudgetGuard(max_steps=40, max_usd=5.0)
 
+# Prefer: wrap the model once (framework glue — not per provider).
+model = instrument_langgraph_llm(chat_model, guard)   # LangGraph / LangChain
+# llm = instrument_crewai_llm(crew_llm, guard)        # CrewAI
+# or: config.instrument_llm(chat_model)               # when budget: is in YAML
+
+@budget_llm(guard)   # raw Python loop
+def call_model(messages):
+    return client.complete(messages)
+
 with execution_scope(TransitionScope(thread_id="t", run_id="r1", node="agent")):
-    guard.check("llm")                 # before each model turn
-    # ... call model ...
-    guard.record_usage(tokens_in=1200, tokens_out=400, usd=0.02)
+    model.invoke(messages)   # check("llm") runs inside the wrap
+    # Optional: still record USD yourself (Mycelium never invents prices)
+    guard.record_usage(usd=0.02)
 
 @budget_guard_sync(guard)
 def charge(*, tool_call_id: str) -> None:
     ...
 ```
 
+Manual `guard.check("llm")` still works if you own the turn loop yourself.
 Soft warn → `ToolBoundaryError` (`budget_warning`); hard → `LedgerHardBlockError`
 on the **next** step (never kill mid-flight). Operator:
 `mycelium budget status|release` (`clear` / `allow-once` / `abort-run`).

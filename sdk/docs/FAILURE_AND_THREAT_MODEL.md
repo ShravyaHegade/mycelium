@@ -225,7 +225,8 @@ than the code makes.
   across new dispatch ids; it is **not** a general spend/time budget. Optional
   `budget:` (not AF-010) hard-stops on host-declared duration/steps/tokens/USD
   ceilings before the next step; residual risk remains if the host skips
-  `check("llm")` / `record_usage` wiring.
+  `instrument_llm` / `@budget_llm` (or manual `check("llm")`) +
+  `record_usage` wiring.
 - **Premature terminal (without `completion:`).** The ledger does not stop an
   agent from emitting “done” with unfinished work. Optional AF-007
   `completion:` refuses terminal when **required** checklist ids are still

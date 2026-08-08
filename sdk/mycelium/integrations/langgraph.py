@@ -214,8 +214,31 @@ def completion_gate_end(
     return gate_graph_end(contract, scope_key=scope_key)
 
 
+def instrument_langgraph_llm(
+    model: Any,
+    guard: Any,
+    *,
+    scope_key: str | None = None,
+    record_usage: bool = True,
+) -> Any:
+    """Wrap a chat model so each turn calls ``BudgetGuard.check("llm")``.
+
+    See ``mycelium.budget_llm.instrument_langgraph_llm`` — re-exported here
+    next to the tool-runtime adapter.
+    """
+    from mycelium.budget_llm import instrument_langgraph_llm as _instrument
+
+    return _instrument(
+        model,
+        guard,
+        scope_key=scope_key,
+        record_usage=record_usage,
+    )
+
+
 __all__ = [
     "LangGraphIntegrationError",
     "instrument_langgraph_tool",
+    "instrument_langgraph_llm",
     "completion_gate_end",
 ]

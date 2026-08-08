@@ -190,8 +190,10 @@ the next LLM or tool step when crossed.
 tool boundary; stuck planners with no wall-clock ceiling.
 
 **Guard:** `budget:` / `@budget_guard` — `max_duration`, `max_steps`,
-`max_tokens`, `max_usd` (any subset). Host `check("llm")` before model turns;
-atomic `record_usage` for tokens/USD; soft warn then `LedgerHardBlockError`
+`max_tokens`, `max_usd` (any subset). `@budget_guard` on tools; wrap the model
+once with `instrument_llm` / `@budget_llm` (or manual `check("llm")`) so LLM
+turns cannot skip the gate; atomic `record_usage` for tokens/USD; soft warn
+then `LedgerHardBlockError`
 on the next step (never mid-flight kill). Operator
 `mycelium budget status|release`. Loop guard (AF-003) ≠ spend budget.
 **AF-010 not assigned** until corpus naming is settled. See

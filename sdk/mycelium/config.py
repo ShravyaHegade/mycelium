@@ -746,6 +746,35 @@ class MyceliumConfig:
         )
         return self._budget_guard
 
+    def instrument_llm(
+        self,
+        target: Any,
+        *,
+        framework: str | None = None,
+        scope_key: str | None = None,
+        record_usage: bool = True,
+    ) -> Any:
+        """Wrap a model / LLM callable with ``budget.check("llm")`` auto-wiring.
+
+        Requires a ``budget:`` block. Framework glue is LangGraph chat model,
+        CrewAI LLM, or a plain callable — not per provider. See
+        ``mycelium.budget_llm.instrument_llm``.
+        """
+        guard = self.build_budget_guard()
+        if guard is None:
+            raise ConfigError(
+                "instrument_llm requires a 'budget:' block in the config"
+            )
+        from mycelium.budget_llm import instrument_llm as _instrument_llm
+
+        return _instrument_llm(
+            target,
+            guard,
+            framework=framework,
+            scope_key=scope_key,
+            record_usage=record_usage,
+        )
+
     @staticmethod
     def _build_budget_guard_storage(raw: dict[str, Any]) -> BudgetGuardStorage:
         storage_type = raw.get("storage", "memory")

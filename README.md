@@ -53,7 +53,7 @@ Mycelium wraps tool calls after the LLM returns `tool_calls` and returns a verdi
 
 - **AF-003 Infinite loops** — `loop_guard:` · soft → hard → `mycelium loops release`
 - **AF-004 Tool misuse** — `@bounded` / registry · block bad args (incl. `array` / `object`) and out-of-scope tools / paths
-- **Budget / runaway spend (not AF-010)** — `budget:` · `max_duration` / `max_steps` / `max_tokens` / `max_usd` · `mycelium budget release`
+- **Budget / runaway spend (not AF-010)** — `budget:` · ceilings + `@budget_guard` / `instrument_llm` (auto `check("llm")`) · `mycelium budget release`
 - **AF-006 Context corruption** — `@protect` / Session · optional message/history validation
 - **AF-007 Premature termination** — `completion:` host checklist · refuse or warn-and-allow
 - **AF-008 Scope escalation** — `scope_guard:` freeze allowlist · re-check every step

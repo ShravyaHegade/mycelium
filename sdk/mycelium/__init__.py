@@ -69,6 +69,14 @@ from mycelium.budget_guard import (
     budget_guard_sync,
     parse_duration_seconds,
 )
+from mycelium.budget_llm import (
+    budget_llm,
+    extract_token_usage,
+    instrument_crewai_llm,
+    instrument_langgraph_llm,
+    instrument_llm,
+    wrap_llm_callable,
+)
 from mycelium.completion_contract import (
     STATUS_ABANDONED,
     STATUS_FAILED,
@@ -280,6 +288,12 @@ __all__ = [
     "apply_budget_guard",
     "budget_guard",
     "budget_guard_sync",
+    "budget_llm",
+    "extract_token_usage",
+    "instrument_crewai_llm",
+    "instrument_langgraph_llm",
+    "instrument_llm",
+    "wrap_llm_callable",
     "parse_duration_seconds",
     "OutcomeEmitter",
     "OutcomeRow",

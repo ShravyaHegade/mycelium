@@ -5,6 +5,17 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
 
 ## Unreleased
 
+### Added
+
+- **Budget LLM auto-wiring:** wrap the model turn once so hosts do not have
+  to remember `BudgetGuard.check("llm")` before every call.
+  `wrap_llm_callable` / `@budget_llm` (raw loop), `instrument_langgraph_llm`
+  (chat model `invoke`/`ainvoke`/`stream`/…), `instrument_crewai_llm`
+  (`.call`/`.acall`), and duck-typed `instrument_llm` /
+  `MyceliumConfig.instrument_llm`. Best-effort token `record_usage` from
+  common usage metadata shapes; no USD invention. Framework glue, not
+  provider glue.
+
 ### Fixed
 
 - **`@bounded` `allowed_paths`:** normalize with `os.path.normpath` +
