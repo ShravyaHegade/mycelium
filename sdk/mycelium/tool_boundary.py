@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import functools
 import inspect
+import os
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from pathlib import PurePath
 from typing import Any, ParamSpec, TypeVar
 
 from pydantic import BaseModel, ValidationError
@@ -258,6 +260,24 @@ def _validate_input(tool_name: str, schema: type[BaseModel], raw: dict[str, Any]
         raise _pydantic_error_to_boundary(exc, tool_name, schema, raw) from exc
 
 
+def _path_is_under_allowed(path: str, allowed_paths: tuple[str, ...]) -> bool:
+    """True if normalized ``path`` equals or is under one of ``allowed_paths``.
+
+    Collapses ``.`` / ``..`` so string-prefix tricks like
+    ``/workspace/src/../../etc/passwd`` cannot bypass the gate. Lexical only
+    (no symlink resolution) — tool args are strings, not opened paths.
+    """
+    candidate = PurePath(os.path.normpath(path))
+    for prefix in allowed_paths:
+        root = PurePath(os.path.normpath(prefix))
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            continue
+        return True
+    return False
+
+
 def _validate_scope(tool_name: str, raw: dict[str, Any], config: BoundedConfig) -> None:
     if config.entity_param and config.entity_pattern:
         value = raw.get(config.entity_param)
@@ -281,7 +301,7 @@ def _validate_scope(tool_name: str, raw: dict[str, Any], config: BoundedConfig) 
 
     if config.allowed_paths and config.path_param in raw:
         path = str(raw[config.path_param])
-        if not any(path.startswith(prefix) for prefix in config.allowed_paths):
+        if not _path_is_under_allowed(path, config.allowed_paths):
             allowed = ", ".join(config.allowed_paths)
             raise _make_boundary_error(
                 tool_name,

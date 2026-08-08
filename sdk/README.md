@@ -207,7 +207,8 @@ Field spec keys: `type` (`string`, `integer`, `number`, `boolean`), `required`, 
 
 - `@bounded` / `bounded_sync`: validate tool args against your field spec **before** the function runs
 - `output_schema`: validate the return value **after** the function runs; bad results are not propagated
-- `allowed_paths` / `entity_pattern`: user-defined scope gates (path prefixes, entity ID format)
+- `allowed_paths` / `entity_pattern`: user-defined scope gates (paths under
+  allowlisted roots after `..` / `.` normalization, entity ID format)
 - On failure, raises `ToolBoundaryError` with `llm_message` for the agent loop; does not retry by itself
 
 ## ToolRegistry

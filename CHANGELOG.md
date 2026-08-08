@@ -5,6 +5,13 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
 
 ## Unreleased
 
+### Fixed
+
+- **`@bounded` `allowed_paths`:** normalize with `os.path.normpath` +
+  `PurePath.relative_to` so `..` / sibling-prefix strings (e.g.
+  `/workspace/src/../../etc/passwd`, `/workspace_evil`) cannot bypass the
+  scope gate. Lexical only (no symlink resolution).
+
 ## 1.28.0 (2026-08-08)
 
 MINOR: fail-closed defaults — `@bounded` can express list/dict args, and

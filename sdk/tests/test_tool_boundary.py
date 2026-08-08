@@ -134,6 +134,43 @@ async def test_scope_gate_blocks_disallowed_path() -> None:
     assert calls == 1
 
 
+async def test_scope_gate_blocks_dotdot_prefix_bypass() -> None:
+    """``startswith`` alone lets ``/allowed/../../etc/passwd`` through; normpath must not."""
+    calls = 0
+
+    @bounded(schema=DELETE_FILE_SCHEMA, allowed_paths=["/workspace/src/"])
+    async def delete_file(path: str) -> dict:
+        nonlocal calls
+        calls += 1
+        return {"deleted": path}
+
+    with pytest.raises(ToolBoundaryError) as exc:
+        await delete_file(path="/workspace/src/../../etc/passwd")
+
+    assert exc.value.violation == "scope_path"
+    assert calls == 0
+
+
+async def test_scope_gate_blocks_sibling_prefix_bypass() -> None:
+    """``/workspace_evil`` must not match allowlist ``/workspace``."""
+    calls = 0
+
+    @bounded(schema=DELETE_FILE_SCHEMA, allowed_paths=["/workspace"])
+    async def delete_file(path: str) -> dict:
+        nonlocal calls
+        calls += 1
+        return {"deleted": path}
+
+    with pytest.raises(ToolBoundaryError) as exc:
+        await delete_file(path="/workspace_evil/secret")
+
+    assert exc.value.violation == "scope_path"
+    assert calls == 0
+
+    await delete_file(path="/workspace/ok.txt")
+    assert calls == 1
+
+
 async def test_entity_pattern_scope_gate() -> None:
     @bounded(
         schema=FETCH_CUSTOMER_SCHEMA,
