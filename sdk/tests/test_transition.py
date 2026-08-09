@@ -288,10 +288,12 @@ tools:
     assert config.transition.lease_ttl == 120.0
     assert config.transition.poll_interval == 0.1
     assert config.transition.poll_timeout == 30.0
+    assert config.transition.reclaim_requires_death_signal is True
     assert config._ledger_timing_kwargs() == {
         "lease_ttl": 120.0,
         "poll_interval": 0.1,
         "poll_timeout": 30.0,
+        "reclaim_requires_death_signal": True,
     }
 
 

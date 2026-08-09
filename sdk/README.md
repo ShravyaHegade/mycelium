@@ -58,7 +58,7 @@ Mycelium sits between your agent loop and your tools (after the LLM returns `too
 
 | | Catalog class | What Mycelium does |
 |---|---------------|-------------------|
-| **Core** | **AF-002 Duplicate / untraceable side effects** | **Flagship:** any tool, any provider — prove run-or-not, at-most-once. Ledger · lease · gates · `Reconciler` · operator release · receipts (Gmail/Stripe adapters = demos) |
+| **Core** | **AF-002 Observability black hole** | **Flagship:** any tool, any provider — prove run-or-not, at-most-once. Ledger · lease · gates · `Reconciler` · operator release · receipts (Gmail/Stripe adapters = demos) |
 | **Opt-in** | **AF-003 Infinite action loops** | `loop_guard:` — action-hash streak across *new* `tool_call_id`s; soft then hard; operator `mycelium loops release` |
 | **Opt-in** | **Budget / runaway spend (not AF-010)** | `budget:` — `max_duration` / `max_steps` / `max_tokens` / `max_usd`; `@budget_guard` on tools + **one-shot LLM wrap** (`instrument_llm` / `@budget_llm`); atomic `record_usage`; operator `mycelium budget release` |
 | **Opt-in** | **AF-004 Tool misuse** | `@bounded` input/output/scope checks; optional `ToolRegistry` allowlist — block before the tool runs |
@@ -917,7 +917,12 @@ mycelium transitions mark-dead <request_id> \
 
 The `mark-dead` command refuses if the entry has a recent heartbeat within the grace window (`presumed_dead_after`) — the worker may still be alive. Add `--override-heartbeat` to bypass this check when the operator has direct evidence of death (e.g. they killed the pod). After asserting death, `release` proceeds normally. `show` includes heartbeat/death fields; `list --stuck` hints at `mark-dead` when needed.
 
-> **Note:** the alive-worker release protection and claim-path gating only apply when `reclaim_requires_death_signal: true`. When off (the default), `release` and `claim` proceed exactly as they did in v1.15 — the heartbeat fields are tracked but not enforced. We recommend enabling the gate in production.
+> **Note:** YAML / `mycelium init` default is `reclaim_requires_death_signal: true`.
+> When off, `release` and reclaim proceed on lease expiry alone (weaker). Direct
+> `ActionLedger(...)` without the flag still defaults off for backward compat —
+> pass `reclaim_requires_death_signal=True` or use YAML. Redis also keeps a
+> durable **tombstone** so TTL eviction of an in-flight key cannot look like a
+> brand-new first claim.
 
 Python API:
 
@@ -1285,7 +1290,7 @@ transition:
   policy_version: "2026.07.1"
   lease_ttl: 3600
   # lease_renew_interval: 1200   # default = lease_ttl/3; 0 disables auto-renew
-  # reclaim_requires_death_signal: false   # default; true = require mark-dead before reclaim
+  reclaim_requires_death_signal: true    # YAML default; false = lease-expiry-as-death
   # presumed_dead_after: 7200             # default = 2 × lease_ttl; grace window for heartbeat
 
 action_ledger:

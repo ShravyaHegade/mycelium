@@ -15,6 +15,21 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
   `MyceliumConfig.instrument_llm`. Best-effort token `record_usage` from
   common usage metadata shapes; no USD invention. Framework glue, not
   provider glue.
+- **Redis in-flight tombstones:** every ledger `set` writes a durable
+  no-TTL tombstone beside the primary key. If Redis TTL-evicts an
+  in-flight entry, `get` / `try_claim_inflight` rehydrate an EXPIRED
+  ghost so hard-block / death-signal / reconcile still see the prior
+  attempt — no silent "first claim" after key loss.
+
+### Changed
+
+- **YAML `transition.reclaim_requires_death_signal` defaults to `true`**
+  (was omit → false). `mycelium init` scaffolds `true`. Direct
+  `ActionLedger(...)` constructor default remains `false` for backward
+  compat. Set `reclaim_requires_death_signal: false` only if you accept
+  lease-expiry-as-death.
+- Config Redis `in_flight_ttl` default aligned to **604800** (7d), matching
+  `RedisLedgerStorage`.
 
 ### Fixed
 

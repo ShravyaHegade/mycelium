@@ -310,10 +310,11 @@ Still can go wrong — even with everything above configured correctly:
   read-only *by contract*; verify them with the same care as the tools
   themselves. The demo Gmail adapter's conservative "0 matches → UNKNOWN" is the
   model to copy.
-- **No death-signal opt-in.** `reclaim_requires_death_signal` defaults off, so
-  reclaim/release proceeds on lease expiry even if the worker is merely paused
-  or partitioned. Enable the gate in production; until then, an expired lease
-  is treated as dead.
+- **Death-signal off (escape hatch).** YAML defaults
+  `reclaim_requires_death_signal: true`. If you set it `false` (or construct
+  `ActionLedger` without the flag), reclaim/release proceeds on lease expiry
+  even if the worker is merely paused or partitioned. Redis tombstones still
+  prevent TTL eviction from looking like a never-claimed key.
 - **Storage failure at the worst moment.** A `complete()` storage failure
   leaves the entry `IN_FLIGHT`; the lease then expires and the transition
   hard-blocks or waits on a reconciler. Safe (no second effect), but the

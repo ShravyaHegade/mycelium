@@ -3,8 +3,9 @@
 Covers:
 - LedgerEntry heartbeat/death fields and serialization round-trip
 - has_worker_death_evidence() pure function
-- ActionLedger with reclaim_requires_death_signal=False (default)
-- ActionLedger with reclaim_requires_death_signal=True
+- ActionLedger with reclaim_requires_death_signal=False (constructor default)
+- ActionLedger / YAML with reclaim_requires_death_signal=True (config default)
+- Redis tombstone survives TTL eviction (no silent fresh claim)
 - mark_worker_dead() / mark_worker_dead_for() with override_heartbeat
 - release() strengthening with death-signal gate
 - Claim path gating (read-only RECLAIM, side-effecting ALLOW)
@@ -466,6 +467,71 @@ def test_redis_ttl_floor(monkeypatch: pytest.MonkeyPatch) -> None:
     ttl = fake.ttl("mycelium:action:req-1")
     assert ttl > 0
     assert ttl >= 14400
+
+
+def test_redis_tombstone_blocks_fresh_claim_after_ttl_eviction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TTL-deleted in-flight key must not look like a first claim.
+
+    Without a tombstone, Worker B would SET NX a brand-new claim and could
+    double-execute. With a tombstone, get/claim rehydrate an EXPIRED ghost so
+    hard-block / death-signal gates still see the prior attempt.
+    """
+    try:
+        import fakeredis  # noqa: F401
+    except ImportError:
+        pytest.skip("fakeredis not installed")
+
+    import redis as _redis
+
+    from mycelium.storage.redis_ledger import RedisLedgerStorage
+
+    fake = fakeredis.FakeRedis(decode_responses=True)
+    monkeypatch.setattr(_redis.Redis, "from_url", lambda url, **kw: fake)
+
+    storage = RedisLedgerStorage("redis://test", in_flight_ttl=60.0)
+    binding = _side_effect_binding()
+    ledger = ActionLedger(
+        storage=storage,
+        reclaim_requires_death_signal=True,
+        presumed_dead_after=10_000.0,
+        poll_timeout=0.05,
+    )
+    first = ledger.claim_side_effecting(
+        "req-ttl",
+        "charge",
+        (),
+        {},
+        binding,
+    )
+    assert first.status == "in-flight"
+    assert fake.exists("mycelium:action-tomb:req-ttl")
+
+    # Simulate Redis TTL eviction of the primary key (tombstone remains).
+    fake.delete("mycelium:action:req-ttl")
+    assert not fake.exists("mycelium:action:req-ttl")
+
+    ghost = storage.get("req-ttl")
+    assert ghost is not None
+    assert ghost.resolved_terminal_outcome() == TerminalOutcome.EXPIRED
+
+    body_ran = {"n": 0}
+
+    def charge() -> dict[str, str]:
+        body_ran["n"] += 1
+        return {"ok": "yes"}
+
+    # Second worker must not get a silent fresh first claim / body run.
+    with pytest.raises((LedgerHardBlockError, LedgerPollTimeoutError)):
+        ledger.claim_side_effecting(
+            "req-ttl",
+            "charge",
+            (),
+            {},
+            binding,
+        )
+    assert body_ran["n"] == 0
 
 
 def test_cli_mark_dead_release_round_trip_file_backend(tmp_path: Path) -> None:

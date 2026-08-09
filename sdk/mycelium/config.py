@@ -1181,7 +1181,7 @@ class MyceliumConfig:
                 url = resolve_storage_url(raw)
             except ValueError as exc:
                 raise ConfigError(str(exc)) from exc
-            ttl = raw.get("in_flight_ttl", 3600)
+            ttl = raw.get("in_flight_ttl", 604800)
             return RedisLedgerStorage(
                 url,
                 prefix=str(raw.get("prefix", "mycelium:action:")),
@@ -1232,7 +1232,7 @@ class MyceliumConfig:
                 url = resolve_storage_url(raw)
             except ValueError as exc:
                 raise ConfigError(str(exc)) from exc
-            ttl = raw.get("in_flight_ttl", 3600)
+            ttl = raw.get("in_flight_ttl", 604800)
             return RedisTaskLedgerStorage(
                 url,
                 prefix=str(raw.get("prefix", "mycelium:task:")),
@@ -1810,7 +1810,9 @@ def _parse_transition_config(raw: Any) -> TransitionConfig | None:
         raw, "poll_timeout", section="transition"
     )
 
-    reclaim_requires_death_signal = bool(raw.get("reclaim_requires_death_signal", False))
+    reclaim_requires_death_signal = bool(
+        raw.get("reclaim_requires_death_signal", True)
+    )
     presumed_dead_after = _parse_optional_positive_float(
         raw, "presumed_dead_after", section="transition"
     )

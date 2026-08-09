@@ -934,8 +934,8 @@ class ActionLedger:
         self._unclassified_warned_tools: set[str] = set()
         # Worker-death signal: when True, EXPIRED entries cannot be reclaimed
         # without affirmative death evidence (mark_worker_dead or heartbeat
-        # older than presumed_dead_after). Default False preserves existing
-        # behavior exactly.
+        # older than presumed_dead_after). Default False for backward compat;
+        # mycelium init scaffolds True — enable in production.
         self._reclaim_requires_death_signal = reclaim_requires_death_signal
         # Grace window: seconds since last heartbeat (or started_at) after
         # which a worker is presumed dead. Default 2x lease_ttl.

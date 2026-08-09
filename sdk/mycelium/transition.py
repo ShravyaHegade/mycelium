@@ -420,7 +420,7 @@ class TransitionConfig:
     lease_renew_interval: float | None = None
     poll_interval: float | None = None
     poll_timeout: float | None = None
-    reclaim_requires_death_signal: bool = False
+    reclaim_requires_death_signal: bool = True
     presumed_dead_after: float | None = None
 
 

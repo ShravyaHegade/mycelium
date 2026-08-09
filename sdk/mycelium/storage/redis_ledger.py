@@ -24,7 +24,13 @@ def _require_redis() -> Any:
 
 
 class RedisEntryStorage:
-    """Generic Redis KV store for ledger entries keyed by request_id."""
+    """Generic Redis KV store for ledger entries keyed by request_id.
+
+    In-flight keys may carry a TTL. A durable **tombstone** (no TTL) is written
+    alongside every ``set`` so a TTL eviction cannot look like "never claimed"
+    — ``get`` / ``try_claim_inflight`` rehydrate an EXPIRED ghost from the
+    tombstone and let ActionLedger death / hard-block / reconcile gates run.
+    """
 
     def __init__(
         self,
@@ -43,11 +49,68 @@ class RedisEntryStorage:
     def _key(self, request_id: str) -> str:
         return f"{self._prefix}{request_id}"
 
-    def get(self, request_id: str) -> E | None:
-        raw = self._client.get(self._key(request_id))
+    def _tombstone_key(self, request_id: str) -> str:
+        # Sibling namespace so list_all(prefix*) never treats tombs as entries.
+        base = self._prefix.rstrip(":")
+        return f"{base}-tomb:{request_id}"
+
+    def _write_tombstone(self, entry: E) -> None:
+        payload = json.dumps(entry.to_dict(), default=str)
+        self._client.set(self._tombstone_key(entry.request_id), payload)
+
+    def _read_tombstone(self, request_id: str) -> E | None:
+        raw = self._client.get(self._tombstone_key(request_id))
         if raw is None:
             return None
         return self._from_dict(json.loads(raw))
+
+    def _ghost_from_tombstone(self, entry: E, *, now: float) -> E:
+        """Rebuild a durable ghost after TTL eviction.
+
+        Non-terminal / in-flight tombs become EXPIRED (lease in the past) so
+        reclaim and death-signal gates still apply. Terminal tombs restore as-is.
+        """
+        from dataclasses import replace
+
+        from mycelium.transition import TerminalOutcome, legacy_status_from_terminal
+
+        fields = getattr(entry, "__dataclass_fields__", {})
+        terminal = getattr(entry, "terminal_outcome", None)
+        if terminal is None and getattr(entry, "status", None) == "completed":
+            terminal = TerminalOutcome.COMPLETED.value
+        if terminal in (
+            TerminalOutcome.COMPLETED.value,
+            TerminalOutcome.FAILED_BEFORE_EFFECT.value,
+            TerminalOutcome.FAILED_AFTER_EFFECT.value,
+            TerminalOutcome.BLOCKED.value,
+            TerminalOutcome.UNKNOWN.value,
+        ):
+            return entry
+
+        updates: dict[str, Any] = {}
+        if "lease_until" in fields:
+            updates["lease_until"] = now - 1.0
+        if "terminal_outcome" in fields:
+            updates["terminal_outcome"] = TerminalOutcome.IN_FLIGHT.value
+        if "status" in fields:
+            updates["status"] = legacy_status_from_terminal(TerminalOutcome.IN_FLIGHT)
+        return replace(entry, **updates) if updates else entry
+
+    def _restore_from_tombstone(self, request_id: str, *, now: float | None = None) -> E | None:
+        tomb = self._read_tombstone(request_id)
+        if tomb is None:
+            return None
+        now = now if now is not None else time.time()
+        ghost = self._ghost_from_tombstone(tomb, now=now)
+        # Persist ghost back to the primary key so subsequent gets/claims see it.
+        self.set(ghost)
+        return ghost
+
+    def get(self, request_id: str) -> E | None:
+        raw = self._client.get(self._key(request_id))
+        if raw is not None:
+            return self._from_dict(json.loads(raw))
+        return self._restore_from_tombstone(request_id)
 
     def set(self, entry: E) -> None:
         payload = json.dumps(entry.to_dict(), default=str)
@@ -58,6 +121,8 @@ class RedisEntryStorage:
             self._client.set(key, payload)
             if entry.status != "in-flight":
                 self._client.persist(key)
+        # Durable memory that this request_id was ever claimed — survives TTL.
+        self._write_tombstone(entry)
 
     def try_claim_inflight(
         self,
@@ -73,6 +138,21 @@ class RedisEntryStorage:
         for _ in range(32):
             existing_raw = self._client.get(key)
             if existing_raw is None:
+                restored = self._restore_from_tombstone(entry.request_id)
+                if restored is not None:
+                    existing = restored
+                    now = time.time()
+                    outcome = claim_inflight_outcome(existing, now=now)
+                    if outcome == "completed":
+                        return "completed", existing
+                    if outcome == "in_flight":
+                        return "in_flight", existing
+                    # EXPIRED / retryable → CAS reclaim path below
+                    reclaimed = self._try_reclaim(key, entry, ttl, lease_ttl)
+                    if reclaimed is not None:
+                        return reclaimed
+                    continue
+
                 leased = with_lease(entry, now=time.time(), lease_ttl=lease_ttl)
                 payload = json.dumps(leased.to_dict(), default=str)
                 if ttl > 0:
@@ -80,6 +160,7 @@ class RedisEntryStorage:
                 else:
                     claimed = self._client.set(key, payload, nx=True)
                 if claimed:
+                    self._write_tombstone(leased)
                     return "claimed", None
                 continue
 
@@ -97,6 +178,9 @@ class RedisEntryStorage:
 
         existing_raw = self._client.get(key)
         if existing_raw is None:
+            restored = self._restore_from_tombstone(entry.request_id)
+            if restored is not None:
+                return "in_flight", restored
             return "claimed", None
         existing = self._from_dict(json.loads(existing_raw))
         if existing.status == "completed":
@@ -125,6 +209,10 @@ class RedisEntryStorage:
                 pipe.watch(key)
                 raw = pipe.get(key)
                 if raw is None:
+                    # Key evaporated under the watch — tombstone may still exist.
+                    restored = self._restore_from_tombstone(entry.request_id, now=now)
+                    if restored is not None:
+                        return "in_flight", restored
                     return ("claimed", None)
                 current = self._from_dict(json.loads(raw))
                 rerun = claim_inflight_outcome(current, now=time.time())
@@ -136,6 +224,7 @@ class RedisEntryStorage:
                 else:
                     pipe.set(key, payload)
                 pipe.execute()
+                self._write_tombstone(leased)
                 return ("claimed", None)
         except WatchError:
             return None
@@ -160,7 +249,11 @@ class RedisEntryStorage:
                     pipe.watch(key)
                     raw = pipe.get(key)
                     if raw is None:
-                        return False
+                        # TTL eviction mid-transition: restore history, then retry.
+                        restored = self._restore_from_tombstone(entry.request_id)
+                        if restored is None:
+                            return False
+                        continue
                     existing = json.loads(raw)
                     if existing.get("terminal_outcome") not in expected_terminal_outcomes:
                         return False
@@ -174,6 +267,7 @@ class RedisEntryStorage:
                     pipe.multi()
                     pipe.set(key, payload)
                     pipe.execute()
+                    self._write_tombstone(entry)
                     return True
             except WatchError:
                 continue
