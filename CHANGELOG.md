@@ -18,6 +18,10 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
   a known `request_id` leaves `IN_FLIGHT` without reclaim/reconcile/UNKNOWN
   side effects. Decorator claim paths already poll; this is for custom async
   nodes that want a peer-wait without re-claiming.
+- **Copy-paste LangGraph + Redis + crash example**
+  (`examples/langgraph_redis_crash/`): adoption recipe — redispatch RETURN with
+  signed receipt, then mid-flight kill → `HARD_BLOCK` (body once). No new
+  capability; stitches existing LangGraph / Redis / receipt / crash paths.
 
 ## 1.29.0 (2026-08-09)
 

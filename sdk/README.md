@@ -580,6 +580,12 @@ and does **not** mark `UNKNOWN` (claim loops own that policy).
 Teachable in-process repros for the partner-facing gates:
 [examples/failure_cases/](examples/failure_cases/) (`run_all.py`).
 
+**Copy-paste adoption (LangGraph + Redis + receipts + crash):**
+[examples/langgraph_redis_crash/](examples/langgraph_redis_crash/) — one runnable
+script that redispatches a LangGraph tool against a real Redis ledger (body once
++ signed receipt), then kills a mid-flight worker and shows `HARD_BLOCK` on
+redispatch. Capability already shipped; this is the drop-in recipe.
+
 **Public transition-sufficiency language:** #7417-style discussions often use four words — `ALLOW` / `REPAIR` / `SOFT_BLOCK` / `HARD_BLOCK` (sometimes `BLOCK`). Mycelium implements that set and adds finer internals:
 
 | Public | Mycelium | Notes |
@@ -596,6 +602,9 @@ Public `BLOCK` ≈ Mycelium `HARD_BLOCK`. `RETURN` and `POLL` are also “do not
 **Lease validity (v1.10.0) / auto-renew (v1.14.0):** `lease_until` is resolution metadata — **not** part of `transition_key` (so renewals do not fork identity). Before reclaim/retry, resolution classifies the window via `LeaseValidity` (`HELD` → poll, `EXPIRED` → reclaim or hard-block by class, `UNBOUNDED` → no TTL). While a `@ledger` / `@ledger_sync` tool body runs, Mycelium **auto-extends** the lease (default every `lease_ttl / 3`). Set `lease_renew_interval: 0` to disable; call `renew_lease()` for an extra manual bump or when claiming outside the decorator.
 
 **Cloud-style proof (v1.13.4):** `mycelium demo --redis` (or `prove_two_worker_redis_redispatch()`) runs **two OS processes** against a **real Redis** ledger. Worker A claims and runs; worker B redispatches the same `request_id` while A is `IN_FLIGHT`. B polls and returns A's result — the side effect runs once. Set `MYCELIUM_TEST_REDIS_URL` or use `redis://127.0.0.1:6379/15`. This is the partner-facing #7417 proof beyond an in-process double call.
+
+For a **copy-paste** LangGraph + Redis + receipts + crash recipe (YAML + `run.py`),
+see [examples/langgraph_redis_crash/](examples/langgraph_redis_crash/).
 
 **`REPAIR` (v1.13.0):** when the durable record is incomplete but healable (missing `idempotency_key`, invalid/missing `side_effect_boundary` or `terminal_outcome`, or status/terminal drift), claim loops call `repair_transition()` then re-resolve. A held in-flight lease is still `POLL` for peers; the owner keeps it held via auto-renew (or `renew_lease()`), not a second execute.
 

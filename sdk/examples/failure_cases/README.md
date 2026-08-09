@@ -36,5 +36,6 @@ Each script exits `0` on proof success and prints the gate name.
 
 - Feature tour: `mycelium demo` (same proofs + operator release + unguarded baseline)
 - Cloud-style two-worker Redis: `mycelium demo --redis`
+- Copy-paste LangGraph + Redis + crash: [`../langgraph_redis_crash/`](../langgraph_redis_crash/)
 - Gate table: [sdk/README.md § Resolution gates](../../README.md#resolution-gates)
 - Threat model: [docs/FAILURE_AND_THREAT_MODEL.md](../../docs/FAILURE_AND_THREAT_MODEL.md)
