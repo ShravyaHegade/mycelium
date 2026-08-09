@@ -26,6 +26,9 @@ LEDGER_KWARG_KEYS = frozenset(
         # State-authority / decision metadata — not part of tool-arg identity.
         "state_ref",
         "decision_id",
+        # Handoff / causation audit — not part of tool-arg identity.
+        "parent_request_id",
+        "handoff_id",
     }
 )
 
@@ -492,6 +495,24 @@ _dispatch_id_var: ContextVar[str | None] = ContextVar(
 )
 
 
+@dataclass(frozen=True)
+class HandoffLink:
+    """Audit causation: child transitions were caused by this parent handoff.
+
+    Thin handoff identity — does not grant capabilities or block freestyle
+    calls. Enforcement of at-most-once remains per-tool claim keys.
+    """
+
+    parent_request_id: str
+    handoff_id: str | None = None
+
+
+_handoff_var: ContextVar[HandoffLink | None] = ContextVar(
+    "mycelium_handoff",
+    default=None,
+)
+
+
 def get_active_execution_scope() -> TransitionScope | None:
     """Return the active execution scope, if any."""
     return _execution_scope_var.get()
@@ -502,6 +523,11 @@ def get_active_dispatch_id() -> str | None:
     return _dispatch_id_var.get()
 
 
+def get_active_handoff() -> HandoffLink | None:
+    """Return the active handoff causation link, if any."""
+    return _handoff_var.get()
+
+
 def execution_scope(scope: TransitionScope) -> AbstractContextManager[TransitionScope]:
     """Context manager that sets the active execution scope."""
     return _ExecutionScopeContext(scope)
@@ -510,6 +536,25 @@ def execution_scope(scope: TransitionScope) -> AbstractContextManager[Transition
 def dispatch_scope(dispatch_id: str) -> AbstractContextManager[str]:
     """Set a framework-supplied dispatch identity for transition derivation."""
     return _DispatchScopeContext(dispatch_id)
+
+
+def handoff_scope(
+    parent_request_id: str,
+    *,
+    handoff_id: str | None = None,
+) -> AbstractContextManager[HandoffLink]:
+    """Mark subsequent ledger claims as caused by ``parent_request_id``.
+
+    Use after a supervisor/spawn transition to glue subagent tool claims to
+    that parent for audit. Nested scopes replace the active link; exit
+    restores the previous one.
+    """
+    return _HandoffScopeContext(
+        HandoffLink(
+            parent_request_id=str(parent_request_id),
+            handoff_id=str(handoff_id) if handoff_id is not None else None,
+        )
+    )
 
 
 class _ExecutionScopeContext(AbstractContextManager[TransitionScope]):
@@ -540,6 +585,22 @@ class _DispatchScopeContext(AbstractContextManager[str]):
     def __exit__(self, *_: Any) -> bool:
         if self._token is not None:
             _dispatch_id_var.reset(self._token)
+            self._token = None
+        return False
+
+
+class _HandoffScopeContext(AbstractContextManager[HandoffLink]):
+    def __init__(self, link: HandoffLink) -> None:
+        self._link = link
+        self._token: Token[HandoffLink | None] | None = None
+
+    def __enter__(self) -> HandoffLink:
+        self._token = _handoff_var.set(self._link)
+        return self._link
+
+    def __exit__(self, *_: Any) -> bool:
+        if self._token is not None:
+            _handoff_var.reset(self._token)
             self._token = None
         return False
 
@@ -714,6 +775,7 @@ __all__ = [
     "ProviderKeyValidity",
     "ToolTransitionBinding",
     "TransitionConfig",
+    "HandoffLink",
     "TransitionScope",
     "args_fingerprint",
     "blocks_on_ambiguous_replay",
@@ -727,6 +789,8 @@ __all__ = [
     "execution_scope",
     "get_active_dispatch_id",
     "get_active_execution_scope",
+    "get_active_handoff",
+    "handoff_scope",
     "legacy_status_from_terminal",
     "parse_side_effect_class",
     "parse_retry_permission",

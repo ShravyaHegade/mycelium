@@ -5,6 +5,15 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
 
 ## Unreleased
 
+### Added
+
+- **Thin handoff identity (audit causation):** `handoff_scope(parent_request_id, handoff_id=…)`
+  stamps child ledger claims with `parent_request_id` / `handoff_id` for
+  supervisor→subagent audit glue. Does not grant capabilities or change
+  at-most-once claim keys. Explicit kwargs override the active scope.
+  `list_transitions(parent_request_id=…)` and CLI
+  `mycelium transitions list --parent` / `show` expose the link.
+
 ## 1.29.0 (2026-08-09)
 
 MINOR: partner-facing reliability batch — safer reclaim default, Redis

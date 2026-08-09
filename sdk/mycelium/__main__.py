@@ -315,7 +315,13 @@ def cmd_transitions_list(args: argparse.Namespace) -> int:
     now = time.time()
     entries = []
     for ledger in ledgers:
-        entries.extend(ledger.list_transitions(stuck=args.stuck, tool=args.tool))
+        entries.extend(
+            ledger.list_transitions(
+                stuck=args.stuck,
+                tool=args.tool,
+                parent_request_id=getattr(args, "parent", None),
+            )
+        )
     entries.sort(key=lambda entry: entry.started_at)
     if args.json:
         print(json.dumps([_entry_row(entry, now) for entry in entries], indent=2, default=str))
@@ -327,6 +333,8 @@ def cmd_transitions_list(args: argparse.Namespace) -> int:
         resolved = entry.resolved_terminal_outcome(now=now)
         age = _format_age(now - entry.started_at)
         line = f"{entry.request_id}  {entry.tool}  {resolved.value}  age={age}"
+        if entry.parent_request_id is not None:
+            line += f"  parent={entry.parent_request_id}"
         if entry.operator_resolution is not None:
             line += f"  [released: {entry.operator_resolution} by {entry.resolved_by}]"
         print(line)
@@ -350,6 +358,8 @@ def cmd_transitions_show(args: argparse.Namespace) -> int:
     print(f"kwargs: {json.dumps(entry.kwargs, default=str)}")
     print(f"status: {entry.status}")
     print(f"resolved_outcome: {resolved.value}")
+    print(f"parent_request_id: {entry.parent_request_id or '-'}")
+    print(f"handoff_id: {entry.handoff_id or '-'}")
     print(f"side_effect_boundary: {entry.side_effect_boundary}")
     print(f"started_at: {_format_ts(entry.started_at)}")
     print(f"finished_at: {_format_ts(entry.finished_at)}")
@@ -1075,6 +1085,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Only transitions that need operator attention, with next-action hints",
     )
     list_parser.add_argument("--tool", default=None, help="Filter by tool name")
+    list_parser.add_argument(
+        "--parent",
+        default=None,
+        metavar="REQUEST_ID",
+        help="Only children of this handoff parent request_id",
+    )
     list_parser.add_argument(
         "--json", action="store_true", help="Machine-readable JSON output"
     )

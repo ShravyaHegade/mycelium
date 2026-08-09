@@ -43,6 +43,7 @@ from mycelium.transition import (
     extract_provider_idempotency_key,
     get_active_dispatch_id,
     get_active_execution_scope,
+    get_active_handoff,
     has_worker_death_evidence,
     legacy_status_from_terminal,
     resolve_lease_validity,
@@ -541,6 +542,11 @@ class LedgerEntry:
     decision_id: str | None = None
     state_ref: str | None = None
 
+    # Thin handoff / causation audit (optional). Set via ``handoff_scope`` or
+    # kwargs; does not grant capabilities or change claim gates.
+    parent_request_id: str | None = None
+    handoff_id: str | None = None
+
     def __post_init__(self) -> None:
         # Match from_dict / claim: durable key defaults to request_id.
         if self.idempotency_key is None:
@@ -598,6 +604,8 @@ class LedgerEntry:
             "released_from_outcome": self.released_from_outcome,
             "decision_id": self.decision_id,
             "state_ref": self.state_ref,
+            "parent_request_id": self.parent_request_id,
+            "handoff_id": self.handoff_id,
         }
 
     @classmethod
@@ -653,6 +661,14 @@ class LedgerEntry:
             ),
             state_ref=(
                 str(data["state_ref"]) if data.get("state_ref") is not None else None
+            ),
+            parent_request_id=(
+                str(data["parent_request_id"])
+                if data.get("parent_request_id") is not None
+                else None
+            ),
+            handoff_id=(
+                str(data["handoff_id"]) if data.get("handoff_id") is not None else None
             ),
         )
 
@@ -1217,6 +1233,7 @@ class ActionLedger:
         stuck: bool = False,
         tool: str | None = None,
         outcome: TerminalOutcome | None = None,
+        parent_request_id: str | None = None,
         in_flight_stuck_after: float = DEFAULT_LEASE_TTL,
     ) -> list[LedgerEntry]:
         """List ledger entries for operator triage (read-only).
@@ -1227,12 +1244,18 @@ class ActionLedger:
         ``in_flight_stuck_after`` seconds (an in-flight entry whose lease can
         never expire — e.g. unbounded — would otherwise be invisible forever).
         ``tool`` filters by tool name; ``outcome`` filters by the resolved
-        terminal outcome (lease validity applied). Sorted oldest first.
+        terminal outcome (lease validity applied). ``parent_request_id`` keeps
+        children of a handoff parent (thin causation audit). Sorted oldest first.
         """
         now = time.time()
         entries: list[LedgerEntry] = []
         for entry in self._list_all_entries():
             if tool is not None and entry.tool != tool:
+                continue
+            if (
+                parent_request_id is not None
+                and entry.parent_request_id != parent_request_id
+            ):
                 continue
             resolved = entry.resolved_terminal_outcome(now=now)
             if outcome is not None and resolved != outcome:
@@ -1408,6 +1431,13 @@ class ActionLedger:
             pkey_first_attempt = _provider_key_first_attempt_at
         decision_raw = kwargs.get("decision_id")
         state_ref_raw = kwargs.get("state_ref")
+        parent_raw = kwargs.get("parent_request_id")
+        handoff_raw = kwargs.get("handoff_id")
+        active_handoff = get_active_handoff()
+        if parent_raw is None and active_handoff is not None:
+            parent_raw = active_handoff.parent_request_id
+        if handoff_raw is None and active_handoff is not None:
+            handoff_raw = active_handoff.handoff_id
         return LedgerEntry(
             request_id=request_id,
             tool=tool,
@@ -1422,6 +1452,8 @@ class ActionLedger:
             provider_key_first_attempt_at=pkey_first_attempt,
             decision_id=str(decision_raw) if decision_raw is not None else None,
             state_ref=str(state_ref_raw) if state_ref_raw is not None else None,
+            parent_request_id=str(parent_raw) if parent_raw is not None else None,
+            handoff_id=str(handoff_raw) if handoff_raw is not None else None,
         )
 
     def claim(
@@ -3091,15 +3123,17 @@ def _args_drift_scopes_match(
 def _claim_kwargs(kwargs: dict[str, Any], clean_kwargs: dict[str, Any]) -> dict[str, Any]:
     """Kwargs for claim: tool args plus optional bookkeeping pass-through.
 
-    ``state_ref`` / ``decision_id`` / dispatch and scope ids are bookkeeping
-    (excluded from the tool body and ``args_fingerprint``) but must still reach
-    ``_new_inflight_entry`` for audit and the opt-in args-drift gate (same
-    dispatch ticket + different args, scoped by ``run_id`` / ``thread_id``).
+    ``state_ref`` / ``decision_id`` / handoff ids / dispatch and scope ids are
+    bookkeeping (excluded from the tool body and ``args_fingerprint``) but must
+    still reach ``_new_inflight_entry`` for audit and the opt-in args-drift gate
+    (same dispatch ticket + different args, scoped by ``run_id`` / ``thread_id``).
     """
     claim_kwargs = dict(clean_kwargs)
     for key in (
         "decision_id",
         "state_ref",
+        "parent_request_id",
+        "handoff_id",
         "request_id",
         "tool_call_id",
         "thread_id",
