@@ -5,6 +5,12 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
 
 ## Unreleased
 
+## 1.29.0 (2026-08-09)
+
+MINOR: partner-facing reliability batch — safer reclaim default, Redis
+tombstones, budget LLM wire, UNKNOWN key window, and `allowed_paths` harden.
+All landed on `main` after v1.28.0; cut once so design partners can `pip install`.
+
 ### Added
 
 - **Provider idempotency-key validity window on `UNKNOWN`:** declaring both
