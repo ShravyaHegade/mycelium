@@ -179,6 +179,13 @@ _RECONCILE_NOT_EXECUTED_OUTCOMES: frozenset[str] = frozenset({
     TerminalOutcome.FAILED_BEFORE_EFFECT.value,
 })
 
+# Opt-in same-key UNKNOWN retry (param + TTL still VALID). claim_inflight
+# treats UNKNOWN as non-claimable so peers do not blind-overwrite; this CAS
+# is the only authorized reset path after the gate returns ALLOW.
+_UNKNOWN_SAME_KEY_RETRY_OUTCOMES: frozenset[str] = frozenset({
+    TerminalOutcome.UNKNOWN.value,
+})
+
 # Policies for tools ledgered without a transition_binding (unclassified).
 # "warn": legacy behavior + a one-time warning when a failed entry is
 # reclaimed. "strict": route the claim through claim_side_effecting with a
@@ -1969,6 +1976,89 @@ class ActionLedger:
             return resolved
         return self._raise_hard_block(request_id, tool, existing, binding=binding)
 
+    def _prefer_settle_before_unknown_allow(
+        self,
+        request_id: str,
+        tool: str,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        existing: LedgerEntry,
+        binding: ToolTransitionBinding,
+    ) -> LedgerEntry | None:
+        """Prefer operator release / Reconciler before same-key UNKNOWN re-exec.
+
+        Returns a settled entry when resolution succeeded, else ``None`` so the
+        claim loop may fall through to the opt-in same-key retry (provider
+        dedupe still within ``provider_idempotency_key_ttl``).
+        """
+        if existing.resolved_terminal_outcome() != TerminalOutcome.UNKNOWN:
+            return None
+        released = self._consume_operator_resolution(
+            request_id, tool, args, kwargs, existing, binding
+        )
+        if released is not None:
+            return released
+        return self._attempt_reconcile(
+            request_id, tool, args, kwargs, existing, binding
+        )
+
+    async def _prefer_settle_before_unknown_allow_async(
+        self,
+        request_id: str,
+        tool: str,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        existing: LedgerEntry,
+        binding: ToolTransitionBinding,
+    ) -> LedgerEntry | None:
+        """Async variant of :meth:`_prefer_settle_before_unknown_allow`."""
+        if existing.resolved_terminal_outcome() != TerminalOutcome.UNKNOWN:
+            return None
+        released = self._consume_operator_resolution(
+            request_id, tool, args, kwargs, existing, binding
+        )
+        if released is not None:
+            return released
+        return await self._attempt_reconcile_async(
+            request_id, tool, args, kwargs, existing, binding
+        )
+
+    def _reset_unknown_for_same_key_retry(
+        self,
+        request_id: str,
+        tool: str,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        existing: LedgerEntry,
+        binding: ToolTransitionBinding,
+    ) -> LedgerEntry | None:
+        """CAS-reset ``UNKNOWN`` → fresh in-flight for opt-in same-key retry.
+
+        ``try_claim_inflight`` refuses to overwrite ``UNKNOWN`` (fail-closed for
+        peers). After the gate has ALLOW'd within the provider key window, this
+        is the authorized transition — same shape as Reconciler ``NOT_EXECUTED``.
+        """
+        pkey_first = (
+            existing.provider_key_first_attempt_at
+            if existing.provider_idempotency_key is not None
+            else None
+        )
+        fresh = self._new_inflight_entry(
+            request_id,
+            tool,
+            args,
+            kwargs,
+            binding=binding,
+            _provider_key_first_attempt_at=pkey_first,
+        )
+        if not self._try_transition(
+            fresh,
+            expected_from=_UNKNOWN_SAME_KEY_RETRY_OUTCOMES,
+        ):
+            return None
+        _outcome_reexec_authorized.set(True)
+        return fresh
+
     def claim_side_effecting(
         self,
         request_id: str,
@@ -2033,8 +2123,23 @@ class ActionLedger:
                         poll_deadline=poll_deadline,
                     )
                     continue
-                if gate == TransitionGate.ALLOW and self._reclaim_requires_death_signal:
-                    if not has_worker_death_evidence(
+                if gate == TransitionGate.ALLOW:
+                    settled = self._prefer_settle_before_unknown_allow(
+                        request_id, tool, args, kwargs, existing, binding
+                    )
+                    if settled is not None:
+                        return settled
+                    if (
+                        existing.resolved_terminal_outcome()
+                        == TerminalOutcome.UNKNOWN
+                    ):
+                        reset = self._reset_unknown_for_same_key_retry(
+                            request_id, tool, args, kwargs, existing, binding
+                        )
+                        if reset is not None:
+                            return reset
+                        continue
+                    if self._reclaim_requires_death_signal and not has_worker_death_evidence(
                         existing,
                         now=time.time(),
                         presumed_dead_after=self._presumed_dead_after,
@@ -2251,8 +2356,23 @@ class ActionLedger:
                         poll_deadline=poll_deadline,
                     )
                     continue
-                if gate == TransitionGate.ALLOW and self._reclaim_requires_death_signal:
-                    if not has_worker_death_evidence(
+                if gate == TransitionGate.ALLOW:
+                    settled = await self._prefer_settle_before_unknown_allow_async(
+                        request_id, tool, args, kwargs, existing, binding
+                    )
+                    if settled is not None:
+                        return settled
+                    if (
+                        existing.resolved_terminal_outcome()
+                        == TerminalOutcome.UNKNOWN
+                    ):
+                        reset = self._reset_unknown_for_same_key_retry(
+                            request_id, tool, args, kwargs, existing, binding
+                        )
+                        if reset is not None:
+                            return reset
+                        continue
+                    if self._reclaim_requires_death_signal and not has_worker_death_evidence(
                         existing,
                         now=time.time(),
                         presumed_dead_after=self._presumed_dead_after,

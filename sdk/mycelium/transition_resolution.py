@@ -184,6 +184,42 @@ def _same_provider_idempotency_key(
     return incoming_provider_idempotency_key == stored
 
 
+def _same_key_retry_within_validity_window(
+    existing: _ExistingTransition,
+    binding: ToolTransitionBinding,
+    *,
+    incoming_provider_idempotency_key: str | None,
+    now: float | None,
+) -> bool:
+    """Opt-in same-key retry while the provider dedupe window is still valid.
+
+    Requires both ``provider_idempotency_key_param`` (enforcement) and
+    ``provider_idempotency_key_ttl`` (window). Without the TTL we cannot know
+    whether the provider still dedupes — stay fail-closed.
+    """
+    if binding.provider_idempotency_key_param is None:
+        return False
+    if binding.provider_idempotency_key_ttl is None:
+        return False
+    if binding.retry_permission != (
+        RetryPermission.RETRY_ONLY_WITH_SAME_PROVIDER_IDEMPOTENCY_KEY
+    ):
+        return False
+    if binding.side_effect_class not in (
+        SideEffectClass.IDEMPOTENT_MUTATE,
+        SideEffectClass.KEYED_MUTATE,
+    ):
+        return False
+    if not _same_provider_idempotency_key(
+        existing, incoming_provider_idempotency_key
+    ):
+        return False
+    return (
+        provider_key_validity(existing, binding, now=now)
+        == ProviderKeyValidity.VALID
+    )
+
+
 def resolve_side_effect_gate(
     existing: _ExistingTransition,
     binding: ToolTransitionBinding,
@@ -213,6 +249,12 @@ def resolve_side_effect_gate(
     expired since the first attempt, the gate returns ``HARD_BLOCK`` even for
     same-key retries: the provider may have purged its deduplication state,
     making the "safe" retry a double-charge risk.
+
+    ``UNKNOWN`` defaults to ``HARD_BLOCK`` (Reconciler / operator release).
+    Opt-in exception: ``keyed_mutate`` / ``idempotent_mutate`` with both
+    ``provider_idempotency_key_param`` and ``provider_idempotency_key_ttl``,
+    same incoming key, and a still-``VALID`` window → ``ALLOW``. Expired
+    keys stay fail-closed. ``BLOCKED`` is never auto-retried.
     """
     if transition_needs_repair(existing):
         return TransitionGate.REPAIR
@@ -229,7 +271,17 @@ def resolve_side_effect_gate(
     if outcome == TerminalOutcome.IN_FLIGHT:
         return TransitionGate.POLL
 
-    if outcome in (TerminalOutcome.BLOCKED, TerminalOutcome.UNKNOWN):
+    if outcome == TerminalOutcome.BLOCKED:
+        return TransitionGate.HARD_BLOCK
+
+    if outcome == TerminalOutcome.UNKNOWN:
+        if _same_key_retry_within_validity_window(
+            existing,
+            binding,
+            incoming_provider_idempotency_key=incoming_provider_idempotency_key,
+            now=now,
+        ):
+            return TransitionGate.ALLOW
         return TransitionGate.HARD_BLOCK
 
     if outcome == TerminalOutcome.EXPIRED:

@@ -1,10 +1,15 @@
-"""Tests for provider idempotency-key validity window (v1.17.0).
+"""Tests for provider idempotency-key validity window.
 
 When a tool declares ``provider_idempotency_key_ttl``, the ledger records
 ``provider_key_first_attempt_at`` on the first claim.  On a same-key retry of
 a ``FAILED_BEFORE_EFFECT`` transition the gate checks whether the window has
 expired — if so the provider may have purged its deduplication state and the
 retry is hardened to ``HARD_BLOCK``.
+
+Declaring both ``provider_idempotency_key_param`` and ``provider_idempotency_key_ttl``
+also unlocks same-key retry on ``UNKNOWN`` while the window is ``VALID``.
+Reconciler / operator release remain preferred before re-exec; expired keys
+stay fail-closed.
 """
 
 from __future__ import annotations
@@ -18,6 +23,7 @@ from mycelium import (
     InMemoryLedgerStorage,
     LedgerEntry,
     LedgerHardBlockError,
+    ReconcileResult,
     SideEffectBoundary,
     SideEffectClass,
     TerminalOutcome,
@@ -27,6 +33,8 @@ from mycelium import (
     ledger_sync,
     load_config_from_string,
     provider_key_validity,
+    record_external_operation,
+    side_effect,
 )
 from mycelium.transition import ProviderKeyValidity, RetryPermission
 from mycelium.transition_resolution import (
@@ -190,6 +198,90 @@ def test_untracked_ttl_ignored_by_gate() -> None:
     assert gate == TransitionGate.ALLOW
 
 
+# --- UNKNOWN + same-key within validity window -----------------------------
+
+
+def test_unknown_same_key_valid_ttl_allows() -> None:
+    binding = _keyed_binding(ttl=60.0)
+    entry = _entry(
+        "k1",
+        terminal_outcome=TerminalOutcome.UNKNOWN.value,
+        provider_key_first_attempt_at=time.time() - 10.0,
+    )
+    gate = resolve_side_effect_gate(
+        entry,
+        binding,
+        incoming_provider_idempotency_key="k1",
+        now=time.time(),
+    )
+    assert gate == TransitionGate.ALLOW
+
+
+def test_unknown_same_key_expired_ttl_hard_blocks() -> None:
+    binding = _keyed_binding(ttl=60.0)
+    entry = _entry(
+        "k1",
+        terminal_outcome=TerminalOutcome.UNKNOWN.value,
+        provider_key_first_attempt_at=time.time() - 120.0,
+    )
+    gate = resolve_side_effect_gate(
+        entry,
+        binding,
+        incoming_provider_idempotency_key="k1",
+        now=time.time(),
+    )
+    assert gate == TransitionGate.HARD_BLOCK
+
+
+def test_unknown_without_ttl_stays_hard_block() -> None:
+    """TTL is the opt-in for UNKNOWN same-key retry — omit it → HARD_BLOCK."""
+    binding = _keyed_binding(ttl=None)
+    entry = _entry(
+        "k1",
+        terminal_outcome=TerminalOutcome.UNKNOWN.value,
+        provider_key_first_attempt_at=time.time() - 10.0,
+    )
+    gate = resolve_side_effect_gate(
+        entry,
+        binding,
+        incoming_provider_idempotency_key="k1",
+        now=time.time(),
+    )
+    assert gate == TransitionGate.HARD_BLOCK
+
+
+def test_unknown_different_key_hard_blocks_within_ttl() -> None:
+    binding = _keyed_binding(ttl=60.0)
+    entry = _entry(
+        "k1",
+        terminal_outcome=TerminalOutcome.UNKNOWN.value,
+        provider_key_first_attempt_at=time.time() - 10.0,
+    )
+    gate = resolve_side_effect_gate(
+        entry,
+        binding,
+        incoming_provider_idempotency_key="k2",
+        now=time.time(),
+    )
+    assert gate == TransitionGate.HARD_BLOCK
+
+
+def test_blocked_never_allows_same_key_even_within_ttl() -> None:
+    binding = _keyed_binding(ttl=60.0)
+    entry = _entry(
+        "k1",
+        terminal_outcome=TerminalOutcome.BLOCKED.value,
+        provider_key_first_attempt_at=time.time() - 10.0,
+    )
+    gate = resolve_side_effect_gate(
+        entry,
+        binding,
+        incoming_provider_idempotency_key="k1",
+        now=time.time(),
+    )
+    assert gate == TransitionGate.HARD_BLOCK
+
+
 # --- hard_block_message includes key expiry info ---------------------------
 
 
@@ -262,6 +354,111 @@ def test_valid_key_retry_succeeds() -> None:
 
     assert attempts["n"] == 2
     assert result == {"status": "sent"}
+
+
+class _StubReconciler:
+    def __init__(self, result: ReconcileResult) -> None:
+        self._result = result
+        self.calls: list[str] = []
+
+    def reconcile(self, entry: LedgerEntry) -> ReconcileResult:
+        self.calls.append(entry.request_id)
+        return self._result
+
+
+def test_unknown_same_key_valid_ttl_retries_without_reconciler() -> None:
+    storage = InMemoryLedgerStorage()
+    binding = _keyed_binding(ttl=300.0)
+    attempts = {"n": 0}
+
+    @ledger_sync(storage=storage, transition_binding=binding)
+    def send_payment(amount: float, idempotency_key: str) -> dict[str, str]:
+        attempts["n"] += 1
+        with side_effect():
+            if attempts["n"] == 1:
+                raise RuntimeError("timeout after maybe-crossed")
+            return {"status": "sent"}
+
+    scope = TransitionScope(thread_id="t1", run_id="r1")
+    with execution_scope(scope):
+        with pytest.raises(RuntimeError):
+            send_payment(amount=10.0, idempotency_key="k1", tool_call_id="c1")
+
+        result = send_payment(amount=10.0, idempotency_key="k1", tool_call_id="c1")
+
+    assert attempts["n"] == 2
+    assert result == {"status": "sent"}
+
+
+def test_unknown_same_key_expired_ttl_hard_blocks_e2e() -> None:
+    storage = InMemoryLedgerStorage()
+    binding = _keyed_binding(ttl=0.0)
+    attempts = {"n": 0}
+
+    @ledger_sync(storage=storage, transition_binding=binding)
+    def send_payment(amount: float, idempotency_key: str) -> dict[str, str]:
+        attempts["n"] += 1
+        with side_effect():
+            raise RuntimeError("timeout after maybe-crossed")
+
+    scope = TransitionScope(thread_id="t1", run_id="r1")
+    with execution_scope(scope):
+        with pytest.raises(RuntimeError):
+            send_payment(amount=10.0, idempotency_key="k1", tool_call_id="c1")
+
+        with pytest.raises(LedgerHardBlockError, match="manual reconciliation"):
+            send_payment(amount=10.0, idempotency_key="k1", tool_call_id="c1")
+
+    assert attempts["n"] == 1
+
+
+def test_unknown_same_key_prefers_reconciler_over_reexec() -> None:
+    storage = InMemoryLedgerStorage()
+    binding = _keyed_binding(ttl=300.0)
+    reconciler = _StubReconciler(ReconcileResult.completed({"status": "settled"}))
+    attempts = {"n": 0}
+
+    @ledger_sync(
+        storage=storage, transition_binding=binding, reconciler=reconciler
+    )
+    def send_payment(amount: float, idempotency_key: str) -> dict[str, str]:
+        attempts["n"] += 1
+        with side_effect():
+            record_external_operation("pi_unknown_1")
+            raise RuntimeError("timeout after maybe-crossed")
+
+    scope = TransitionScope(thread_id="t1", run_id="r1")
+    with execution_scope(scope):
+        with pytest.raises(RuntimeError):
+            send_payment(amount=10.0, idempotency_key="k1", tool_call_id="c1")
+
+        result = send_payment(amount=10.0, idempotency_key="k1", tool_call_id="c1")
+
+    assert result == {"status": "settled"}
+    assert attempts["n"] == 1
+    assert len(reconciler.calls) == 1
+
+
+def test_unknown_without_ttl_still_hard_blocks_e2e() -> None:
+    storage = InMemoryLedgerStorage()
+    binding = _keyed_binding(ttl=None)
+    attempts = {"n": 0}
+
+    @ledger_sync(storage=storage, transition_binding=binding)
+    def send_payment(amount: float, idempotency_key: str) -> dict[str, str]:
+        attempts["n"] += 1
+        with side_effect():
+            raise RuntimeError("timeout after maybe-crossed")
+
+    scope = TransitionScope(thread_id="t1", run_id="r1")
+    with execution_scope(scope):
+        with pytest.raises(RuntimeError):
+            send_payment(amount=10.0, idempotency_key="k1", tool_call_id="c1")
+
+        with pytest.raises(LedgerHardBlockError):
+            send_payment(amount=10.0, idempotency_key="k1", tool_call_id="c1")
+
+    assert attempts["n"] == 1
 
 
 # --- serialisation round-trip ----------------------------------------------

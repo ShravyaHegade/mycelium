@@ -7,6 +7,12 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
 
 ### Added
 
+- **Provider idempotency-key validity window on `UNKNOWN`:** declaring both
+  `provider_idempotency_key_param` and `provider_idempotency_key_ttl` unlocks
+  same-key retry while the window is still `VALID`. Claim prefers Reconciler /
+  operator release first; expired keys stay `HARD_BLOCK` (no double-spend after
+  provider dedupe expiry). Without the TTL, `UNKNOWN` remains hard-blocked.
+  `BLOCKED` is never auto-retried.
 - **Budget LLM auto-wiring:** wrap the model turn once so hosts do not have
   to remember `BudgetGuard.check("llm")` before every call.
   `wrap_llm_callable` / `@budget_llm` (raw loop), `instrument_langgraph_llm`

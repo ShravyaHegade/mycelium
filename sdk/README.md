@@ -814,6 +814,21 @@ With it declared, on a retry of a transition that failed before the effect:
 | different key | `HARD_BLOCK` (would risk a second, undeduped effect) |
 | missing on either side | `HARD_BLOCK` |
 
+Add `provider_idempotency_key_ttl` (seconds) when you know the provider's
+dedupe window. Same-key `FAILED_BEFORE_EFFECT` retries harden to `HARD_BLOCK`
+after expiry. Declaring **both** param and TTL also unlocks same-key retry on
+`UNKNOWN` while the window is still valid — Reconciler / operator release stay
+preferred; after expiry Mycelium fails closed (no blind double-spend). Omit the
+TTL to keep today's behaviour (`UNKNOWN` always hard-blocks).
+
+```yaml
+tools:
+  send_payment:
+    side_effect_class: keyed_mutate
+    provider_idempotency_key_param: idempotency_key
+    provider_idempotency_key_ttl: 86400   # match provider key lifetime
+```
+
 The declared key is excluded from the transition-key fingerprint, so a retry that swaps the key still resolves to the *same* transition and is caught rather than silently starting a new one. This is **opt-in**: tools that don't declare the param keep the previous cooperative behavior.
 
 #### Payment-class identity (server-authoritative)

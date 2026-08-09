@@ -93,10 +93,12 @@ class ProviderKeyValidity(StrEnum):
     When a tool declares ``provider_idempotency_key_ttl``, the first attempt's
     timestamp is recorded on the ledger entry.  On a subsequent same-key retry
     the gate checks whether the window has expired — if so the provider may
-    have purged the key, making the retry unsafe.
+    have purged the key, making the retry unsafe.  For ``UNKNOWN``, declaring
+    both the key param and this TTL is the opt-in that allows same-key retry
+    while the window is still ``VALID`` (Reconciler remains preferred).
 
     ``UNTRACKED`` means the tool has no TTL configured (existing behaviour
-    unchanged).
+    unchanged — ``UNKNOWN`` stays hard-blocked).
     """
 
     VALID = "VALID"
@@ -113,11 +115,12 @@ def provider_key_validity(
     """Classify whether a provider idempotency key's validity window has elapsed.
 
     Returns ``UNTRACKED`` when the binding has no ``provider_idempotency_key_ttl``
-    (the existing idempotency-key retry behaviour is unchanged).  ``VALID`` when
-    the elapsed time since the first attempt is still within the declared window.
-    ``EXPIRED`` when the window has passed — the provider may have purged its
-    deduplication state so the ``FAILED_BEFORE_EFFECT`` retry should be hardened
-    to a ``HARD_BLOCK``.
+    (the existing idempotency-key retry behaviour is unchanged; ``UNKNOWN``
+    same-key retry stays off).  ``VALID`` when the elapsed time since the first
+    attempt is still within the declared window.  ``EXPIRED`` when the window
+    has passed — the provider may have purged its deduplication state, so
+    same-key ``FAILED_BEFORE_EFFECT`` / ``UNKNOWN`` retries harden to
+    ``HARD_BLOCK``.
     """
     ttl = binding.provider_idempotency_key_ttl
     if ttl is None:
