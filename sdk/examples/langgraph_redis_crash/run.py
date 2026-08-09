@@ -74,7 +74,7 @@ def _demo_yaml(
     lease_ttl: float,
     poll_timeout: float,
 ) -> str:
-    """YAML for this run — same shape as mycelium.yaml, unique Redis prefix."""
+    """YAML for this run — same shape as mycelium.example.yaml, unique prefix."""
     return f"""
 integrations:
   langgraph:
@@ -437,7 +437,7 @@ def main() -> int:
 
     print()
     print("Proof: same tool_call never double-charges across redispatch or crash.")
-    print("Copy mycelium.yaml next to your graph; keep Redis + signing_key in prod.")
+    print("Copy mycelium.example.yaml → mycelium.yaml; keep Redis + signing_key in prod.")
     return 0
 
 

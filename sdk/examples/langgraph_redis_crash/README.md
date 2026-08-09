@@ -29,7 +29,8 @@ Expected:
 
 ## Drop into your app
 
-1. Copy [`mycelium.yaml`](mycelium.yaml) next to your graph.
+1. Copy [`mycelium.example.yaml`](mycelium.example.yaml) to `mycelium.yaml`
+   next to your graph.
 2. `pip install 'mycelium-runtime[langgraph]' redis`
 3. Set `MYCELIUM_REDIS_URL` and `MYCELIUM_SIGNING_KEY`.
 4. Wrap the payment (or other mutate) tool:

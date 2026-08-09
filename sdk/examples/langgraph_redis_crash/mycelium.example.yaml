@@ -1,0 +1,41 @@
+# Copy-paste starter: LangGraph tool + Redis ledger + signed receipts.
+#
+# Prereqs:
+#   docker run -d --name mycelium-redis -p 6379:6379 redis:7
+#   pip install 'mycelium-runtime[langgraph]' redis
+#   export MYCELIUM_REDIS_URL=redis://127.0.0.1:6379/15
+#   export MYCELIUM_SIGNING_KEY=replace-me-in-prod
+#
+# Then either:
+#   python examples/langgraph_redis_crash/run.py   # from sdk/
+# or drop this YAML next to your graph and `@config.apply` your tools.
+
+integrations:
+  langgraph:
+    enabled: true
+
+transition:
+  agent_id: langgraph-payment-demo
+  policy_version: "2026.08.1"
+  lease_ttl: 3600
+  poll_interval: 0.05
+  poll_timeout: 300
+  reclaim_requires_death_signal: true
+
+action_ledger:
+  storage: redis
+  url_env: MYCELIUM_REDIS_URL
+  prefix: "mycelium:example:langgraph_crash:"
+  tools:
+    - send_payment
+
+audit_receipt:
+  signing_key_env: MYCELIUM_SIGNING_KEY
+  storage: file
+  path: ./mycelium-example-receipts.jsonl
+  auto: true
+
+tools:
+  send_payment:
+    side_effect_class: non_idempotent_mutate
+    audit_receipt: true
