@@ -18,7 +18,7 @@ The taxonomy **is** the product story. Each ID is a real failure class from prod
 
 | ID | Failure mode | Promise |
 |----|--------------|---------|
-| **AF-002** | Duplicate / untraceable side effects | **Any tool, any provider:** prove run-or-not and enforce at-most-once — ledger, lease, reconcile, operator release |
+| **AF-002** | Observability black hole | **Any tool, any provider:** prove run-or-not and enforce at-most-once — ledger, lease, reconcile, operator release |
 | **AF-003** | Infinite reasoning loops | Same tool+args under new call ids soft- then hard-block until an operator releases |
 | **AF-004** | Tool misuse | Invalid args and out-of-scope tools are blocked before they run |
 | **AF-006** | Context corruption | Stale or broken tool/history context is caught before the next turn |
