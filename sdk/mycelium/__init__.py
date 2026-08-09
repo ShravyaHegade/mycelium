@@ -196,6 +196,7 @@ from mycelium.tool_boundary import (
 from mycelium.tool_registry import ToolRegistry
 from mycelium.tool_runner import ToolRunner
 from mycelium.transition import (
+    HandoffLink,
     LeaseValidity,
     ProviderKeyValidity,
     RetryPermission,
@@ -204,7 +205,6 @@ from mycelium.transition import (
     Spendability,
     TerminalOutcome,
     ToolTransitionBinding,
-    HandoffLink,
     TransitionScope,
     derive_transition_key,
     derive_transition_key_for_call,
