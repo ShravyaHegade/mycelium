@@ -13,6 +13,11 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
   at-most-once claim keys. Explicit kwargs override the active scope.
   `list_transitions(parent_request_id=…)` and CLI
   `mycelium transitions list --parent` / `show` expose the link.
+- **Async wait helper (LangGraph redispatch DX):**
+  `ActionLedger.wait_for_transition` / `wait_for_transition_async` poll until
+  a known `request_id` leaves `IN_FLIGHT` without reclaim/reconcile/UNKNOWN
+  side effects. Decorator claim paths already poll; this is for custom async
+  nodes that want a peer-wait without re-claiming.
 
 ## 1.29.0 (2026-08-09)
 

@@ -88,7 +88,7 @@ class LedgerPendingError(Exception):
 
 
 class LedgerPollTimeoutError(LedgerError):
-    """Raised when polling for a read-only in-flight transition times out."""
+    """Raised when polling an in-flight transition times out."""
 
 
 class LedgerHardBlockError(LedgerError):
@@ -1270,6 +1270,72 @@ class ActionLedger:
             entries.append(entry)
         entries.sort(key=lambda entry: entry.started_at)
         return entries
+
+    def wait_for_transition(
+        self,
+        request_id: str,
+        *,
+        poll_interval: float | None = None,
+        poll_timeout: float | None = None,
+    ) -> LedgerEntry:
+        """Block until ``request_id`` leaves ``IN_FLIGHT`` (sync peer wait).
+
+        DX helper for custom claim/redispatch loops. Decorator claim paths
+        already poll; use this when coordinating outside ``@ledger`` /
+        ``@ledger_sync``. Does not reclaim, reconcile, or mark ``UNKNOWN`` on
+        timeout — callers own the next gate. Raises
+        :class:`LedgerError` if the entry is missing;
+        :class:`LedgerPollTimeoutError` if still in-flight at deadline.
+        """
+        interval = self._poll_interval if poll_interval is None else poll_interval
+        timeout = self._poll_timeout if poll_timeout is None else poll_timeout
+        poll_deadline = time.time() + timeout if timeout is not None else None
+        while True:
+            current = self.get(request_id)
+            if current is None:
+                raise LedgerError(
+                    f"Cannot wait for unknown request {request_id!r}"
+                )
+            outcome = current.resolved_terminal_outcome()
+            if outcome != TerminalOutcome.IN_FLIGHT:
+                return current
+            if poll_deadline is not None and time.time() >= poll_deadline:
+                raise LedgerPollTimeoutError(
+                    f"Timed out waiting for request {request_id!r}"
+                )
+            time.sleep(interval)
+
+    async def wait_for_transition_async(
+        self,
+        request_id: str,
+        *,
+        poll_interval: float | None = None,
+        poll_timeout: float | None = None,
+    ) -> LedgerEntry:
+        """Async peer wait for LangGraph-style redispatches (``asyncio.sleep``).
+
+        Same semantics as :meth:`wait_for_transition`, but does not block the
+        event loop. Prefer this from async tools / custom nodes when a peer
+        already holds the lease and you want the terminal entry without
+        re-claiming.
+        """
+        interval = self._poll_interval if poll_interval is None else poll_interval
+        timeout = self._poll_timeout if poll_timeout is None else poll_timeout
+        poll_deadline = time.time() + timeout if timeout is not None else None
+        while True:
+            current = self.get(request_id)
+            if current is None:
+                raise LedgerError(
+                    f"Cannot wait for unknown request {request_id!r}"
+                )
+            outcome = current.resolved_terminal_outcome()
+            if outcome != TerminalOutcome.IN_FLIGHT:
+                return current
+            if poll_deadline is not None and time.time() >= poll_deadline:
+                raise LedgerPollTimeoutError(
+                    f"Timed out waiting for request {request_id!r}"
+                )
+            await asyncio.sleep(interval)
 
     def release(
         self,
