@@ -12,6 +12,8 @@ Not recovery after. Not tracing or dashboards. Prevention at the tool boundary.
 
 *Early but API-stable (**v1.29.0**): breaking changes only at major versions. The catalog grows; the promise stays.*
 
+Early design-partner use: **live outbound-email lane** (Week 1: 25 ledgered sends, 0 duplicates). Not a public logo; the interactive sandbox is separate.
+
 ## The promise — failure-mode catalog (AF-00N)
 
 The taxonomy **is** the product story. Each ID is a real failure class from production GitHub issues across LangChain, LangGraph, CrewAI, and related stacks. Mycelium ships a guard (or roadmap module) per class:
