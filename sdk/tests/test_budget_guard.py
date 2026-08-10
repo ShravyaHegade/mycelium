@@ -28,7 +28,6 @@ from mycelium.loop_guard import (
     VERIFIED_ALLOW_ONCE,
     VERIFIED_CLEAR,
 )
-from mycelium.tool_boundary import ToolBoundaryError
 from mycelium.transition import TransitionScope, execution_scope
 
 
@@ -44,7 +43,32 @@ def test_parse_duration_seconds() -> None:
         parse_duration_seconds("nope")
 
 
-def test_max_steps_soft_then_hard() -> None:
+def test_max_steps_ceiling_allows_n() -> None:
+    """Honey Mail 2: max_steps=N must run N bodies (warn_at must not steal one)."""
+    for warn_at in (1.0, 0.8):
+        guard = BudgetGuard(
+            InMemoryBudgetGuardStorage(), max_steps=3, warn_at=warn_at
+        )
+        calls = {"n": 0}
+
+        @budget_guard_sync(guard)
+        def search(q: str, *, tool_call_id: str) -> str:
+            calls["n"] += 1
+            return q
+
+        with execution_scope(_scope(f"steps-{warn_at}")):
+            for i in range(3):
+                assert search(q="foo", tool_call_id=f"c{i}") == "foo"
+            assert calls["n"] == 3
+            state = guard.get_state(f"steps-{warn_at}")
+            assert state is not None
+            assert state.steps == 3
+            with pytest.raises(LedgerHardBlockError):
+                search(q="foo", tool_call_id="c3")
+            assert calls["n"] == 3
+
+
+def test_max_steps_soft_warn_allows_then_hard() -> None:
     guard = BudgetGuard(InMemoryBudgetGuardStorage(), max_steps=5, warn_at=0.8)
     calls = {"n": 0}
 
@@ -54,22 +78,48 @@ def test_max_steps_soft_then_hard() -> None:
         return q
 
     with execution_scope(_scope()):
-        for i in range(3):
+        for i in range(4):
             assert search(q="foo", tool_call_id=f"c{i}") == "foo"
-        assert calls["n"] == 3
+        assert calls["n"] == 4
 
-        with pytest.raises(ToolBoundaryError) as soft:
-            search(q="foo", tool_call_id="c3")
-        assert soft.value.violation == "budget_warning"
-        assert calls["n"] == 3
-
-        assert search(q="foo", tool_call_id="c4") == "foo"
-        assert search(q="foo", tool_call_id="c5") == "foo"
+        with pytest.warns(UserWarning, match="approaching max_steps"):
+            assert search(q="foo", tool_call_id="c4") == "foo"
         assert calls["n"] == 5
+        state = guard.get_state("run-1")
+        assert state is not None
+        assert state.soft_issued.get("max_steps")
 
         with pytest.raises(LedgerHardBlockError):
-            search(q="foo", tool_call_id="c6")
+            search(q="foo", tool_call_id="c5")
         assert calls["n"] == 5
+
+
+def test_warn_at_does_not_refuse_under_ceiling_usd() -> None:
+    """Honey Mail 2: warn_at is permissive — $0.85 of $1.00 must not refuse."""
+    guard = BudgetGuard(
+        InMemoryBudgetGuardStorage(),
+        max_usd=1.0,
+        warn_at=0.8,
+        on_missing_meter="off",
+    )
+    with execution_scope(_scope("usd-warn")):
+        guard.record_usage(usd=0.80)
+        with pytest.warns(UserWarning, match="approaching max_usd"):
+            guard.check(KIND_LLM, increment_steps=False)
+        guard.record_usage(usd=0.05)
+        state = guard.get_state("usd-warn")
+        assert state is not None
+        assert state.usd == pytest.approx(0.85)
+        assert not state.hard_blocked
+        assert state.soft_issued.get("max_usd")
+
+        guard.record_usage(usd=0.20)  # crosses 1.00
+        state = guard.get_state("usd-warn")
+        assert state is not None
+        assert state.hard_blocked
+        assert state.blocked_dimension == "max_usd"
+        with pytest.raises(LedgerHardBlockError):
+            guard.check(KIND_LLM, increment_steps=False)
 
 
 def test_llm_check_and_record_usage_usd() -> None:

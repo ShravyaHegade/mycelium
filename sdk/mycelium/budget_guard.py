@@ -34,7 +34,6 @@ from mycelium.loop_guard import (
     resolve_loop_scope_key,
 )
 from mycelium.storage.json_file import LockedJsonDictFile
-from mycelium.tool_boundary import ToolBoundaryError
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -697,8 +696,9 @@ class BudgetGuard:
         """Gate the next consequential step; optionally reserve one step.
 
         Call before an LLM turn (``kind="llm"``) or tool body (``kind="tool"``).
-        Hard-blocks raise ``LedgerHardBlockError``; soft warns raise
-        ``ToolBoundaryError`` without incrementing.
+        Hard-blocks raise ``LedgerHardBlockError``. Soft warns
+        (``warn_at``) emit ``warnings.warn`` once per dimension and **allow**
+        the step — they must not shrink the declared ceiling.
         """
         global _SCOPE_MISSING_WARNED
 
@@ -721,7 +721,7 @@ class BudgetGuard:
                 _SCOPE_MISSING_WARNED = True
             return BudgetRunState(scope_key="unscoped")
 
-        outcome: dict[str, Any] = {"exc": None, "state": None}
+        outcome: dict[str, Any] = {"exc": None, "state": None, "soft": None}
 
         def apply(state: BudgetRunState) -> BudgetRunState:
             now = time.time()
@@ -748,7 +748,8 @@ class BudgetGuard:
                 outcome["state"] = state
                 return state
 
-            hard = self._hard_dimension(state, now=now, pending_steps=1 if increment_steps else 0)
+            pending = 1 if increment_steps else 0
+            hard = self._hard_dimension(state, now=now, pending_steps=pending)
             if hard is not None:
                 if state.allow_once:
                     state.allow_once = False
@@ -767,29 +768,15 @@ class BudgetGuard:
                     outcome["state"] = state
                     return state
 
-            soft = self._soft_dimension(state, now=now, pending_steps=1 if increment_steps else 0)
+            soft = self._soft_dimension(state, now=now, pending_steps=pending)
             if soft is not None and not state.soft_issued.get(soft):
                 state.soft_issued[soft] = True
                 remaining = state.remaining(self._ceilings, now=now)
-                outcome["exc"] = ToolBoundaryError(
-                    f"budget soft-warn: {soft}",
-                    violation=VIOLATION_BUDGET_WARN,
-                    tool_name=tool or kind,
-                    llm_message=(
-                        f"Budget warning: approaching {soft} ceiling "
-                        f"(warn_at={self._warn_at}). Remaining: "
-                        f"{remaining.to_dict()}. Change strategy or stop; "
-                        "the step was not executed."
-                    ),
-                    expected=f"under warn_at for {soft}",
-                    actual=soft,
-                    recovery_hint=(
-                        "Reduce work, finish the run, or ask an operator to "
-                        "raise/release the budget."
-                    ),
+                outcome["soft"] = (
+                    f"BudgetGuard: approaching {soft} ceiling "
+                    f"(warn_at={self._warn_at}). Remaining: {remaining.to_dict()}. "
+                    "Step allowed; hard-block only at the declared ceiling."
                 )
-                outcome["state"] = state
-                return state
 
             if increment_steps:
                 state.steps += 1
@@ -800,6 +787,9 @@ class BudgetGuard:
         exc = outcome["exc"]
         if exc is not None:
             raise exc
+        soft_msg = outcome["soft"]
+        if soft_msg is not None:
+            warnings.warn(soft_msg, stacklevel=2)
         assert outcome["state"] is not None
         return outcome["state"]
 
@@ -992,6 +982,11 @@ class BudgetGuard:
         now: float,
         pending_steps: int,
     ) -> str | None:
+        """Return the ceiling that the next unit would exceed.
+
+        ``max_steps=N`` allows exactly N successful step reservations
+        (``pending_steps=1``): block only when ``steps + pending > N``.
+        """
         c = self._ceilings
         if c.max_duration is not None and (now - state.started_at) >= c.max_duration:
             return "max_duration"
@@ -1010,7 +1005,13 @@ class BudgetGuard:
         now: float,
         pending_steps: int,
     ) -> str | None:
-        """Warn when approaching a ceiling, but never on the final allowed unit."""
+        """Warn when meters reach ``warn_at`` of a ceiling (permissive).
+
+        Uses committed meters only (not the pending step), so a warn never
+        steals the final allowed unit. ``pending_steps`` is accepted for API
+        symmetry with ``_hard_dimension`` and ignored.
+        """
+        _ = pending_steps  # warn on committed usage; do not project the next step
         c = self._ceilings
         if c.max_duration is not None:
             elapsed = now - state.started_at
@@ -1019,11 +1020,10 @@ class BudgetGuard:
                 and _ratio(elapsed, c.max_duration) >= self._warn_at
             ):
                 return "max_duration"
-        if c.max_steps is not None:
-            projected = state.steps + pending_steps
+        if c.max_steps is not None and c.max_steps > 0:
             if (
-                projected < c.max_steps
-                and _ratio(float(projected), float(c.max_steps)) >= self._warn_at
+                state.steps < c.max_steps
+                and _ratio(float(state.steps), float(c.max_steps)) >= self._warn_at
             ):
                 return "max_steps"
         if c.max_tokens is not None and c.max_tokens > 0:
