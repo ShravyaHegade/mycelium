@@ -2,29 +2,14 @@
 
 from __future__ import annotations
 
-import pytest
+from backend_gates import require_redis_or_skip
 
-from mycelium.proofs.langgraph_7417_redis import (
-    ENV_REDIS_URL,
-    prove_two_worker_redis_redispatch,
-    redis_reachable,
-    resolve_redis_url,
-)
-
-pytest.importorskip("redis")
-
-_REDIS_URL = resolve_redis_url()
-pytestmark = pytest.mark.skipif(
-    not redis_reachable(_REDIS_URL),
-    reason=(
-        f"real Redis required at {_REDIS_URL!r} "
-        f"(set {ENV_REDIS_URL} or start redis-server)"
-    ),
-)
+from mycelium.proofs.langgraph_7417_redis import prove_two_worker_redis_redispatch
 
 
 def test_two_worker_redis_cloud_style_redispatch() -> None:
-    result = prove_two_worker_redis_redispatch()
+    url = require_redis_or_skip()
+    result = prove_two_worker_redis_redispatch(url=url)
     assert result["workers"] == 2
     assert result["storage"] == "redis"
     assert result["executions"] == 1

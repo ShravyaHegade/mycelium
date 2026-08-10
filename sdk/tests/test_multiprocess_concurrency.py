@@ -29,8 +29,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-import pytest
-
 from mycelium import (
     ActionLedger,
     FileLedgerStorage,
@@ -42,11 +40,6 @@ from mycelium import (
     TransitionScope,
     execution_scope,
     ledger_sync,
-)
-from mycelium.proofs.langgraph_7417_redis import (
-    ENV_REDIS_URL,
-    redis_reachable,
-    resolve_redis_url,
 )
 
 _MP_CTX = mp.get_context("spawn")
@@ -361,24 +354,13 @@ def _redis_contested_worker(payload: dict[str, Any]) -> None:
         client.close()
 
 
-_REDIS_URL = resolve_redis_url()
-
-pytest.importorskip("redis")
-pytestmark = pytest.mark.skipif(
-    not redis_reachable(_REDIS_URL),
-    reason=(
-        f"real Redis required at {_REDIS_URL!r} "
-        f"(set {ENV_REDIS_URL} or start redis-server)"
-    ),
-)
-
-
 def test_two_processes_redis_contested_claim(tmp_path: Path) -> None:
     """Both processes start together and contend for the same payment claim on
     real Redis; exactly one tool-body execution, identical returned results."""
     import redis
+    from backend_gates import require_redis_or_skip
 
-    url = _REDIS_URL
+    url = require_redis_or_skip()
     run_id = f"mp_contested_{os.getpid()}_{int(time.time())}"
     prefix = f"mycelium:proof:mp:{run_id}:ledger:"
     keys = {

@@ -5,6 +5,14 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
 
 ## Unreleased
 
+### Fixed
+
+- **CI runs the at-most-once concurrency proofs** (#69): Redis + Postgres
+  services in `.github/workflows/ci.yml`; install `redis`/`psycopg` extras;
+  `MYCELIUM_CI_REQUIRE_REDIS` / `MYCELIUM_CI_REQUIRE_POSTGRES` fail hard if
+  backends are missing (no silent skip). File-ledger multiprocess tests no
+  longer module-gated behind Redis reachability.
+
 ### Added
 
 - **Thin handoff identity (audit causation):** `handoff_scope(parent_request_id, handoff_id=…)`

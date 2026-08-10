@@ -15,7 +15,6 @@ Release is one-shot, fail-closed, and never deletes ledger entries.
 from __future__ import annotations
 
 import json
-import os
 import time
 from pathlib import Path
 
@@ -566,14 +565,12 @@ def test_release_emits_audit_receipt_when_emitter_configured() -> None:
     assert entry.receipt_ref == receipt.receipt_id
 
 
-@pytest.mark.skipif(
-    not os.environ.get("MYCELIUM_TEST_POSTGRES_DSN"),
-    reason="set MYCELIUM_TEST_POSTGRES_DSN to run Postgres integration tests",
-)
 def test_postgres_release_not_executed_round_trip() -> None:
+    from backend_gates import require_postgres_dsn_or_skip
+
     from mycelium import PostgresLedgerStorage
 
-    dsn = os.environ["MYCELIUM_TEST_POSTGRES_DSN"]
+    dsn = require_postgres_dsn_or_skip()
     storage = PostgresLedgerStorage(dsn, table="mycelium_test_action_ledger")
     request_id = "pg-release-round-trip"
     storage.set(
