@@ -10,8 +10,39 @@ jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
+
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: mycelium
+          POSTGRES_PASSWORD: mycelium
+          POSTGRES_DB: mycelium_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mycelium -d mycelium_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      MYCELIUM_TEST_REDIS_URL: redis://127.0.0.1:6379/15
+      MYCELIUM_TEST_POSTGRES_DSN: postgresql://mycelium:mycelium@127.0.0.1:5432/mycelium_test
+      MYCELIUM_CI_REQUIRE_REDIS: "1"
+      MYCELIUM_CI_REQUIRE_POSTGRES: "1"
 
     steps:
       - uses: actions/checkout@v4
@@ -22,11 +53,26 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install SDK
-        run: pip install -e "./sdk[dev]"
+        # redis + postgres extras so real-backend proofs import the drivers.
+        run: pip install -e "./sdk[dev,redis,postgres]"
 
       - name: SDK unit tests
         working-directory: sdk
+        # Full suite already exercises Redis/Postgres under REQUIRE_*=1.
         run: pytest tests/ -v
+
+      - name: Concurrency proofs must not skip
+        working-directory: sdk
+        # Explicit gate for the flagship at-most-once story (#69).
+        # Focused re-run of concurrency proofs only (not Postgres identity
+        # tests — those already ran above and share durable state).
+        run: >
+          pytest
+          tests/test_proof_two_worker_redis.py
+          tests/test_multiprocess_concurrency.py
+          tests/test_process_kill_crash_window.py
+          tests/test_example_langgraph_redis_crash.py
+          -v --tb=short
 
       - name: Ruff
         working-directory: sdk

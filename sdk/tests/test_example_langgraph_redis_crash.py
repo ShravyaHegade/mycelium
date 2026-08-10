@@ -9,10 +9,9 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("redis")
 pytest.importorskip("langgraph")
 
-from mycelium.proofs.langgraph_7417_redis import redis_reachable, resolve_redis_url
+from backend_gates import require_redis_or_skip
 
 EXAMPLE = (
     Path(__file__).resolve().parents[1]
@@ -22,17 +21,12 @@ EXAMPLE = (
 )
 SDK_ROOT = Path(__file__).resolve().parents[1]
 
-_REDIS_URL = os.environ.get("MYCELIUM_REDIS_URL") or resolve_redis_url()
-pytestmark = pytest.mark.skipif(
-    not redis_reachable(_REDIS_URL),
-    reason=f"real Redis required at {_REDIS_URL!r}",
-)
-
 
 def test_example_run_py_main_exits_zero() -> None:
+    url = require_redis_or_skip()
     env = {
         **os.environ,
-        "MYCELIUM_REDIS_URL": _REDIS_URL,
+        "MYCELIUM_REDIS_URL": url,
         "MYCELIUM_SIGNING_KEY": "demo-signing-key",
         "PYTHONPATH": os.pathsep.join(
             [str(SDK_ROOT), os.environ.get("PYTHONPATH", "")]

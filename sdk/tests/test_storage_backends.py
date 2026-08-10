@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import os
 import threading
 import time
+import uuid
 from pathlib import Path
 
 import pytest
@@ -273,21 +273,18 @@ def test_redis_storage_read_only_returns_completed(
     assert replay.result == {"query": "billing", "hits": 1}
 
 
-@pytest.mark.skipif(
-    not os.environ.get("MYCELIUM_TEST_POSTGRES_DSN"),
-    reason="set MYCELIUM_TEST_POSTGRES_DSN to run Postgres integration tests",
-)
 def test_postgres_storage_atomic_claim() -> None:
+    from backend_gates import require_postgres_dsn_or_skip
+
     from mycelium import PostgresLedgerStorage
 
-    dsn = os.environ["MYCELIUM_TEST_POSTGRES_DSN"]
+    dsn = require_postgres_dsn_or_skip()
     storage = PostgresLedgerStorage(dsn, table="mycelium_test_action_ledger")
     ledger = ActionLedger(storage=storage)
 
-    request_id = "req-pg-integration"
-    entry = ledger.get(request_id)
-    if entry is not None and entry.status == "in-flight":
-        ledger.fail(request_id, RuntimeError("cleanup stale in-flight row"))
+    # Unique per invocation so re-running the suite (or CI's focused concurrency
+    # step after the full suite) does not collide with a prior COMPLETED row.
+    request_id = f"req-pg-integration-{uuid.uuid4().hex}"
 
     first = ledger.claim(request_id, "send_payment", (), {"amount": 99})
     assert first.status == "in-flight"
