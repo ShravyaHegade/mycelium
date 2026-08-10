@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import time
+import uuid
 from pathlib import Path
 
 import pytest
@@ -572,7 +573,7 @@ def test_postgres_release_not_executed_round_trip() -> None:
 
     dsn = require_postgres_dsn_or_skip()
     storage = PostgresLedgerStorage(dsn, table="mycelium_test_action_ledger")
-    request_id = "pg-release-round-trip"
+    request_id = f"pg-release-round-trip-{uuid.uuid4().hex}"
     storage.set(
         LedgerEntry(
             request_id=request_id,

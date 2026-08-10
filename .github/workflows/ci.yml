@@ -10,6 +10,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
 
@@ -57,20 +58,20 @@ jobs:
 
       - name: SDK unit tests
         working-directory: sdk
+        # Full suite already exercises Redis/Postgres under REQUIRE_*=1.
         run: pytest tests/ -v
 
       - name: Concurrency proofs must not skip
         working-directory: sdk
         # Explicit gate for the flagship at-most-once story (#69).
-        # MYCELIUM_CI_REQUIRE_*=1 turns missing Redis/Postgres into fail.
+        # Focused re-run of concurrency proofs only (not Postgres identity
+        # tests — those already ran above and share durable state).
         run: >
           pytest
           tests/test_proof_two_worker_redis.py
           tests/test_multiprocess_concurrency.py
           tests/test_process_kill_crash_window.py
           tests/test_example_langgraph_redis_crash.py
-          tests/test_storage_backends.py::test_postgres_storage_atomic_claim
-          tests/test_operator_release.py::test_postgres_release_not_executed_round_trip
           -v --tb=short
 
       - name: Ruff
