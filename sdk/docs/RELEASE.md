@@ -58,6 +58,31 @@ Cadence is orthogonal to semver — batch *what* goes into each bump.
 
 ---
 
+## Version-line hygiene (docs churn)
+
+**Only real SDK changes may move the version line.** Hand-editing README /
+handbook / badge URLs to name `vX.Y.Z` on every merge is the same failure mode
+as PyPI spam — it makes the product look unstable (#71).
+
+Rules:
+
+1. **`sdk/pyproject.toml` is the only version source of truth.** Do not bump it
+   on docs-only, CI, or positioning PRs.
+2. **Do not hardcode the current package version** in root/`sdk` README prose
+   or shields.io badge query params (`&release=`). Badges track PyPI; prose
+   links to PyPI. Historical "shipped in vX.Y.Z" mentions in CHANGELOG / docs
+   stay — those are history, not a "current version" banner.
+3. **Batch docs/site/handbook edits into the release PR** (or a docs PR that
+   does **not** touch `pyproject.toml`). Never open a version-bump PR just to
+   refresh copy.
+4. **CHANGELOG:** land notes under `## Unreleased` on feature PRs; promote to
+   `## X.Y.Z (date)` only in the release PR. Prefer summarizing the batch from
+   git history over a diary of micro-commits.
+5. **CI enforces** that a `pyproject.toml` version change requires a matching
+   `CHANGELOG.md` `## X.Y.Z` header (see `.github/workflows/ci.yml`).
+
+---
+
 ## Before you bump the version (checklist)
 
 Complete **every** applicable item. If something does not apply, write N/A in
@@ -95,9 +120,11 @@ the PR description — do not skip silently.
 ### Versioning artifacts (same PR)
 
 - [ ] `sdk/pyproject.toml` `version` bumped once for this cut.
-- [ ] `CHANGELOG.md` has `## X.Y.Z (YYYY-MM-DD)` matching that version.
-- [ ] Badge / “vX.Y.Z” lines in root + SDK README match (or intentionally
-      omit and let badges track PyPI — do not leave contradictory numbers).
+- [ ] `CHANGELOG.md` has `## X.Y.Z (YYYY-MM-DD)` matching that version
+      (promote from `## Unreleased`; summarize the batch).
+- [ ] Root + SDK README do **not** hardcode `vX.Y.Z` as "current" (badges /
+      PyPI links only). Handbook site updated in its own repo if the cut is
+      user-visible.
 - [ ] No second bump planned the same day.
 
 ### After merge (automation)
@@ -114,16 +141,18 @@ uploads to PyPI. Confirm:
 
 ## How to cut a release (mechanics)
 
-1. Land work on `main` via PRs **without** version bumps (preferred).
+1. Land work on `main` via PRs **without** version bumps (preferred). Docs and
+   site edits land the same way — no `pyproject.toml` touch.
 2. Open a **release PR** that only (or primarily):
    - bumps `sdk/pyproject.toml`
-   - adds the CHANGELOG section (summarize the batch)
-   - syncs README version lines / critical docs
+   - promotes `## Unreleased` → `## X.Y.Z (date)` in CHANGELOG (batch summary)
+   - optionally batches handbook / positioning that waited for the cut
 3. Pass the checklist above in the PR body (copy the checkboxes).
 4. Merge. Do not manually tag unless automation fails (see root README escape hatch).
 
 **Do not** open a version-bump PR for every merged feature. That is how
-8-releases-a-day happens.
+8-releases-a-day happens. **Do not** bump README "current version" strings on
+feature PRs — that is how 10 version lines show up in a week of docs churn.
 
 ---
 

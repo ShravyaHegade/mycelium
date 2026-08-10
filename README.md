@@ -1,6 +1,6 @@
 # Mycelium
 
-[![PyPI version](https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&release=1.29.0)](https://pypi.org/project/mycelium-runtime/)
+[![PyPI version](https://img.shields.io/pypi/v/mycelium-runtime.svg)](https://pypi.org/project/mycelium-runtime/)
 [![Python](https://img.shields.io/pypi/pyversions/mycelium-runtime.svg)](https://pypi.org/project/mycelium-runtime/)
 [![Downloads](https://static.pepy.tech/badge/mycelium-runtime)](https://pepy.tech/project/mycelium-runtime)
 
@@ -10,7 +10,9 @@ Wrong answers are recoverable. Wrong actions are expensive. Mycelium sits betwee
 
 Not recovery after. Not tracing or dashboards. Prevention at the tool boundary.
 
-*Early but API-stable (**v1.29.0**): breaking changes only at major versions. The catalog grows; the promise stays.*
+*Early but API-stable: breaking changes only at major versions. The catalog
+grows; the promise stays. Current package version is on
+[PyPI](https://pypi.org/project/mycelium-runtime/) — do not hardcode it here.*
 
 Early design-partner use: **live outbound-email lane** (Week 1: 25 ledgered sends, 0 duplicates). Not a public logo; the interactive sandbox is separate.
 
