@@ -12,6 +12,15 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
   `MYCELIUM_CI_REQUIRE_REDIS` / `MYCELIUM_CI_REQUIRE_POSTGRES` fail hard if
   backends are missing (no silent skip). File-ledger multiprocess tests no
   longer module-gated behind Redis reachability.
+- **Version-line hygiene** (#71): READMEs no longer hardcode current
+  `vX.Y.Z` / shields `&release=` pins; release policy documents batching
+  docs into release PRs; CI `version-hygiene` job blocks drive-by
+  `pyproject.toml` bumps without a matching CHANGELOG header.
+
+### Changed
+
+- Release checklist skill + `AGENTS.md` / `sdk/docs/RELEASE.md` aligned:
+  only the release PR moves the version line; badges track PyPI.
 
 ### Added
 
