@@ -25,6 +25,12 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
   side effect when an enabled guard has no stable host `run_id`. Empty and
   whitespace-only values are missing. `thread_id` remains a grouping fallback
   only under `warn`.
+- **`profile: production`:** opt-in deployment profile. Library defaults stay
+  `warn`. Production applies `memory_storage_policy: error` and
+  `missing_run_id_policy: error` on enabled LoopGuard/ScopeGuard. Explicit
+  weaker `warn` settings are rejected with `ConfigError` (not silently
+  overridden). Disabled guards still do not require `run_id`. Reads may keep
+  memory storage.
 
 ## 1.30.0 (2026-08-11)
 

@@ -1032,8 +1032,9 @@ loop_guard:
 
 LoopGuard and ScopeGuard key state by `run_id` (fallback `thread_id` for
 grouping only). Missing identity **warns and skips** by default so existing
-callers keep working. Production should set `missing_run_id_policy: error` so
-an enabled guard cannot silently run unprotected. A valid `run_id` is a
+callers keep working. Production should set `profile: production` (or
+`missing_run_id_policy: error`) so an enabled guard cannot silently run
+unprotected. A valid `run_id` is a
 non-empty host-generated string, identical for every step, retry, checkpoint
 restore, and worker redispatch of one logical run. Do not mint a random id per
 tool call.
@@ -1406,6 +1407,34 @@ r2 = process_invoice(invoice_id="inv-42", task_id="invoice-42-attempt-2")  # fre
 
 Separate YAML sections per guard type. Global ledger settings inherit into tools/tasks
 so you do not repeat storage paths on every function.
+
+**Deployments:** set `profile: production`. That does not change library defaults
+for omitted configs (still `warn`). It applies two fail-closed policies:
+
+- `action_ledger.memory_storage_policy: error` — side-effecting tools cannot
+  use memory storage
+- `loop_guard` / `scope_guard` `missing_run_id_policy: error` when those
+  guards are enabled — missing `run_id` raises `MissingRunIdentityError`
+  before the guard, ledger claim, tool, or side effect. `thread_id` is not a
+  substitute; Mycelium never invents a random id.
+
+Explicit `warn` under production is rejected (`ConfigError`), not silently
+weakened. Omit `profile` or set `profile: development` for tests.
+
+```yaml
+profile: production
+
+action_ledger:
+  storage: postgres
+  dsn_env: MYCELIUM_POSTGRES_DSN
+
+loop_guard:
+  storage: file
+
+scope_guard:
+  storage: file
+  allowed_tools: from_registry
+```
 
 **Minimum integration (3 steps):**
 

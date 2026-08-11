@@ -2,6 +2,9 @@
 #
 # Scaffolded with:  mycelium init --minimal
 #
+# Deployments: add `profile: production` so side-effecting memory storage
+#   and missing run_id cannot silently skip protection.
+#
 # side_effect_class required only for tools listed under action_ledger.tools:
 #   read | idempotent_mutate | keyed_mutate | non_idempotent_mutate | irreversible
 # In side-effecting tools, wrap the external call in `with side_effect():` and

@@ -319,7 +319,8 @@ Still can go wrong — even with everything above configured correctly:
 
 - **`storage: memory` across processes.** The guard holds within one process
   only. Mycelium warns at config time (`memory_storage_policy: warn`, the
-  default); set `error` so production cannot load that combination. Don't
+  default); set `error` or `profile: production` so production cannot load
+  that combination. Don't
   ship memory storage for multi-worker side-effecting tools.
 - **A reconciler that lies.** If your reconciler returns `NOT_EXECUTED` for an
   effect that actually happened, the runtime re-executes once. Reconcilers are
