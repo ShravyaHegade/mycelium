@@ -103,20 +103,32 @@ audit_receipt:
 
 tools:
   send_payment:
-    side_effect_class: non_idempotent_mutate
+    side_effect_class: keyed_mutate
+    provider_idempotency_key_param: idempotency_key
     audit_receipt: true
 """
 
 
-def _tool_message(amount: float = 10.0, call_id: str = "call_1"):
+def _tool_message(
+    amount: float = 10.0,
+    call_id: str = "call_1",
+    *,
+    request_id: str | None = None,
+    idempotency_key: str | None = None,
+):
     from langchain_core.messages import AIMessage
 
+    args: dict[str, Any] = {"amount": amount}
+    if request_id is not None:
+        args["request_id"] = request_id
+    if idempotency_key is not None:
+        args["idempotency_key"] = idempotency_key
     return AIMessage(
         content="",
         tool_calls=[
             {
                 "name": "send_payment",
-                "args": {"amount": amount},
+                "args": args,
                 "id": call_id,
                 "type": "tool_call",
             }
@@ -155,18 +167,33 @@ def scenario_redispatch_return(*, prefix: str, receipts_path: Path) -> dict[str,
     config = load_config_from_string(yaml_text)
     calls: list[float] = []
 
+    # One business id, two uses: Mycelium transition identity (request_id) and
+    # the provider idempotency key. Mycelium never forwards request_id into the
+    # tool body — pass the same string separately as ``idempotency_key`` so the
+    # provider can dedupe too (``Idempotency-Key: charge-order:ORD-…``).
+    request_id = f"charge-order:ORD-{uuid.uuid4().hex[:8]}"
+
     @config.apply
-    def send_payment(amount: float) -> dict[str, float]:
+    def send_payment(
+        amount: float,
+        idempotency_key: str,
+        request_id: str | None = None,
+    ) -> dict[str, float]:
         """Charge once (happy-path demo)."""
         calls.append(amount)
-        return {"charged": amount}
+        return {"charged": amount, "provider_idempotency_key": idempotency_key}
 
     graph = _graph_for(send_payment)
     runtime = _runtime_config("thread-demo", "run-happy")
     call_id = f"call_happy_{uuid.uuid4().hex[:8]}"
+    dispatch = dict(request_id=request_id, idempotency_key=request_id)
 
-    first = graph.invoke({"messages": [_tool_message(10.0, call_id)]}, runtime)
-    second = graph.invoke({"messages": [_tool_message(10.0, call_id)]}, runtime)
+    first = graph.invoke(
+        {"messages": [_tool_message(10.0, call_id, **dispatch)]}, runtime
+    )
+    second = graph.invoke(
+        {"messages": [_tool_message(10.0, call_id, **dispatch)]}, runtime
+    )
 
     ledger = get_ledger(send_payment)
     assert ledger is not None
@@ -204,7 +231,11 @@ def _crash_worker(payload: dict[str, Any]) -> None:
         config = load_config_from_string(payload["yaml"])
 
         @config.apply
-        def send_payment(amount: float) -> dict[str, float]:
+        def send_payment(
+            amount: float,
+            idempotency_key: str,
+            request_id: str | None = None,
+        ) -> dict[str, float]:
             """Charge once (crash-worker demo — hangs after claim)."""
             client.incr(payload["exec_key"])
             client.set(payload["ready_key"], "1")
@@ -213,7 +244,7 @@ def _crash_worker(payload: dict[str, Any]) -> None:
 
         graph = _graph_for(send_payment)
         graph.invoke(
-            {"messages": [_tool_message(10.0, payload["call_id"])]},
+            {"messages": [_tool_message(10.0, payload["call_id"], **payload["dispatch"])]},
             _runtime_config(payload["thread_id"], payload["run_id"]),
         )
     except Exception as exc:  # noqa: BLE001 — surface to parent
@@ -267,6 +298,10 @@ def scenario_crash_hard_block(*, prefix: str, receipts_path: Path) -> dict[str, 
         "call_id": call_id,
         "thread_id": "thread-crash",
         "run_id": "run-crash",
+        "dispatch": dict(
+            request_id=f"charge-order:ORD-{run_token}",
+            idempotency_key=f"charge-order:ORD-{run_token}",
+        ),
         "ready_key": ready_key,
         "exec_key": exec_key,
         "error_key": error_key,
@@ -306,7 +341,11 @@ def scenario_crash_hard_block(*, prefix: str, receipts_path: Path) -> dict[str, 
     calls: list[float] = []
 
     @config.apply
-    def send_payment(amount: float) -> dict[str, float]:
+    def send_payment(
+        amount: float,
+        idempotency_key: str,
+        request_id: str | None = None,
+    ) -> dict[str, float]:
         """Charge once (post-crash redispatch — must not run)."""
         calls.append(amount)
         return {"charged": amount, "redispatch": True}
@@ -315,7 +354,7 @@ def scenario_crash_hard_block(*, prefix: str, receipts_path: Path) -> dict[str, 
     hard_blocked = False
     try:
         result = graph.invoke(
-            {"messages": [_tool_message(10.0, call_id)]},
+            {"messages": [_tool_message(10.0, call_id, **payload["dispatch"])]},
             _runtime_config("thread-crash", "run-crash"),
         )
         # ToolNode may surface HARD_BLOCK as a ToolMessage error instead of raise.
