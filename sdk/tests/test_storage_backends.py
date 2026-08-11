@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 import time
 import uuid
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -16,11 +17,18 @@ from mycelium import (
     LedgerHardBlockError,
     LedgerPendingError,
     RedisLedgerStorage,
+    SideEffectBoundary,
     SideEffectClass,
     SqliteLedgerStorage,
     TerminalOutcome,
     ToolTransitionBinding,
+    TransitionScope,
+    execution_scope,
+    ledger_sync,
+    load_config_from_string,
+    side_effect,
 )
+from mycelium.action_ledger import get_active_transition
 
 
 def _entry(request_id: str, *, status: str = "in-flight") -> LedgerEntry:
@@ -460,3 +468,141 @@ def test_config_sqlite_requires_path() -> None:
 
     with pytest.raises(ConfigError, match="requires a 'path'"):
         MyceliumConfig._build_ledger_storage({"storage": "sqlite"})
+
+
+def test_sqlite_yaml_loads_without_optional_dependencies(tmp_path: Path) -> None:
+    """SQLite is stdlib — YAML load + storage build must not import redis/psycopg."""
+    from mycelium.config import MyceliumConfig
+
+    yaml_text = f"""\
+transition:
+  agent_id: demo
+  policy_version: "1"
+  scope_from: {{}}
+  reclaim_requires_death_signal: true
+action_ledger:
+  storage: sqlite
+  path: {tmp_path / "mycelium-ledger.db"}
+  unclassified_policy: strict
+  tools: [charge]
+tools:
+  charge:
+    side_effect_class: non_idempotent_mutate
+"""
+    config = load_config_from_string(yaml_text)
+    assert config.action_ledger is not None
+    assert config.action_ledger["storage"] == "sqlite"
+    ledger_cfg = config.tools["charge"].ledger
+    assert ledger_cfg is not None
+    storage = MyceliumConfig._build_ledger_storage(ledger_cfg)
+    assert isinstance(storage, SqliteLedgerStorage)
+
+
+class _ProcessCrash(BaseException):
+    """Simulates process death before the ledger can record failure."""
+
+
+def test_sqlite_completed_result_survives_new_ledger_instance(tmp_path: Path) -> None:
+    """A new ActionLedger on the same SQLite file returns the stored result."""
+    db = tmp_path / "ledger.db"
+    executions: list[str] = []
+
+    storage1 = SqliteLedgerStorage(db)
+
+    @ledger_sync(storage=storage1, transition_binding=_payment_binding())
+    def charge(amount: float) -> dict[str, bool]:
+        executions.append("first")
+        return {"charged": True}
+
+    with execution_scope(TransitionScope(thread_id="t1", run_id="r1")):
+        first = charge(amount=10.0, tool_call_id="c1")
+
+    storage2 = SqliteLedgerStorage(db)
+
+    @ledger_sync(storage=storage2, transition_binding=_payment_binding())
+    def charge(amount: float) -> dict[str, bool]:  # noqa: F811
+        executions.append("second")
+        return {"charged": True}
+
+    with execution_scope(TransitionScope(thread_id="t1", run_id="r1")):
+        replay = charge(amount=10.0, tool_call_id="c1")
+
+    assert first == replay == {"charged": True}
+    assert executions == ["first"]
+
+
+def test_sqlite_maybe_crossed_survives_restart_and_does_not_reexecute(
+    tmp_path: Path,
+) -> None:
+    """Crash inside side_effect() must persist maybe_crossed and block redispatch.
+
+    A new ledger instance on the same SQLite file must not run the body again.
+    Proves persistence *and* non-reexecution, not merely that SQLite wrote a row.
+    """
+    db = tmp_path / "ledger.db"
+    executions: list[str] = []
+    request_ids: list[str] = []
+    lease_ttl = 0.05
+
+    storage1 = SqliteLedgerStorage(db)
+
+    @ledger_sync(
+        storage=storage1,
+        transition_binding=_payment_binding(),
+        lease_ttl=lease_ttl,
+        lease_renew_interval=0,
+        poll_interval=0.01,
+        poll_timeout=0.2,
+        reclaim_requires_death_signal=True,
+    )
+    def charge(amount: float) -> dict[str, bool]:
+        executions.append("first")
+        active = get_active_transition()
+        assert active is not None
+        request_ids.append(active.request_id)
+        with side_effect():
+            raise _ProcessCrash("killed inside side_effect()")
+
+    with execution_scope(TransitionScope(thread_id="t1", run_id="r1")):
+        with pytest.raises(_ProcessCrash):
+            charge(amount=10.0, tool_call_id="c1")
+
+    assert request_ids, "first instance never claimed a transition"
+    crashed = storage1.get(request_ids[0])
+    assert crashed is not None, "crash window entry was not written to SQLite"
+    assert crashed.side_effect_boundary == SideEffectBoundary.MAYBE_CROSSED.value
+    assert crashed.terminal_outcome == TerminalOutcome.IN_FLIGHT.value
+
+    # Process is gone: lease is no longer renewed. Persist expiry on the
+    # same row so the next instance sees EXPIRED + maybe_crossed.
+    storage1.set(replace(crashed, lease_until=time.time() - 1))
+
+    storage2 = SqliteLedgerStorage(db)
+    restarted = storage2.get(crashed.request_id)
+    assert restarted is not None
+    assert restarted.side_effect_boundary == SideEffectBoundary.MAYBE_CROSSED.value
+    assert restarted.request_id == crashed.request_id
+    assert restarted.resolved_terminal_outcome() == TerminalOutcome.EXPIRED
+
+    @ledger_sync(
+        storage=storage2,
+        transition_binding=_payment_binding(),
+        lease_ttl=lease_ttl,
+        lease_renew_interval=0,
+        poll_interval=0.01,
+        poll_timeout=0.2,
+        reclaim_requires_death_signal=True,
+    )
+    def charge(amount: float) -> dict[str, bool]:  # noqa: F811
+        executions.append("second")
+        with side_effect():
+            return {"charged": True}
+
+    with execution_scope(TransitionScope(thread_id="t1", run_id="r1")):
+        with pytest.raises(LedgerHardBlockError):
+            charge(amount=10.0, tool_call_id="c1")
+
+    assert executions == ["first"]
+    blocked = storage2.get(crashed.request_id)
+    assert blocked is not None
+    assert blocked.side_effect_boundary == SideEffectBoundary.MAYBE_CROSSED.value

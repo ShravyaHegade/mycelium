@@ -440,12 +440,132 @@ transition:
   scope_from: {}
 action_ledger:
   storage: memory
+  memory_storage_policy: warn
   tools: [my_tool]
 tools:
   my_tool:
     side_effect_class: non_idempotent_mutate
 """
-        with pytest.warns(UserWarning, match="my_tool.*non_idempotent_mutate"):
+        import warnings
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", UserWarning)
+            load_config_from_string(yaml_text)
+        matching = [
+            w for w in caught
+            if issubclass(w.category, UserWarning)
+            and "my_tool" in str(w.message)
+            and "non_idempotent_mutate" in str(w.message)
+        ]
+        assert len(matching) == 1
+
+    def test_omitted_policy_defaults_to_warn(self) -> None:
+        yaml_text = """\
+transition:
+  agent_id: demo
+  policy_version: "1"
+  scope_from: {}
+action_ledger:
+  storage: memory
+  tools: [my_tool]
+tools:
+  my_tool:
+    side_effect_class: non_idempotent_mutate
+"""
+        import warnings
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", UserWarning)
+            config = load_config_from_string(yaml_text)
+        assert config.action_ledger is not None
+        assert "memory_storage_policy" not in config.action_ledger
+        matching = [
+            w for w in caught
+            if issubclass(w.category, UserWarning) and "memory storage" in str(w.message)
+        ]
+        assert len(matching) == 1
+
+    def test_error_policy_raises_for_side_effecting_memory(self) -> None:
+        from mycelium import ConfigError
+
+        yaml_text = """\
+transition:
+  agent_id: demo
+  policy_version: "1"
+  scope_from: {}
+action_ledger:
+  storage: memory
+  memory_storage_policy: error
+  tools: [charge]
+tools:
+  charge:
+    side_effect_class: non_idempotent_mutate
+"""
+        with pytest.raises(ConfigError, match="charge.*file/sqlite/redis/postgres") as exc_info:
+            load_config_from_string(yaml_text)
+        assert "memory_storage_policy" in str(exc_info.value)
+
+    @pytest.mark.parametrize(
+        "side_effect_class",
+        [
+            "idempotent_mutate",
+            "keyed_mutate",
+            "non_idempotent_mutate",
+            "irreversible",
+        ],
+    )
+    def test_error_policy_covers_all_mutating_classes(self, side_effect_class: str) -> None:
+        from mycelium import ConfigError
+
+        yaml_text = f"""\
+transition:
+  agent_id: demo
+  policy_version: "1"
+  scope_from: {{}}
+action_ledger:
+  storage: memory
+  memory_storage_policy: error
+  tools: [my_tool]
+tools:
+  my_tool:
+    side_effect_class: {side_effect_class}
+"""
+        with pytest.raises(ConfigError, match="my_tool"):
+            load_config_from_string(yaml_text)
+
+    def test_error_policy_allows_read_tools(self) -> None:
+        yaml_text = """\
+transition:
+  agent_id: demo
+  policy_version: "1"
+  scope_from: {}
+action_ledger:
+  storage: memory
+  memory_storage_policy: error
+  tools: [my_tool]
+tools:
+  my_tool:
+    side_effect_class: read
+"""
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", UserWarning)
+            load_config_from_string(yaml_text)
+
+    def test_invalid_memory_storage_policy_raises(self) -> None:
+        from mycelium import ConfigError
+
+        yaml_text = """\
+action_ledger:
+  storage: memory
+  memory_storage_policy: allow
+  tools: [my_tool]
+tools:
+  my_tool:
+    side_effect_class: read
+"""
+        with pytest.raises(ConfigError, match="memory_storage_policy.*warn.*error.*allow"):
             load_config_from_string(yaml_text)
 
     def test_no_warning_for_read_tools(self) -> None:

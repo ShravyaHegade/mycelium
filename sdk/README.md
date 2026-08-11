@@ -1223,11 +1223,11 @@ Storage backends:
 
 | Backend | Use case | YAML `storage` |
 |---------|----------|----------------|
-| `memory` | Single process, tests | `memory` (default) |
-| `file` | Local dev, single host (`fcntl` lock) | `file` + `path` |
-| `sqlite` | Zero-ops single-node durable (stdlib) | `sqlite` + `path` (+ optional `table`) |
-| `redis` | Multi-worker, in-flight TTL | `redis` + `url` or `url_env` |
-| `postgres` | Audit/compliance, durable SQL | `postgres` + `dsn` or `dsn_env` |
+| `memory` | Tests / single-process disposable state | `memory` (default; not production) |
+| `file` | Local development / single host (`fcntl` lock) | `file` + `path` |
+| `sqlite` | Durable single-node default (stdlib, no extras) | `sqlite` + `path` (+ optional `table`) |
+| `redis` | Multi-worker coordination | `redis` + `url` or `url_env` |
+| `postgres` | Durable multi-worker / audit-oriented deployment | `postgres` + `dsn` or `dsn_env` |
 
 ```python
 from mycelium import ActionLedger, FileLedgerStorage, InMemoryLedgerStorage
@@ -1287,7 +1287,29 @@ action_ledger:
   on_args_drift: soft   # soft (default) | hard | off — identity-conflict gate
 ```
 
-When `transition:` is configured and a side-effecting tool uses memory storage, a one-time warning is emitted at YAML load time — the duplicate-side-effect guard only holds within the process.
+When `transition:` is configured and a side-effecting tool uses memory storage, a one-time warning is emitted at YAML load time — the duplicate-side-effect guard only holds within the process. Set `action_ledger.memory_storage_policy: error` to reject that combination at load time (`ConfigError` names the tool and recommends `file/sqlite/redis/postgres`). The default remains `warn` so existing test/dev configs keep loading. Reads may keep using memory storage under either policy.
+
+Durable storage keeps the ledger across a process restart. It cannot by itself tell you whether an external provider finished during the crash window (`maybe_crossed`). Production still needs the full fail-closed pattern:
+
+```yaml
+transition:
+  reclaim_requires_death_signal: true
+action_ledger:
+  storage: postgres          # or redis for multi-worker coordination
+  dsn_env: MYCELIUM_POSTGRES_DSN
+  unclassified_policy: strict
+  memory_storage_policy: error
+```
+
+```python
+@ledger_sync(transition_binding=binding, reconciler=StripeReconciler())
+def send_payment(amount, recipient, *, idempotency_key):
+    record_external_operation(idempotency_key)   # before the provider call
+    with side_effect():                          # maybe_crossed is durable first
+        return gateway.charge(amount, recipient, idempotency_key=idempotency_key)
+```
+
+Checklist: durable Redis/Postgres ledger, stable request/transition identity, provider idempotency key, `record_external_operation()` before the provider call when possible, `side_effect()` around the external call, a read-only `Reconciler`, `unclassified_policy: strict`, and `reclaim_requires_death_signal: true`. Unresolved ambiguity stays fail-closed — hard-block or reconcile; never re-execute blindly.
 
 ## Quickstart: task-level idempotency
 
@@ -1346,9 +1368,10 @@ transition:
   # presumed_dead_after: 7200             # default = 2 × lease_ttl; grace window for heartbeat
 
 action_ledger:
-  storage: file
-  path: ./mycelium-ledger.json
+  storage: sqlite
+  path: ./mycelium-ledger.db
   unclassified_policy: strict   # warn (default) or strict
+  memory_storage_policy: warn   # warn (default) | error
   tools: [send_payment, search_docs]
 
 task_ledger:

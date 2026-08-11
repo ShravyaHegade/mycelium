@@ -133,6 +133,24 @@ class ConfigError(Exception):
     """Raised when a Mycelium config file is invalid or inconsistent."""
 
 
+MEMORY_STORAGE_POLICY_WARN = "warn"
+MEMORY_STORAGE_POLICY_ERROR = "error"
+MEMORY_STORAGE_POLICIES = frozenset(
+    {MEMORY_STORAGE_POLICY_WARN, MEMORY_STORAGE_POLICY_ERROR}
+)
+
+# Ledgered tools in these classes must not silently use process-local memory
+# storage in production: a restart drops the ledger and dedupe can re-execute.
+_SIDE_EFFECTING_MEMORY_CLASSES = frozenset(
+    {
+        SideEffectClass.IDEMPOTENT_MUTATE,
+        SideEffectClass.KEYED_MUTATE,
+        SideEffectClass.NON_IDEMPOTENT_MUTATE,
+        SideEffectClass.IRREVERSIBLE,
+    }
+)
+
+
 _CALLABLE_PATH_RE = re.compile(
     r"^(?:[A-Za-z_][A-Za-z0-9_]*\.)*[A-Za-z_][A-Za-z0-9_]*:"
     r"[A-Za-z_][A-Za-z0-9_]*$"
@@ -1425,7 +1443,7 @@ def _storage_settings(cfg: dict[str, Any] | None) -> dict[str, Any]:
     return {
         key: value
         for key, value in cfg.items()
-        if key not in ("tools", "tasks", "auto")
+        if key not in ("tools", "tasks", "auto", "memory_storage_policy")
     }
 
 
@@ -1912,34 +1930,73 @@ def _validate_transition_tools(
             )
 
 
-def _warn_memory_storage_for_side_effecting(
-    tools: dict[str, ToolConfig],
-    transition: TransitionConfig | None,
-) -> None:
-    """Warn once per tool when transition config + memory storage + side effects.
+def _memory_storage_policy(action_ledger: dict[str, Any] | None) -> str:
+    """Return the configured memory-storage policy, defaulting to ``warn``."""
+    if action_ledger is None:
+        return MEMORY_STORAGE_POLICY_WARN
+    raw = action_ledger.get("memory_storage_policy", MEMORY_STORAGE_POLICY_WARN)
+    if raw not in MEMORY_STORAGE_POLICIES:
+        raise ConfigError(
+            "'action_ledger.memory_storage_policy' must be "
+            f"{MEMORY_STORAGE_POLICY_WARN!r} or {MEMORY_STORAGE_POLICY_ERROR!r}, "
+            f"got {raw!r}"
+        )
+    return str(raw)
 
-    Memory is fine for dev/demo, but the duplicate-side-effect guard only holds
-    within the process. Emit a one-time warning at YAML load time so the
-    operator knows to switch to file/sqlite/redis/postgres for production.
-    """
-    if transition is None:
-        return
-    warned: set[str] = set()
+
+def _side_effecting_memory_tools(
+    tools: dict[str, ToolConfig],
+) -> list[tuple[str, SideEffectClass]]:
+    """Ledgered mutating tools whose storage is process-local memory."""
+    affected: list[tuple[str, SideEffectClass]] = []
     for name, tool in tools.items():
-        if name in warned:
+        if tool.ledger is None or tool.side_effect_class is None:
             continue
-        if tool.ledger is None:
-            continue
-        if tool.side_effect_class is None:
-            continue
-        if tool.side_effect_class == SideEffectClass.READ:
+        if tool.side_effect_class not in _SIDE_EFFECTING_MEMORY_CLASSES:
             continue
         storage_type = tool.ledger.get("storage", "memory")
         if storage_type != "memory":
             continue
-        warned.add(name)
+        affected.append((name, tool.side_effect_class))
+    return affected
+
+
+def _enforce_memory_storage_policy(
+    tools: dict[str, ToolConfig],
+    transition: TransitionConfig | None,
+    action_ledger: dict[str, Any] | None,
+) -> None:
+    """Apply ``action_ledger.memory_storage_policy`` at YAML load time.
+
+    ``storage: memory`` stays available for tests and local development.
+    ``warn`` (default) emits a one-time warning per side-effecting tool when
+    ``transition:`` is configured — the duplicate-side-effect guard only holds
+    within the process. ``error`` rejects those tools with :class:`ConfigError`
+    so production cannot silently lose ledger state across a restart. Reads
+    may keep using memory storage under either policy.
+    """
+    policy = _memory_storage_policy(action_ledger)
+    affected = _side_effecting_memory_tools(tools)
+    if not affected:
+        return
+
+    if policy == MEMORY_STORAGE_POLICY_ERROR:
+        names = ", ".join(repr(name) for name, _ in affected)
+        classes = ", ".join(sorted({cls.value for _, cls in affected}))
+        verb = "is" if len(affected) == 1 else "are"
+        noun = "tool" if len(affected) == 1 else "tools"
+        raise ConfigError(
+            f"{noun} {names} {verb} side-effecting ({classes}) but the "
+            "action ledger uses memory storage; memory_storage_policy is "
+            "'error'. Use file/sqlite/redis/postgres so ledger state "
+            "survives a process restart."
+        )
+
+    if transition is None:
+        return
+    for name, side_effect_class in affected:
         warnings.warn(
-            f"tool {name!r} is side-effecting ({tool.side_effect_class.value}) "
+            f"tool {name!r} is side-effecting ({side_effect_class.value}) "
             "but its ledger uses memory storage; the duplicate-side-effect "
             "guard only holds within this process. Use file/sqlite/redis/postgres "
             "for production deployments.",
@@ -2051,7 +2108,7 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
         _apply_action_ledger_tools(tools, action_ledger_raw, audit_auto=audit_auto)
 
     _validate_transition_tools(tools, transition)
-    _warn_memory_storage_for_side_effecting(tools, transition)
+    _enforce_memory_storage_policy(tools, transition, action_ledger_raw)
 
     tasks_raw = data.get("tasks", {})
     if not isinstance(tasks_raw, dict):
@@ -2278,6 +2335,9 @@ def load_config(path: str | Path) -> MyceliumConfig:
 
 __all__ = [
     "ConfigError",
+    "MEMORY_STORAGE_POLICIES",
+    "MEMORY_STORAGE_POLICY_ERROR",
+    "MEMORY_STORAGE_POLICY_WARN",
     "MyceliumConfig",
     "ToolConfig",
     "TransitionConfig",

@@ -1,4 +1,6 @@
 # Copy-paste starter: LangGraph tool + Redis ledger + signed receipts.
+# Intentionally Redis (not the sqlite init default): this demo coordinates
+# multi-worker crash/redispatch. Single-node apps should use storage: sqlite.
 #
 # Prereqs:
 #   docker run -d --name mycelium-redis -p 6379:6379 redis:7

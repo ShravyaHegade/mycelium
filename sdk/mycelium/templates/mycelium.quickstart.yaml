@@ -19,10 +19,12 @@ integrations:
 transition:
   agent_id: "<TODO: fill with your agent id — used in transition keys and receipts>"
   policy_version: "<TODO: fill with your policy version string, e.g. 2026.07.1>"
+  reclaim_requires_death_signal: true
 
 action_ledger:
-  storage: file
-  path: ./mycelium-ledger.json
+  storage: sqlite
+  path: ./mycelium-ledger.db
+  unclassified_policy: strict
   tools:
     - subagent_task
 
