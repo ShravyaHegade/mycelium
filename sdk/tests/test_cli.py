@@ -19,6 +19,10 @@ def test_init_writes_quickstart_template_by_default(tmp_path: Path) -> None:
     assert "langgraph:" in text
     assert "enabled: true" in text
     assert "action_ledger:" in text
+    assert "storage: sqlite" in text
+    assert "mycelium-ledger.db" in text
+    assert "unclassified_policy: strict" in text
+    assert "reclaim_requires_death_signal: true" in text
     assert "subagent_task" in text
     assert "side_effect_class: non_idempotent_mutate" in text
     assert "send_payment" not in text

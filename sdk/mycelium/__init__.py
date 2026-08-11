@@ -96,6 +96,9 @@ from mycelium.completion_contract import (
     wrap_final_message,
 )
 from mycelium.config import (
+    MEMORY_STORAGE_POLICIES,
+    MEMORY_STORAGE_POLICY_ERROR,
+    MEMORY_STORAGE_POLICY_WARN,
     ConfigError,
     MyceliumConfig,
     TransitionConfig,
@@ -250,6 +253,9 @@ __all__ = [
     "OPERATOR_RESOLUTION_NOT_EXECUTED",
     "UNCLASSIFIED_POLICY_WARN",
     "UNCLASSIFIED_POLICY_STRICT",
+    "MEMORY_STORAGE_POLICY_WARN",
+    "MEMORY_STORAGE_POLICY_ERROR",
+    "MEMORY_STORAGE_POLICIES",
     "GmailReconciler",
     "canonicalize_message_id",
     "get_ledger",

@@ -247,7 +247,11 @@ than the code makes.
 - **In-memory ledgers across processes.** `storage: memory` claims are not
   durable beyond the process. Mycelium emits a warning when a side-effecting
   tool is configured with memory storage; the guard only holds within the
-  process. (Out-of-scope alternative: use file/Redis/Postgres.)
+  process. Set `memory_storage_policy: error` to reject that combination at
+  load time. (Out-of-scope alternative: use file/SQLite/Redis/Postgres.)
+  Durable storage preserves `maybe_crossed` across restart but cannot alone
+  prove whether the provider completed; unresolved ambiguity stays
+  fail-closed.
 - **Unclassified tools under the default `warn` policy.** A tool without a
   transition binding that fails is re-executed on reclaim (legacy behavior,
   with a one-time warning). `unclassified_policy: strict` routes them through
@@ -280,7 +284,7 @@ are cited once. "Where documented" links the README section.
 | Hard-block on ambiguous mutation | README § [Resolution gates](../README.md#resolution-gates) | `test_side_effect_resolution.py::test_payment_hard_blocks_expired_lease` · `test_side_effect_resolution.py::test_crash_after_claim_before_complete_hard_blocks_redispatch` · `test_side_effect_resolution.py::test_payment_hard_blocks_failed_after_effect_retry` · `test_reconcile.py::test_hard_block_without_reconciler_still_blocks` · `test_process_kill_crash_window.py::test_kill_before_ref_recorded_hard_blocks_no_provider_lookup` · `test_payment_provider_mock.py::test_no_reconciler_hard_blocks_without_provider_evidence` |
 | Resolution gate matrix (POLL / RETURN / ALLOW / HARD_BLOCK / reconcile) | README § [Resolution gates](../README.md#resolution-gates) | `test_conformance_tsc007.py` (5 cases) · `test_side_effect_resolution.py::test_resolve_side_effect_gate_matrix` · `test_read_only_resolution.py::test_resolve_read_only_gate_matrix` |
 | Reconciliation fail-closed | README § [Reconciling automatically](../README.md#reconciling-automatically-reconciler) | `test_reconcile.py::test_reconcile_failure_is_fail_closed` · `test_reconcile.py::test_reconcile_skipped_without_external_ref` · `test_reconcile.py::test_reconcile_unknown_hard_blocks` · `test_outage_redis_postgres.py::test_mid_reconcile_storage_outage_fail_closed` |
-| Boundary classification + monotonic, durable `maybe_crossed` | README § [Marking the side-effect boundary](../README.md#marking-the-side-effect-boundary-side_effect) | `test_side_effect_boundary.py::test_advance_boundary_is_monotonic` · `test_side_effect_boundary.py::test_side_effect_marks_maybe_crossed_midflight` · `test_side_effect_boundary.py::test_exception_inside_side_effect_marks_unknown_and_hard_blocks` · `test_side_effect_boundary.py::test_exception_before_marker_is_failed_before_effect` · `test_side_effect_boundary.py::test_mark_crossed_then_exception_is_failed_after_effect` · `test_side_effect_boundary.py::test_async_side_effect_marks_unknown_on_error` |
+| Boundary classification + monotonic, durable `maybe_crossed` | README § [Marking the side-effect boundary](../README.md#marking-the-side-effect-boundary-side_effect) | `test_side_effect_boundary.py::test_advance_boundary_is_monotonic` · `test_side_effect_boundary.py::test_side_effect_marks_maybe_crossed_midflight` · `test_side_effect_boundary.py::test_exception_inside_side_effect_marks_unknown_and_hard_blocks` · `test_side_effect_boundary.py::test_exception_before_marker_is_failed_before_effect` · `test_side_effect_boundary.py::test_mark_crossed_then_exception_is_failed_after_effect` · `test_side_effect_boundary.py::test_async_side_effect_marks_unknown_on_error` · `test_storage_backends.py::test_sqlite_maybe_crossed_survives_restart_and_does_not_reexecute` |
 | Demo Gmail adapter matrix (0/1/2+/missing ref + Message-ID canonicalize) | README § [Demo adapter: Gmail sent-log](../README.md#demo-adapter-gmail-sent-log-gmailreconciler) | `test_gmail_reconciler.py::test_zero_matches_returns_unknown` · `test_gmail_reconciler.py::test_one_match_returns_completed_with_canonical_receipt` · `test_gmail_reconciler.py::test_two_matches_returns_unknown` · `test_gmail_reconciler.py::test_missing_external_operation_ref_returns_unknown` · `test_gmail_reconciler.py::test_empty_external_operation_ref_returns_unknown` · `test_gmail_reconciler.py::test_message_id_forms_share_query_and_receipt` |
 | Operator release one-shot + fail-closed | README § [Operator runbook](../README.md#operator-runbook-your-agent-hard-blocked) | `test_operator_release.py::test_release_is_one_shot` · `test_operator_release.py::test_release_not_executed_grants_exactly_one_reexecution` · `test_operator_release.py::test_release_completed_returns_result_without_reexecution` · `test_operator_release.py::test_release_refused_while_lease_held_allowed_once_expired` · `test_operator_release.py::test_release_refused_on_completed_and_unknown_request` · `test_operator_release.py::test_keyed_mutate_still_enforces_provider_key_after_release` |
 | Release stamps the record (never deleted) | README § [Operator runbook](../README.md#operator-runbook-your-agent-hard-blocked) | `test_operator_release.py::test_release_not_executed_grants_exactly_one_reexecution` (asserts `operator_resolution`/`resolved_by`) · `test_operator_release.py::test_postgres_release_not_executed_round_trip` |
@@ -304,8 +308,9 @@ otherwise.
 Still can go wrong — even with everything above configured correctly:
 
 - **`storage: memory` across processes.** The guard holds within one process
-  only. Mycelium warns at config time; don't ship memory storage for
-  multi-worker side-effecting tools.
+  only. Mycelium warns at config time (`memory_storage_policy: warn`, the
+  default); set `error` so production cannot load that combination. Don't
+  ship memory storage for multi-worker side-effecting tools.
 - **A reconciler that lies.** If your reconciler returns `NOT_EXECUTED` for an
   effect that actually happened, the runtime re-executes once. Reconcilers are
   read-only *by contract*; verify them with the same care as the tools

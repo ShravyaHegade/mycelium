@@ -5,6 +5,16 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
 
 ## Unreleased
 
+### Added
+
+- **`action_ledger.memory_storage_policy`:** `warn` (default, backward
+  compatible) or `error`. Side-effecting tools (`idempotent_mutate`,
+  `keyed_mutate`, `non_idempotent_mutate`, `irreversible`) plus
+  `storage: memory` now raise `ConfigError` at YAML load when policy is
+  `error` — the error names the tool and recommends
+  `file/sqlite/redis/postgres`. Reads may keep using memory storage.
+  Shipped `mycelium init` templates default the action ledger to SQLite.
+
 ## 1.30.0 (2026-08-11)
 
 MINOR: supervisor handoff audit glue + async peer-wait DX, LangGraph/Redis

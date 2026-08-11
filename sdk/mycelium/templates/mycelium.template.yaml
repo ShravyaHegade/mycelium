@@ -19,10 +19,13 @@
 #      Or keep explicit @config.apply / @config.apply_task / config.instrument.
 #
 # storage (ledgers): memory | file | sqlite | redis | postgres
-#   memory — process-local  |  file — needs path:
-#   sqlite — path: (+ optional table); zero-ops single-node durable
-#   redis  — url: or url_env: (+ optional prefix, in_flight_ttl)
-#   postgres — dsn: or dsn_env: (+ optional table)
+#   memory — tests / single-process disposable state (not production)
+#   file   — local development / single host (needs path:)
+#   sqlite — durable single-node default (path: + optional table)
+#   redis  — multi-worker coordination (url: or url_env:)
+#   postgres — durable multi-worker / audit-oriented (dsn: or dsn_env:)
+# Side-effecting tools + storage: memory: set memory_storage_policy: error
+#   to reject at load time (default warn keeps tests/dev working).
 # state_flush / audit_receipt: memory | file only
 #
 # side_effect_class (per ledgered tool): read | idempotent_mutate |
@@ -87,20 +90,18 @@ transition:
 # action_ledger  (tool-level claim/settle)
 # ---------------------------------------------------------------------------
 action_ledger:
-  storage: file            # <TODO: memory | file | sqlite | redis | postgres>
-  path: ./mycelium-ledger.json
-  # unclassified_policy: warn   # warn (default): one-time warning on failed retry
+  storage: sqlite          # <TODO: memory | file | sqlite | redis | postgres>
+  path: ./mycelium-ledger.db
+  unclassified_policy: strict   # warn (default): one-time warning on failed retry
                                 # strict: hard-block unclassified failed retries
+  # memory_storage_policy: warn # warn (default) | error — reject memory + mutate
   on_args_drift: soft           # soft (default) | hard | off — same dispatch
                                 # ticket + different args → ToolBoundaryError /
                                 # LedgerHardBlockError (identity-conflict gate);
                                 # off = escape hatch for "new args = new transition"
-  # sqlite (zero-ops single-node durable):
-  # storage: sqlite
-  # path: ./mycelium-ledger.db
   # table: mycelium_action_ledger
-  # url_env: MYCELIUM_REDIS_URL          # redis
-  # dsn_env: MYCELIUM_POSTGRES_DSN       # postgres
+  # url_env: MYCELIUM_REDIS_URL          # redis (multi-worker)
+  # dsn_env: MYCELIUM_POSTGRES_DSN       # postgres (multi-worker / audit)
   # <TODO step 1: copy ledgered tool names from tools: keys below>
   tools: []
 
