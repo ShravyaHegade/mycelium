@@ -39,5 +39,9 @@ audit_receipt:
 
 tools:
   send_payment:
-    side_effect_class: non_idempotent_mutate
+    # request_id is never forwarded into the tool body; declare which kwarg
+    # carries the provider idempotency key so a same-key retry is allowed and a
+    # different key hard-blocks. Pass the same string for both.
+    side_effect_class: keyed_mutate
+    provider_idempotency_key_param: idempotency_key
     audit_receipt: true

@@ -59,6 +59,9 @@ from mycelium.integrations.langgraph import (
 )
 from mycelium.loop_guard import (
     DEFAULT_CONSECUTIVE_SOFT,
+    MISSING_RUN_ID_POLICIES,
+    MISSING_RUN_ID_POLICY_ERROR,
+    MISSING_RUN_ID_POLICY_WARN,
     FileLoopGuardStorage,
     InMemoryLoopGuardStorage,
     LoopGuard,
@@ -138,6 +141,10 @@ MEMORY_STORAGE_POLICY_ERROR = "error"
 MEMORY_STORAGE_POLICIES = frozenset(
     {MEMORY_STORAGE_POLICY_WARN, MEMORY_STORAGE_POLICY_ERROR}
 )
+
+PROFILE_DEVELOPMENT = "development"
+PROFILE_PRODUCTION = "production"
+PROFILES = frozenset({PROFILE_DEVELOPMENT, PROFILE_PRODUCTION})
 
 # Ledgered tools in these classes must not silently use process-local memory
 # storage in production: a restart drops the ledger and dedupe can re-execute.
@@ -338,6 +345,7 @@ class MyceliumConfig:
     scope_guard: dict[str, Any] | None = None
     state_authority: dict[str, Any] | None = None
     completion: dict[str, Any] | None = None
+    profile: str = PROFILE_DEVELOPMENT
     _audit_emitter: AuditReceiptEmitter | None = None
     _outcome_emitter: OutcomeEmitter | None = None
     _loop_guard: LoopGuard | None = None
@@ -699,6 +707,11 @@ class MyceliumConfig:
         exclude = raw.get("exclude") or []
         if not isinstance(exclude, list):
             raise ConfigError("'loop_guard.exclude' must be a list of tool names")
+        missing_run_id_policy = _missing_run_id_policy(
+            raw,
+            "loop_guard.missing_run_id_policy",
+            profile=self.profile,
+        )
         agent_id = "loop-guard"
         if self.transition is not None and self.transition.agent_id:
             agent_id = self.transition.agent_id
@@ -710,6 +723,7 @@ class MyceliumConfig:
             exclude=[str(item) for item in exclude],
             outcome_emitter=self.build_outcome_emitter(),
             agent_id=agent_id,
+            missing_run_id_policy=missing_run_id_policy,
         )
         return self._loop_guard
 
@@ -860,12 +874,18 @@ class MyceliumConfig:
         auto_bind = raw.get("auto_bind", True)
         if not isinstance(auto_bind, bool):
             raise ConfigError("'scope_guard.auto_bind' must be a bool")
+        missing_run_id_policy = _missing_run_id_policy(
+            raw,
+            "scope_guard.missing_run_id_policy",
+            profile=self.profile,
+        )
         self._scope_guard = ScopeGuard(
             storage,
             default_grant=grant,
             on_violation=str(on_violation),
             exclude=[str(item) for item in exclude],
             auto_bind=auto_bind,
+            missing_run_id_policy=missing_run_id_policy,
         )
         return self._scope_guard
 
@@ -1930,18 +1950,81 @@ def _validate_transition_tools(
             )
 
 
-def _memory_storage_policy(action_ledger: dict[str, Any] | None) -> str:
-    """Return the configured memory-storage policy, defaulting to ``warn``."""
-    if action_ledger is None:
-        return MEMORY_STORAGE_POLICY_WARN
-    raw = action_ledger.get("memory_storage_policy", MEMORY_STORAGE_POLICY_WARN)
-    if raw not in MEMORY_STORAGE_POLICIES:
+def _parse_profile(data: dict[str, Any]) -> str:
+    """Return the config profile, defaulting to ``development``."""
+    value = data.get("profile", PROFILE_DEVELOPMENT)
+    if value not in PROFILES:
         raise ConfigError(
-            "'action_ledger.memory_storage_policy' must be "
-            f"{MEMORY_STORAGE_POLICY_WARN!r} or {MEMORY_STORAGE_POLICY_ERROR!r}, "
-            f"got {raw!r}"
+            f"'profile' must be {PROFILE_DEVELOPMENT!r} or "
+            f"{PROFILE_PRODUCTION!r}, got {value!r}"
         )
-    return str(raw)
+    return str(value)
+
+
+def _reject_weaker_production_policy(field_path: str, value: str) -> None:
+    raise ConfigError(
+        f"profile is {PROFILE_PRODUCTION!r} but '{field_path}' is {value!r}; "
+        f"production requires 'error' and will not silently weaken to 'warn'. "
+        f"Remove '{field_path}' or set it to 'error'."
+    )
+
+
+def _missing_run_id_policy(
+    raw: dict[str, Any] | None,
+    field_path: str,
+    *,
+    profile: str = PROFILE_DEVELOPMENT,
+) -> str:
+    """Return ``missing_run_id_policy``, defaulting to ``warn``.
+
+    ``profile: production`` treats an omitted policy as ``error`` for an
+    enabled guard. An explicit ``warn`` is rejected so production cannot be
+    silently weakened.
+    """
+    if raw is None:
+        return MISSING_RUN_ID_POLICY_WARN
+    if "missing_run_id_policy" in raw:
+        value = raw["missing_run_id_policy"]
+        if value not in MISSING_RUN_ID_POLICIES:
+            raise ConfigError(
+                f"'{field_path}' must be {MISSING_RUN_ID_POLICY_WARN!r} or "
+                f"{MISSING_RUN_ID_POLICY_ERROR!r}, got {value!r}"
+            )
+        if profile == PROFILE_PRODUCTION and value == MISSING_RUN_ID_POLICY_WARN:
+            _reject_weaker_production_policy(field_path, str(value))
+        return str(value)
+    if profile == PROFILE_PRODUCTION:
+        return MISSING_RUN_ID_POLICY_ERROR
+    return MISSING_RUN_ID_POLICY_WARN
+
+
+def _memory_storage_policy(
+    action_ledger: dict[str, Any] | None,
+    *,
+    profile: str = PROFILE_DEVELOPMENT,
+) -> str:
+    """Return the configured memory-storage policy, defaulting to ``warn``.
+
+    ``profile: production`` treats an omitted policy as ``error``. An explicit
+    ``warn`` is rejected so production cannot be silently weakened.
+    """
+    if action_ledger is not None and "memory_storage_policy" in action_ledger:
+        raw = action_ledger["memory_storage_policy"]
+        if raw not in MEMORY_STORAGE_POLICIES:
+            raise ConfigError(
+                "'action_ledger.memory_storage_policy' must be "
+                f"{MEMORY_STORAGE_POLICY_WARN!r} or "
+                f"{MEMORY_STORAGE_POLICY_ERROR!r}, got {raw!r}"
+            )
+        if profile == PROFILE_PRODUCTION and raw == MEMORY_STORAGE_POLICY_WARN:
+            _reject_weaker_production_policy(
+                "action_ledger.memory_storage_policy",
+                str(raw),
+            )
+        return str(raw)
+    if profile == PROFILE_PRODUCTION:
+        return MEMORY_STORAGE_POLICY_ERROR
+    return MEMORY_STORAGE_POLICY_WARN
 
 
 def _side_effecting_memory_tools(
@@ -1965,6 +2048,8 @@ def _enforce_memory_storage_policy(
     tools: dict[str, ToolConfig],
     transition: TransitionConfig | None,
     action_ledger: dict[str, Any] | None,
+    *,
+    profile: str = PROFILE_DEVELOPMENT,
 ) -> None:
     """Apply ``action_ledger.memory_storage_policy`` at YAML load time.
 
@@ -1973,9 +2058,10 @@ def _enforce_memory_storage_policy(
     ``transition:`` is configured — the duplicate-side-effect guard only holds
     within the process. ``error`` rejects those tools with :class:`ConfigError`
     so production cannot silently lose ledger state across a restart. Reads
-    may keep using memory storage under either policy.
+    may keep using memory storage under either policy. ``profile: production``
+    applies ``error`` unless the user already set it.
     """
-    policy = _memory_storage_policy(action_ledger)
+    policy = _memory_storage_policy(action_ledger, profile=profile)
     affected = _side_effecting_memory_tools(tools)
     if not affected:
         return
@@ -2059,6 +2145,8 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
     if not isinstance(data, dict):
         raise ConfigError("config root must be a mapping")
 
+    profile = _parse_profile(data)
+
     action_ledger_raw = data.get("action_ledger")
     if action_ledger_raw is not None and not isinstance(action_ledger_raw, dict):
         raise ConfigError("'action_ledger' must be a mapping")
@@ -2108,7 +2196,9 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
         _apply_action_ledger_tools(tools, action_ledger_raw, audit_auto=audit_auto)
 
     _validate_transition_tools(tools, transition)
-    _enforce_memory_storage_policy(tools, transition, action_ledger_raw)
+    _enforce_memory_storage_policy(
+        tools, transition, action_ledger_raw, profile=profile
+    )
 
     tasks_raw = data.get("tasks", {})
     if not isinstance(tasks_raw, dict):
@@ -2160,6 +2250,11 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
         tools_sel = loop_guard_raw.get("tools", "all")
         if tools_sel != "all" and not isinstance(tools_sel, list):
             raise ConfigError("'loop_guard.tools' must be 'all' or a list of tool names")
+        _missing_run_id_policy(
+            loop_guard_raw,
+            "loop_guard.missing_run_id_policy",
+            profile=profile,
+        )
 
     budget_raw = data.get("budget")
     if budget_raw is not None and not isinstance(budget_raw, dict):
@@ -2218,6 +2313,11 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
                 f"'scope_guard.on_violation' must be one of "
                 f"{sorted(ON_VIOLATION_MODES)}"
             )
+        _missing_run_id_policy(
+            scope_guard_raw,
+            "scope_guard.missing_run_id_policy",
+            profile=profile,
+        )
         _scope_grant_from_config(
             scope_guard_raw,
             registry_allowed=registry_allowed,
@@ -2306,6 +2406,7 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
         scope_guard=scope_guard_raw,
         state_authority=state_authority_raw,
         completion=completion_raw,
+        profile=profile,
         _audit_auto=audit_auto,
     )
 
@@ -2338,6 +2439,9 @@ __all__ = [
     "MEMORY_STORAGE_POLICIES",
     "MEMORY_STORAGE_POLICY_ERROR",
     "MEMORY_STORAGE_POLICY_WARN",
+    "PROFILE_DEVELOPMENT",
+    "PROFILE_PRODUCTION",
+    "PROFILES",
     "MyceliumConfig",
     "ToolConfig",
     "TransitionConfig",

@@ -47,6 +47,12 @@ T = TypeVar("T")
 UNCLASSIFIED_POLICY_WARN = "warn"
 UNCLASSIFIED_POLICY_STRICT = "strict"
 
+MISSING_RUN_ID_POLICY_WARN = "warn"
+MISSING_RUN_ID_POLICY_ERROR = "error"
+MISSING_RUN_ID_POLICIES = frozenset(
+    {MISSING_RUN_ID_POLICY_WARN, MISSING_RUN_ID_POLICY_ERROR}
+)
+
 VERIFIED_CLEAR = "clear"
 VERIFIED_ALLOW_ONCE = "allow-once"
 VERIFIED_ABORT_RUN = "abort-run"
@@ -63,7 +69,27 @@ DEFAULT_CONSECUTIVE_SOFT: dict[str, int] = {
 }
 
 _SCOPE_MISSING_WARNED = False
+_MISSING_IDENTITY_WARNED = False
 _UNCLASSIFIED_WARNED_TOOLS: set[str] = set()
+
+
+class MissingRunIdentityError(Exception):
+    """Raised when an enabled run-scoped guard has no stable ``run_id``.
+
+    ``run_id`` groups steps in one logical agent run. It is not a
+    ``tool_call_id``, transition ``request_id``, provider idempotency key, or
+    ``thread_id`` (a thread may span multiple runs).
+    """
+
+    def __init__(self, *, guard: str, tool: str | None = None) -> None:
+        self.guard = guard
+        self.tool = tool
+        tool_bit = f" for tool {tool!r}" if tool else ""
+        super().__init__(
+            f"{guard} requires a stable run_id but none was available{tool_bit}.\n"
+            "Supply TransitionScope(run_id=...) or configure the framework adapter.\n"
+            "The protected tool was not executed."
+        )
 
 
 def action_hash(tool: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
@@ -72,20 +98,89 @@ def action_hash(tool: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> str
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
+def parse_run_identity(value: Any) -> str | None:
+    """Return a non-empty run/thread identity, or ``None`` if missing."""
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped if stripped else None
+
+
+def resolve_run_id(*, kwargs: dict[str, Any] | None = None) -> str | None:
+    """Return a valid host/framework ``run_id``, or ``None`` if missing."""
+    kwargs = kwargs or {}
+    scope = get_active_execution_scope()
+    return parse_run_identity(kwargs.get("run_id")) or parse_run_identity(
+        scope.run_id if scope else None
+    )
+
+
 def resolve_loop_scope_key(
     *,
     kwargs: dict[str, Any] | None = None,
 ) -> str | None:
-    """Return ``run_id`` or fallback ``thread_id``; ``None`` if neither is set."""
+    """Return ``run_id`` or fallback ``thread_id``; ``None`` if neither is set.
+
+    Grouping still accepts ``thread_id`` (documented contract). Empty and
+    whitespace-only values are not identities. This helper never invents a
+    random id.
+    """
     kwargs = kwargs or {}
-    scope = get_active_execution_scope()
-    run_id = kwargs.get("run_id") or (scope.run_id if scope else None)
+    run_id = resolve_run_id(kwargs=kwargs)
     if run_id:
-        return str(run_id)
-    thread_id = kwargs.get("thread_id") or (scope.thread_id if scope else None)
-    if thread_id:
-        return str(thread_id)
-    return None
+        return run_id
+    scope = get_active_execution_scope()
+    return parse_run_identity(kwargs.get("thread_id")) or parse_run_identity(
+        scope.thread_id if scope else None
+    )
+
+
+def enforce_run_identity(
+    guard_name: str,
+    *,
+    tool: str | None = None,
+    policy: str = MISSING_RUN_ID_POLICY_WARN,
+    kwargs: dict[str, Any] | None = None,
+) -> str | None:
+    """Resolve the grouping key, or warn/raise when identity is missing.
+
+    ``error`` requires a valid ``run_id`` (``thread_id`` alone is not enough).
+    ``warn`` preserves the skip-when-no-key behavior and uses ``thread_id`` as
+    a grouping fallback when that documented contract applies.
+    """
+    if policy not in MISSING_RUN_ID_POLICIES:
+        raise ValueError(
+            f"missing_run_id_policy must be {MISSING_RUN_ID_POLICY_WARN!r} or "
+            f"{MISSING_RUN_ID_POLICY_ERROR!r}, got {policy!r}"
+        )
+    kwargs = kwargs or {}
+    if policy == MISSING_RUN_ID_POLICY_ERROR and resolve_run_id(kwargs=kwargs) is None:
+        raise MissingRunIdentityError(guard=guard_name, tool=tool)
+    scope_key = resolve_loop_scope_key(kwargs=kwargs)
+    if scope_key is None:
+        _warn_missing_run_identity(guard_name)
+        return None
+    return scope_key
+
+
+def _warn_missing_run_identity(guard_name: str) -> None:
+    global _MISSING_IDENTITY_WARNED
+    if _MISSING_IDENTITY_WARNED:
+        return
+    warnings.warn(
+        f"{guard_name} skipped: no stable run_id or thread_id was available. "
+        "Supply TransitionScope(run_id=...) or configure the framework adapter. "
+        "Protection was not applied.",
+        stacklevel=4,
+    )
+    _MISSING_IDENTITY_WARNED = True
+
+
+def reset_missing_run_identity_warnings() -> None:
+    """Clear the bounded missing-identity warning (tests)."""
+    global _MISSING_IDENTITY_WARNED, _SCOPE_MISSING_WARNED
+    _MISSING_IDENTITY_WARNED = False
+    _SCOPE_MISSING_WARNED = False
 
 
 @dataclass
@@ -272,6 +367,7 @@ class LoopGuard:
         exclude: list[str] | None = None,
         outcome_emitter: OutcomeEmitter | None = None,
         agent_id: str = "loop-guard",
+        missing_run_id_policy: str = MISSING_RUN_ID_POLICY_WARN,
     ) -> None:
         if unclassified_policy not in (
             UNCLASSIFIED_POLICY_WARN,
@@ -283,6 +379,11 @@ class LoopGuard:
             )
         if escalate_after_soft < 1:
             raise ValueError("escalate_after_soft must be >= 1")
+        if missing_run_id_policy not in MISSING_RUN_ID_POLICIES:
+            raise ValueError(
+                f"missing_run_id_policy must be {MISSING_RUN_ID_POLICY_WARN!r} or "
+                f"{MISSING_RUN_ID_POLICY_ERROR!r}, got {missing_run_id_policy!r}"
+            )
         self._storage = storage or InMemoryLoopGuardStorage()
         merged = dict(DEFAULT_CONSECUTIVE_SOFT)
         if consecutive_soft:
@@ -294,10 +395,15 @@ class LoopGuard:
         self._exclude = frozenset(exclude or [])
         self._outcome_emitter = outcome_emitter
         self._agent_id = agent_id
+        self._missing_run_id_policy = missing_run_id_policy
 
     @property
     def storage(self) -> LoopGuardStorage:
         return self._storage
+
+    @property
+    def missing_run_id_policy(self) -> str:
+        return self._missing_run_id_policy
 
     def threshold_for(self, side_effect_class: SideEffectClass | None) -> int:
         if side_effect_class is None:
@@ -326,21 +432,17 @@ class LoopGuard:
         Call **before** the tool body (and before ledger claim). On success the
         call is allowed through; on soft/hard the body must not run.
         """
-        global _SCOPE_MISSING_WARNED
-
         kwargs = dict(kwargs or {})
         if tool in self._exclude:
             return
 
-        scope_key = resolve_loop_scope_key(kwargs=kwargs)
+        scope_key = enforce_run_identity(
+            "LoopGuard",
+            tool=tool,
+            policy=self._missing_run_id_policy,
+            kwargs=kwargs,
+        )
         if scope_key is None:
-            if not _SCOPE_MISSING_WARNED:
-                warnings.warn(
-                    "LoopGuard skipped: no run_id or thread_id in execution scope; "
-                    "wire transition.scope_from / execution_scope for AF-003 protection.",
-                    stacklevel=2,
-                )
-                _SCOPE_MISSING_WARNED = True
             return
 
         if side_effect_class is None and tool not in _UNCLASSIFIED_WARNED_TOOLS:
@@ -638,6 +740,9 @@ def apply_loop_guard(
 
 __all__ = [
     "DEFAULT_CONSECUTIVE_SOFT",
+    "MISSING_RUN_ID_POLICIES",
+    "MISSING_RUN_ID_POLICY_ERROR",
+    "MISSING_RUN_ID_POLICY_WARN",
     "UNCLASSIFIED_POLICY_STRICT",
     "UNCLASSIFIED_POLICY_WARN",
     "VERIFIED_ABORT_RUN",
@@ -649,9 +754,13 @@ __all__ = [
     "LoopGuard",
     "LoopGuardStorage",
     "LoopRunState",
+    "MissingRunIdentityError",
     "action_hash",
     "apply_loop_guard",
+    "enforce_run_identity",
     "loop_guard",
     "loop_guard_sync",
+    "parse_run_identity",
     "resolve_loop_scope_key",
+    "resolve_run_id",
 ]

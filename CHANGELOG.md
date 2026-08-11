@@ -5,6 +5,12 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
 
 ## Unreleased
 
+## 1.31.0 (2026-08-11)
+
+MINOR: production-safe identity and storage. Host-owned `request_id`,
+strict run-id / memory-storage policies, and `profile: production` so a
+deployment cannot silently skip those guards. Library defaults stay `warn`.
+
 ### Added
 
 - **`action_ledger.memory_storage_policy`:** `warn` (default, backward
@@ -14,6 +20,23 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
   `error` — the error names the tool and recommends
   `file/sqlite/redis/postgres`. Reads may keep using memory storage.
   Shipped `mycelium init` templates default the action ledger to SQLite.
+- **Host-owned `request_id`:** an optional non-empty `request_id` kwarg is
+  the transition identity across retries (`charge-order:{order_id}`). It is
+  excluded from the args fingerprint and not forwarded to the tool. Omitted
+  `request_id` keeps derived `tool_call_id` identity. Reusing the same id
+  with a different tool, scope, or meaningful arguments is fail-closed.
+- **`missing_run_id_policy` on `loop_guard` / `scope_guard`:** `warn` (default,
+  skip when no run identity, backward compatible) or `error`. Strict mode
+  raises `MissingRunIdentityError` before the tool, ledger claim, or external
+  side effect when an enabled guard has no stable host `run_id`. Empty and
+  whitespace-only values are missing. `thread_id` remains a grouping fallback
+  only under `warn`.
+- **`profile: production`:** opt-in deployment profile. Library defaults stay
+  `warn`. Production applies `memory_storage_policy: error` and
+  `missing_run_id_policy: error` on enabled LoopGuard/ScopeGuard. Explicit
+  weaker `warn` settings are rejected with `ConfigError` (not silently
+  overridden). Disabled guards still do not require `run_id`. Reads may keep
+  memory storage.
 
 ## 1.30.0 (2026-08-11)
 

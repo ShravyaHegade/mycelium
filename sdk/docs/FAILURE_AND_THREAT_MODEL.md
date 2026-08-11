@@ -190,9 +190,12 @@ section; the tests are concrete `file::test_name` entries.
     *Where:* [Enforcing the same provider idempotency key](../README.md#enforcing-the-same-provider-idempotency-key-provider_idempotency_key_param).
 
 15. **Key derivation is deterministic and sound.** Identical redispatches map
-    to one key; changing a *real* argument produces a new key; `tool_call_id`
-    binds the dispatch identity but is excluded from the args fingerprint.
-    *Where:* [Transition identity and the `request_id` caveat](../README.md#transition-identity-and-the-request_id-caveat).
+    to one key. With derived identity, changing a *real* argument produces a
+    new key; `tool_call_id` binds the dispatch identity but is excluded from
+    the args fingerprint. An explicit host-owned `request_id` is itself the
+    key, and reuse with a different tool, scope, or meaningful argument is
+    fail-closed.
+    *Where:* [Transition identity and host-owned `request_id`](../README.md#transition-identity-and-host-owned-request_id).
 
 16. **Task-level idempotency.** The task ledger returns a stored result for a
     repeated task id (deduplicated across processes when storage is durable).
@@ -212,18 +215,23 @@ than the code makes.
   guarantee — see `test_operator_release.py` for the one-shot/fail-closed
   semantics, and `test_audit_receipt.py::test_tampered_receipt_fails_verification`
   for tamper-evidence when receipts are enabled.)*
-- **Identity-conflict rejection (default soft).** Same `request_id` /
-  `tool_call_id` + changed args → refuse the second body within the same run
-  (`run_id` / `thread_id`; other runs isolated): soft → `ToolBoundaryError`,
-  hard → `LedgerHardBlockError`. Transition keys still differ by args; set
-  `on_args_drift: off` for the old dual-execute escape hatch. Default soft
-  pinned by `tests/test_args_drift.py::test_default_is_soft_not_off`; key
-  split + `off` escape hatch by
+- **Identity-conflict rejection (default soft).** Same derived `tool_call_id` +
+  changed args refuses the second body within the same run (`run_id` /
+  `thread_id`; other runs isolated): soft → `ToolBoundaryError`, hard →
+  `LedgerHardBlockError`. Derived transition keys still differ by args;
+  `on_args_drift: off` retains the old dual-execute escape hatch. An explicit
+  host-owned `request_id` is the storage key, and reuse with a different tool,
+  scope, or meaningful arguments is fail-closed even when drift checking is
+  off. Default soft pinned by
+  `tests/test_args_drift.py::test_default_is_soft_not_off`; derived key split +
+  `off` escape hatch by
   `tests/test_mengchheang_public_repro.py::test_semantic_identity`.
 - **Budget / runaway spend (without `budget:`).** If a caller produces many
   distinct transition keys, the ledger does not stop the calls. Optional
   AF-003 `loop_guard:` halts consecutive identical *action* hashes (tool + args)
-  across new dispatch ids; it is **not** a general spend/time budget. Optional
+  across new dispatch ids; it is **not** a general spend/time budget. Without a
+  stable `run_id` the detector skips (default `missing_run_id_policy: warn`).
+  Set `error` so an enabled guard cannot run unprotected. Optional
   `budget:` (not AF-010) hard-stops on host-declared duration/steps/tokens/USD
   ceilings before the next step; residual risk remains if the host skips
   `instrument_llm` / `@budget_llm` (or manual `check("llm")`) +
@@ -240,7 +248,9 @@ than the code makes.
 - **Allowlist widen (without `scope_guard:`).** A handoff or
   `registry.allow(...)` that adds tools mid-run is invisible to the ledger.
   Optional AF-008 `scope_guard:` freezes the run tool allowlist and
-  re-checks every step; entity/path remain `@bounded`'s job.
+  re-checks every step; entity/path remain `@bounded`'s job. Missing
+  `run_id` skips by default (`missing_run_id_policy: warn`); `error` refuses
+  before the tool runs.
 - **Trusting the reconciler.** If your reconciler returns `NOT_EXECUTED` when
   the effect actually happened, the runtime will re-execute once. Reconcilers
   are read-only *by contract*, not enforced by Mycelium.
@@ -291,7 +301,7 @@ are cited once. "Where documented" links the README section.
 | Release emits signed audit receipts when configured | README § [Operator runbook](../README.md#operator-runbook-your-agent-hard-blocked) | `test_operator_release.py::test_release_emits_audit_receipt_when_emitter_configured` · `test_audit_receipt.py::test_emitter_signs_and_verifies_tool_receipt` · `test_audit_receipt.py::test_tampered_receipt_fails_verification` |
 | Worker-death gate (opt-in) | README § [Assert worker death](../README.md#operator-runbook-your-agent-hard-blocked) | `test_worker_death_signal.py::test_release_expired_refused_without_death_evidence` · `test_worker_death_signal.py::test_release_expired_allowed_with_asserted_death` · `test_worker_death_signal.py::test_mark_worker_dead_refuses_recent_heartbeat_without_override` · `test_worker_death_signal.py::test_read_only_reclaim_blocked_without_death_evidence` · `test_worker_death_signal.py::test_side_effecting_allow_blocked_without_death_evidence` |
 | Provider idempotency-key enforcement (opt-in) | README § [Enforcing the same provider idempotency key](../README.md#enforcing-the-same-provider-idempotency-key-provider_idempotency_key_param) | `test_provider_idempotency_key.py::test_gate_hard_blocks_different_provider_key` · `test_provider_idempotency_key.py::test_gate_hard_blocks_missing_incoming_key` · `test_provider_idempotency_key.py::test_gate_hard_blocks_missing_stored_key` · `test_provider_idempotency_key.py::test_declared_key_is_excluded_from_transition_key` · `test_provider_key_validity.py::test_same_key_expired_ttl_hard_blocks` · `test_provider_key_validity.py::test_unknown_same_key_valid_ttl_allows` · `test_provider_key_validity.py::test_unknown_same_key_expired_ttl_hard_blocks` · `test_provider_key_validity.py::test_unknown_same_key_prefers_reconciler_over_reexec` |
-| Key derivation soundness | README § [Transition identity and the `request_id` caveat](../README.md#transition-identity-and-the-request_id-caveat) | `test_transition.py::test_same_inputs_produce_same_transition_key` · `test_transition.py::test_different_tool_call_id_produces_different_key` · `test_transition.py::test_ledger_deduplicates_by_transition_key` · `test_property_transitions.py::test_transition_key_invariants` (property test) |
+| Key derivation soundness | README § [Transition identity and host-owned `request_id`](../README.md#transition-identity-and-host-owned-request_id) | `test_transition.py::test_same_inputs_produce_same_transition_key` · `test_transition.py::test_different_tool_call_id_produces_different_key` · `test_transition.py::test_ledger_deduplicates_by_transition_key` · `test_property_transitions.py::test_transition_key_invariants` (property test) · `test_explicit_request_id.py` |
 | Task-level idempotency | README § [Quickstart: task-level idempotency](../README.md#quickstart-task-level-idempotency) | `test_cli_run.py::test_run_instruments_sync_tool_and_task_across_processes` |
 | Single-key state machine invariants (executions ≤ 1 + not-executed verdicts; COMPLETED terminal; CAS out of IN_FLIGHT) | this doc, § C / [NOT_EXECUTED reset CAS](../README.md#not_executed-reset-cas-v118) | `test_property_transitions.py::test_transition_key_invariants` (Hypothesis, file + Redis) · `test_payment_provider_mock.py::test_redispatch_storm_never_double_charges` |
 
@@ -309,7 +319,8 @@ Still can go wrong — even with everything above configured correctly:
 
 - **`storage: memory` across processes.** The guard holds within one process
   only. Mycelium warns at config time (`memory_storage_policy: warn`, the
-  default); set `error` so production cannot load that combination. Don't
+  default); set `error` or `profile: production` so production cannot load
+  that combination. Don't
   ship memory storage for multi-worker side-effecting tools.
 - **A reconciler that lies.** If your reconciler returns `NOT_EXECUTED` for an
   effect that actually happened, the runtime re-executes once. Reconcilers are

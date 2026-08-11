@@ -40,10 +40,18 @@ from mycelium import load_config
 
 config = load_config("mycelium.yaml")
 
+# One business id, two uses. Mycelium uses `request_id` as the transition
+# identity but does NOT forward it into the tool body — pass the same string
+# separately as `idempotency_key` so the provider dedupes with it too
+# (`Idempotency-Key: charge-order:ORD-123`).
+request_id = f"charge-order:{order_id}"
+
 @config.apply
-def send_payment(amount: float) -> dict:
-    # your provider call
-    return {"charged": amount}
+def send_payment(amount: float, idempotency_key: str) -> dict:
+    # your provider call, keyed by idempotency_key
+    return {"charged": amount, "provider_idempotency_key": idempotency_key}
+
+send_payment(amount=10.0, idempotency_key=request_id, request_id=request_id)
 
 # Pass send_payment into LangGraph ToolNode as usual.
 ```

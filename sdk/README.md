@@ -499,30 +499,48 @@ reconciler, in-memory ledgers across processes), and a **guarantee → test map*
 so no documented promise is left without a test. It is honest about residual
 risk — read it before relying on the runtime to stop a double payment.
 
-### Transition identity and the `request_id` caveat
+### Transition identity and host-owned `request_id`
 
-The transition key is a compound of runtime scope + tool name + canonicalised
-args + `side_effect_class` + policy version — not `request_id` alone (or
-`tool_call_id` alone):
+Pass an optional `request_id` when the host already has a stable business
+operation identity. Mycelium uses that string as the transition identity
+across retries — it is not hashed with args, and it is not forwarded into the
+wrapped tool.
 
-| Inputs | → | Transition key |
-|--------|---|----------------|
-| Same `request_id` + same args | → | Same key — deduplicated, replayed, or polled as usual |
-| Same `request_id` + **changed** args | → | **Different** key — the tool may execute again |
+**The host must derive it from a server-owned record**, never from the model:
 
-Transition keys still encode args (same ticket + different args → different
-key). **By default Mycelium also refuses the second body** so a corrupted
-upstream redispatch cannot double-execute.
+```python
+request_id = f"charge-order:{order_id}"
+charge(amount=10, recipient=acct, request_id=request_id)
+```
+
+For `keyed_mutate` tools, use the same string as the provider idempotency key
+when the provider allows it (`Idempotency-Key: charge-order:ORD-123`). That
+keeps ledger identity and provider dedupe aligned.
+
+| Inputs | → | What happens |
+|--------|---|--------------|
+| Same explicit `request_id` + same tool/scope/args | → | Same transition — return stored result or poll |
+| Same explicit `request_id` + **different** tool, scope, or meaningful args | → | Fail-closed identity conflict (`ToolBoundaryError` / hard-block) |
+| `request_id` omitted | → | Unchanged derived identity (`tool_call_id` + scope + args + policy) |
+
+Mycelium does **not** infer “this is a retry” from arguments alone. If you
+omit `request_id`, a new `tool_call_id` is a new transition.
+
+When `request_id` is omitted, the derived transition key still encodes args
+(same `tool_call_id` + different args → different key). **By default Mycelium
+also refuses the second body** so a corrupted upstream redispatch cannot
+double-execute.
 
 **Args-drift / identity-conflict gate (AF-002):** default
 `action_ledger.on_args_drift: soft`. Mycelium compares claim-time
-`args_fingerprint` to prior entries for the same dispatch ticket (same storage
-key, or same ticket under a different transition key), scoped to the same run
-(`run_id`, else `thread_id`) — other runs are isolated. Soft →
-`ToolBoundaryError` (loop can retry with original args or a new ticket); hard →
-`LedgerHardBlockError` (freeze for a human); `off` → escape hatch restoring
-"new args = new transition" dual execution. Same ticket + same args still
-idempotently returns.
+`args_fingerprint` to prior entries for the same dispatch ticket. Explicit
+`request_id` conflicts include a changed tool or scope and are always refused,
+including when `on_args_drift` is `off`. Derived `tool_call_id` drift checks are
+scoped to the same run (`run_id`, else `thread_id`) — other runs are isolated.
+Soft → `ToolBoundaryError` (loop can retry with original args or a new ticket);
+hard → `LedgerHardBlockError` (freeze for a human); `off` → escape hatch
+restoring "new args = new transition" dual execution for derived identities
+only. Same ticket + same args still idempotently returns.
 
 ```yaml
 action_ledger:
@@ -542,13 +560,19 @@ Key split + the `off` escape hatch are covered by
 `tests/test_mengchheang_public_repro.py::test_semantic_identity`:
 
 ```python
-kwargs_a = {"amount": 10, "request_id": "intent-1"}
-kwargs_b = {"amount": 11, "request_id": "intent-1"}
+# Derived identity (no request_id): hash still splits on args.
+kwargs_a = {"amount": 10, "tool_call_id": "tc-1"}
+kwargs_b = {"amount": 11, "tool_call_id": "tc-1"}
 key_a = derive_transition_key_for_call("charge", (), kwargs_a, _BINDING)
 key_b = derive_transition_key_for_call("charge", (), kwargs_b, _BINDING)
-assert key_a != key_b       # changed args → different key
+assert key_a != key_b       # changed args → different derived key
 # default soft: second body raises ToolBoundaryError (does not run)
-# on_args_drift="off": both execute (escape hatch)
+# on_args_drift="off": both execute (escape hatch for derived keys only)
+
+# Explicit request_id is the storage identity and stays fail-closed.
+charge(amount=10, request_id="charge-order:ORD-123")
+charge(amount=10, request_id="charge-order:ORD-123")  # stored result
+# charge(amount=11, request_id="charge-order:ORD-123")  # identity conflict
 ```
 
 ### Resolution gates
@@ -997,6 +1021,7 @@ loop_guard:
   storage: file
   path: ./mycelium-loop.json
   escalate_after_soft: 1
+  missing_run_id_policy: error   # warn (default) | error
   consecutive_soft:
     read: 5
     idempotent_mutate: 3
@@ -1004,6 +1029,33 @@ loop_guard:
     non_idempotent_mutate: 2
     irreversible: 2
 ```
+
+LoopGuard and ScopeGuard key state by `run_id` (fallback `thread_id` for
+grouping only). Missing identity **warns and skips** by default so existing
+callers keep working. Production should set `profile: production` (or
+`missing_run_id_policy: error`) so an enabled guard cannot silently run
+unprotected. A valid `run_id` is a
+non-empty host-generated string, identical for every step, retry, checkpoint
+restore, and worker redispatch of one logical run. Do not mint a random id per
+tool call.
+
+```python
+run_id = server_run.id  # created once by the host; reuse on every step
+
+with execution_scope(
+    TransitionScope(
+        thread_id=conversation.id,
+        run_id=run_id,
+    )
+):
+    agent.run(...)
+```
+
+`thread_id` may span multiple runs and is not a substitute in `error` mode.
+`tool_call_id` / transition `request_id` identify one tool operation, not the
+run. LangGraph's adapter copies an existing framework `run_id` into
+`execution_scope` — do not pass a duplicate when the adapter already provides
+one.
 
 Wrapper order: `@budget_guard` → `@loop_guard` → `@ledger` → `@bounded` → `@protect` → `func`.
 
@@ -1090,6 +1142,7 @@ call** and re-checks every step.
 scope_guard:
   storage: file
   path: ./mycelium-scope.json
+  missing_run_id_policy: error   # warn (default, skip if no run_id) | error
   # allowed_tools: from_registry   # default → registry.allowed / tools:
   # on_violation: soft             # soft | hard
 ```
@@ -1355,6 +1408,34 @@ r2 = process_invoice(invoice_id="inv-42", task_id="invoice-42-attempt-2")  # fre
 Separate YAML sections per guard type. Global ledger settings inherit into tools/tasks
 so you do not repeat storage paths on every function.
 
+**Deployments:** set `profile: production`. That does not change library defaults
+for omitted configs (still `warn`). It applies two fail-closed policies:
+
+- `action_ledger.memory_storage_policy: error` — side-effecting tools cannot
+  use memory storage
+- `loop_guard` / `scope_guard` `missing_run_id_policy: error` when those
+  guards are enabled — missing `run_id` raises `MissingRunIdentityError`
+  before the guard, ledger claim, tool, or side effect. `thread_id` is not a
+  substitute; Mycelium never invents a random id.
+
+Explicit `warn` under production is rejected (`ConfigError`), not silently
+weakened. Omit `profile` or set `profile: development` for tests.
+
+```yaml
+profile: production
+
+action_ledger:
+  storage: postgres
+  dsn_env: MYCELIUM_POSTGRES_DSN
+
+loop_guard:
+  storage: file
+
+scope_guard:
+  storage: file
+  allowed_tools: from_registry
+```
+
 **Minimum integration (3 steps):**
 
 ```yaml
@@ -1422,6 +1503,7 @@ registry:
 loop_guard:
   storage: file
   path: ./mycelium-loop.json
+  missing_run_id_policy: error
 
 history_guard:
   max_tokens: 100000

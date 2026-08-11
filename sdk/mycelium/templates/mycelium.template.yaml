@@ -26,6 +26,9 @@
 #   postgres — durable multi-worker / audit-oriented (dsn: or dsn_env:)
 # Side-effecting tools + storage: memory: set memory_storage_policy: error
 #   to reject at load time (default warn keeps tests/dev working).
+# Deployments: set `profile: production` so memory_storage_policy and
+#   missing_run_id_policy become error automatically. Explicit `warn` under
+#   production is rejected (not silently weakened).
 # state_flush / audit_receipt: memory | file only
 #
 # side_effect_class (per ledgered tool): read | idempotent_mutate |
@@ -48,6 +51,10 @@
 #   provider_idempotency_key_param and this TTL also unlocks same-key retry on
 #   UNKNOWN while the window is still valid (Reconciler preferred; fail-closed
 #   after expiry). Omit to keep today's behaviour (UNKNOWN always hard-blocks).
+# Optional host-owned identity: pass request_id=f"charge-order:{order_id}"
+#   (server-owned business record, never model output). Retries that reuse it
+#   are the same transition. For keyed_mutate, reuse that string as the
+#   provider idempotency key when the provider allows it.
 # In tool code, wrap the external call in `with side_effect():` so a failure
 #   after the call is classified FAILED_AFTER_EFFECT / UNKNOWN (not retried),
 #   not FAILED_BEFORE_EFFECT. Inside it call
@@ -60,6 +67,14 @@
 #   Reconciler in code: `@ledger_sync(reconciler=...)` or
 #   `ActionLedger(reconciler=...)`. It returns COMPLETED / NOT_EXECUTED /
 #   UNKNOWN and is fail-closed (reconcilers can't be declared in YAML).
+
+# ---------------------------------------------------------------------------
+# profile  (omit for development; production tightens two safety policies)
+# ---------------------------------------------------------------------------
+# profile: production
+#   → action_ledger.memory_storage_policy: error
+#   → loop_guard / scope_guard missing_run_id_policy: error (when enabled)
+#   Weaker explicit `warn` settings are rejected.
 
 # ---------------------------------------------------------------------------
 # integrations (optional framework metadata; core remains framework-agnostic)
@@ -98,7 +113,8 @@ action_ledger:
   on_args_drift: soft           # soft (default) | hard | off — same dispatch
                                 # ticket + different args → ToolBoundaryError /
                                 # LedgerHardBlockError (identity-conflict gate);
-                                # off = escape hatch for "new args = new transition"
+                                # off only permits derived-key argument drift;
+                                # explicit request_id conflicts always fail closed
   # table: mycelium_action_ledger
   # url_env: MYCELIUM_REDIS_URL          # redis (multi-worker)
   # dsn_env: MYCELIUM_POSTGRES_DSN       # postgres (multi-worker / audit)
@@ -179,6 +195,7 @@ loop_guard:
   storage: file
   path: ./mycelium-loop.json
   escalate_after_soft: 1
+  missing_run_id_policy: error  # warn (default, skip if no run_id) | error
   # unclassified_policy: warn   # warn (default): missing side_effect_class → read N=5
                                 # strict: treat as mutate N=2
   consecutive_soft:
@@ -232,6 +249,7 @@ loop_guard:
 # scope_guard:
 #   storage: file
 #   path: ./mycelium-scope.json
+#   # missing_run_id_policy: error   # warn (default, skip if no run_id) | error
 #   # allowed_tools: from_registry   # default; or all | [tool_a, tool_b]
 #   # on_violation: soft             # soft (ToolBoundaryError) | hard
 #   # tools: all
