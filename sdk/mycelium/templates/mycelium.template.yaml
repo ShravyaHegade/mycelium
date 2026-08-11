@@ -48,6 +48,10 @@
 #   provider_idempotency_key_param and this TTL also unlocks same-key retry on
 #   UNKNOWN while the window is still valid (Reconciler preferred; fail-closed
 #   after expiry). Omit to keep today's behaviour (UNKNOWN always hard-blocks).
+# Optional host-owned identity: pass request_id=f"charge-order:{order_id}"
+#   (server-owned business record, never model output). Retries that reuse it
+#   are the same transition. For keyed_mutate, reuse that string as the
+#   provider idempotency key when the provider allows it.
 # In tool code, wrap the external call in `with side_effect():` so a failure
 #   after the call is classified FAILED_AFTER_EFFECT / UNKNOWN (not retried),
 #   not FAILED_BEFORE_EFFECT. Inside it call

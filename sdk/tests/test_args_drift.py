@@ -61,8 +61,12 @@ def test_default_soft_blocks_same_request_id_different_args() -> None:
     assert executions == [10]
 
 
-def test_off_allows_same_request_id_different_args() -> None:
-    """Escape hatch: explicit off restores old double-execute semantics."""
+def test_off_allows_same_tool_call_id_different_args() -> None:
+    """Escape hatch: off restores dual-execute for derived ``tool_call_id`` keys.
+
+    An explicit host ``request_id`` is the transition identity and stays
+    fail-closed even when ``on_args_drift`` is ``off``.
+    """
     storage = InMemoryLedgerStorage()
     executions: list[int] = []
 
@@ -75,9 +79,28 @@ def test_off_allows_same_request_id_different_args() -> None:
         executions.append(amount)
         return amount
 
-    charge(amount=10, request_id="intent-1")
-    charge(amount=11, request_id="intent-1")
+    charge(amount=10, tool_call_id="tc-off")
+    charge(amount=11, tool_call_id="tc-off")
     assert executions == [10, 11]
+
+
+def test_off_still_blocks_explicit_request_id_arg_drift() -> None:
+    storage = InMemoryLedgerStorage()
+    executions: list[int] = []
+
+    @ledger_sync(
+        storage=storage,
+        transition_binding=_BINDING,
+        on_args_drift=ARGS_DRIFT_OFF,
+    )
+    def charge(amount: int) -> int:
+        executions.append(amount)
+        return amount
+
+    charge(amount=10, request_id="charge-order:ORD-1")
+    with pytest.raises(ToolBoundaryError, match="identity conflict"):
+        charge(amount=11, request_id="charge-order:ORD-1")
+    assert executions == [10]
 
 
 def test_hard_blocks_same_request_id_different_args() -> None:

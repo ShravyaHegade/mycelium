@@ -40,6 +40,7 @@ from mycelium import (
     SideEffectBoundary,
     SideEffectClass,
     TerminalOutcome,
+    ToolBoundaryError,
     ToolTransitionBinding,
     derive_transition_key_for_call,
     ledger_sync,
@@ -48,10 +49,10 @@ from mycelium import (
 # ---------------------------------------------------------------------------
 # Probe 1 — Semantic identity
 # ---------------------------------------------------------------------------
-# Same caller request_id with different args derives a different transition
-# key. This is intentional: request_id alone is not an identity-conflict
-# guard. The transition key also encodes side-effect class, agent, policy
-# version, and RFC 8785-normalised args.
+# derive_transition_key_for_call still hashes args, so the same caller
+# request_id with different args yields different *hash* keys. The decorator
+# now treats an explicit request_id as the storage identity, so a retry with
+# changed args is fail-closed (args-drift) instead of a second transition.
 
 _BINDING = ToolTransitionBinding.for_tool(
     agent_id="public-repro",
@@ -61,12 +62,7 @@ _BINDING = ToolTransitionBinding.for_tool(
 
 
 def test_semantic_identity() -> None:
-    """Same caller request_id + changed args → different transition key.
-
-    Key split is intentional. Dual execution requires the explicit
-    ``on_args_drift=off`` escape hatch (default is now soft — see
-    ``test_args_drift.py``).
-    """
+    """Hash keys still split on args; explicit request_id does not re-execute."""
     storage = InMemoryLedgerStorage()
     executions: list[int] = []
 
@@ -84,13 +80,11 @@ def test_semantic_identity() -> None:
     key_a = derive_transition_key_for_call("charge", (), kwargs_a, _BINDING)
     key_b = derive_transition_key_for_call("charge", (), kwargs_b, _BINDING)
     charge(**kwargs_a)
-    charge(**kwargs_b)
+    with pytest.raises(ToolBoundaryError, match="identity conflict"):
+        charge(**kwargs_b)
 
-    # Same caller request_id, but keys differ because args differ
     assert key_a != key_b, "changed args should produce different transition key"
-    assert executions == [10, 11], (
-        f"both calls should execute under on_args_drift=off, got {executions}"
-    )
+    assert executions == [10]
 
 
 # ---------------------------------------------------------------------------

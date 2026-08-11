@@ -499,20 +499,37 @@ reconciler, in-memory ledgers across processes), and a **guarantee → test map*
 so no documented promise is left without a test. It is honest about residual
 risk — read it before relying on the runtime to stop a double payment.
 
-### Transition identity and the `request_id` caveat
+### Transition identity and host-owned `request_id`
 
-The transition key is a compound of runtime scope + tool name + canonicalised
-args + `side_effect_class` + policy version — not `request_id` alone (or
-`tool_call_id` alone):
+Pass an optional `request_id` when the host already has a stable business
+operation identity. Mycelium uses that string as the transition identity
+across retries — it is not hashed with args, and it is not forwarded into the
+wrapped tool.
 
-| Inputs | → | Transition key |
-|--------|---|----------------|
-| Same `request_id` + same args | → | Same key — deduplicated, replayed, or polled as usual |
-| Same `request_id` + **changed** args | → | **Different** key — the tool may execute again |
+**The host must derive it from a server-owned record**, never from the model:
 
-Transition keys still encode args (same ticket + different args → different
-key). **By default Mycelium also refuses the second body** so a corrupted
-upstream redispatch cannot double-execute.
+```python
+request_id = f"charge-order:{order_id}"
+charge(amount=10, recipient=acct, request_id=request_id)
+```
+
+For `keyed_mutate` tools, use the same string as the provider idempotency key
+when the provider allows it (`Idempotency-Key: charge-order:ORD-123`). That
+keeps ledger identity and provider dedupe aligned.
+
+| Inputs | → | What happens |
+|--------|---|--------------|
+| Same explicit `request_id` + same tool/scope/args | → | Same transition — return stored result or poll |
+| Same explicit `request_id` + **different** tool, scope, or meaningful args | → | Fail-closed identity conflict (`ToolBoundaryError` / hard-block) |
+| `request_id` omitted | → | Unchanged derived identity (`tool_call_id` + scope + args + policy) |
+
+Mycelium does **not** infer “this is a retry” from arguments alone. If you
+omit `request_id`, a new `tool_call_id` is a new transition.
+
+When `request_id` is omitted, the derived transition key still encodes args
+(same `tool_call_id` + different args → different key). **By default Mycelium
+also refuses the second body** so a corrupted upstream redispatch cannot
+double-execute.
 
 **Args-drift / identity-conflict gate (AF-002):** default
 `action_ledger.on_args_drift: soft`. Mycelium compares claim-time
@@ -542,13 +559,19 @@ Key split + the `off` escape hatch are covered by
 `tests/test_mengchheang_public_repro.py::test_semantic_identity`:
 
 ```python
-kwargs_a = {"amount": 10, "request_id": "intent-1"}
-kwargs_b = {"amount": 11, "request_id": "intent-1"}
+# Derived identity (no request_id): hash still splits on args.
+kwargs_a = {"amount": 10, "tool_call_id": "tc-1"}
+kwargs_b = {"amount": 11, "tool_call_id": "tc-1"}
 key_a = derive_transition_key_for_call("charge", (), kwargs_a, _BINDING)
 key_b = derive_transition_key_for_call("charge", (), kwargs_b, _BINDING)
-assert key_a != key_b       # changed args → different key
+assert key_a != key_b       # changed args → different derived key
 # default soft: second body raises ToolBoundaryError (does not run)
-# on_args_drift="off": both execute (escape hatch)
+# on_args_drift="off": both execute (escape hatch for derived keys only)
+
+# Explicit request_id is the storage identity and stays fail-closed.
+charge(amount=10, request_id="charge-order:ORD-123")
+charge(amount=10, request_id="charge-order:ORD-123")  # stored result
+# charge(amount=11, request_id="charge-order:ORD-123")  # identity conflict
 ```
 
 ### Resolution gates

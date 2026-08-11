@@ -640,12 +640,31 @@ def args_fingerprint(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
     return hashlib.sha256(canonical_json(payload).encode()).hexdigest()
 
 
+def parse_explicit_request_id(kwargs: dict[str, Any]) -> str | None:
+    """Return a host-supplied ``request_id`` after validating it.
+
+    Absent ``request_id`` means “derive identity as before” (``tool_call_id``
+    / transition key). When the key is present it must be a non-empty string
+    — empty, whitespace-only, and non-string values are rejected so a caller
+    cannot accidentally mint a blank identity.
+    """
+    if "request_id" not in kwargs:
+        return None
+    value = kwargs["request_id"]
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            f"request_id must be a non-empty string, got {value!r}"
+        )
+    return value
+
+
 def derive_dispatch_id(kwargs: dict[str, Any]) -> str | None:
     """Return explicit dispatch identity, then any active framework identity."""
     if "tool_call_id" in kwargs:
         return str(kwargs["tool_call_id"])
-    if "request_id" in kwargs:
-        return str(kwargs["request_id"])
+    explicit = parse_explicit_request_id(kwargs)
+    if explicit is not None:
+        return explicit
     return get_active_dispatch_id()
 
 
@@ -782,6 +801,7 @@ __all__ = [
     "build_transition_preimage",
     "canonical_json",
     "derive_dispatch_id",
+    "parse_explicit_request_id",
     "derive_transition_key",
     "derive_transition_key_for_call",
     "dispatch_scope",

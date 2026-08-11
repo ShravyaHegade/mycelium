@@ -215,6 +215,7 @@ from mycelium.transition import (
     get_active_handoff,
     handoff_scope,
     has_worker_death_evidence,
+    parse_explicit_request_id,
     provider_key_validity,
     resolve_lease_validity,
 )
@@ -345,6 +346,7 @@ __all__ = [
     "TransitionScope",
     "derive_transition_key",
     "derive_transition_key_for_call",
+    "parse_explicit_request_id",
     "execution_scope",
     "get_active_handoff",
     "handoff_scope",

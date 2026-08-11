@@ -46,7 +46,9 @@ from mycelium.transition import (
     get_active_handoff,
     has_worker_death_evidence,
     legacy_status_from_terminal,
+    parse_explicit_request_id,
     resolve_lease_validity,
+    resolve_scope,
     resolve_terminal_outcome,
     terminal_from_legacy_status,
 )
@@ -1043,20 +1045,39 @@ class ActionLedger:
 
         Soft raises :class:`ToolBoundaryError`; hard raises
         :class:`LedgerHardBlockError`.
-        """
-        if self._on_args_drift == ARGS_DRIFT_OFF:
-            return
 
+        An explicit host ``request_id`` is the transition identity. Reusing it
+        with a different tool, scope, or meaningful arguments is always
+        fail-closed (``off`` does not dual-execute that ticket).
+        """
         exclude = _args_drift_exclude_keys(binding)
         incoming_fp = _args_drift_fingerprint(args, kwargs, exclude=exclude)
         conflict: LedgerEntry | None = None
+        explicit = None
+        try:
+            explicit = parse_explicit_request_id(kwargs)
+        except ValueError:
+            explicit = None
 
         if existing is not None:
             stored_fp = _args_drift_fingerprint(
                 tuple(existing.args), dict(existing.kwargs), exclude=exclude
             )
+            if explicit is not None and (
+                existing.tool != tool
+                or _identity_scopes_differ(existing, kwargs, binding)
+                or stored_fp != incoming_fp
+            ):
+                # Host-owned request_id is the identity: mismatch is
+                # fail-closed even when on_args_drift is off.
+                self._raise_identity_conflict(
+                    tool, request_id=request_id, conflict=existing
+                )
             if stored_fp != incoming_fp:
                 conflict = existing
+
+        if self._on_args_drift == ARGS_DRIFT_OFF:
+            return
 
         if conflict is None:
             dispatch_id = derive_dispatch_id(kwargs)
@@ -1085,31 +1106,39 @@ class ActionLedger:
         if conflict is None:
             return
 
+        self._raise_identity_conflict(tool, request_id=request_id, conflict=conflict)
+
+    def _raise_identity_conflict(
+        self,
+        tool: str,
+        *,
+        request_id: str,
+        conflict: LedgerEntry,
+    ) -> None:
         message = (
             f"Args drift / identity conflict for tool {tool!r}: dispatch ticket "
-            f"already recorded with different arguments "
+            f"already recorded with a different tool, scope, or arguments "
             f"(prior request_id={conflict.request_id!r}, "
-            f"incoming request_id={request_id!r}). "
-            f"Set action_ledger.on_args_drift to 'off' to allow, or mint a new "
-            f"tool_call_id / request_id for a genuinely new intent."
+            f"incoming request_id={request_id!r}, prior tool={conflict.tool!r}). "
+            f"Mint a new request_id / tool_call_id for a genuinely new intent."
         )
-        if self._on_args_drift == ARGS_DRIFT_SOFT:
-            raise ToolBoundaryError(
-                message,
-                violation="args_drift",
-                tool_name=tool,
-                llm_message=(
-                    f"Identity conflict: {tool!r} was already claimed with different "
-                    "arguments for this dispatch ticket. Mint a new tool_call_id / "
-                    "request_id for a new intent, or reuse the original arguments. "
-                    "The tool body was not executed."
-                ),
-                recovery_hint=(
-                    "Reuse the original arguments for this ticket, or issue a new "
-                    "tool_call_id / request_id."
-                ),
-            )
-        raise LedgerHardBlockError(message)
+        if self._on_args_drift == ARGS_DRIFT_HARD:
+            raise LedgerHardBlockError(message)
+        raise ToolBoundaryError(
+            message,
+            violation="args_drift",
+            tool_name=tool,
+            llm_message=(
+                f"Identity conflict: {tool!r} was already claimed with a different "
+                "tool, scope, or arguments for this dispatch ticket. Mint a new "
+                "request_id / tool_call_id for a new intent, or reuse the original "
+                "identity. The tool body was not executed."
+            ),
+            recovery_hint=(
+                "Reuse the original tool, scope, and arguments for this ticket, "
+                "or issue a new request_id / tool_call_id."
+            ),
+        )
 
     # --- resolution telemetry (opt-in; never raises, never disturbs the path) ---
 
@@ -3075,25 +3104,29 @@ class ActionLedger:
     ) -> str:
         """Determine the request id for a tool invocation.
 
-        When ``transition_binding`` is provided, returns a rich transition key
-        derived from execution scope, dispatch id, tool args, and policy fields.
+        An explicit ``request_id`` kwarg is the transition identity: retries
+        that reuse it map to the same ledger entry. The host must derive it
+        from a stable, server-owned business record
+        (``f"charge-order:{order_id}"``), not from model output.
 
-        Legacy priority (no transition binding):
-        1. kwargs["request_id"]
-        2. kwargs["tool_call_id"]
-        3. Session-derived id (run + tool + args hash)
-        4. Random UUID (no idempotency, still audited)
+        When omitted, identity is unchanged:
 
-        Note: valid repeats within the same Session with identical args will be
-        deduplicated unless an explicit request_id is supplied.
+        * with ``transition_binding`` — rich transition key (scope + tool +
+          args + policy + ``tool_call_id``)
+        * legacy — ``tool_call_id``, then Session hash, then a random UUID
+
+        ``request_id`` is never part of the argument fingerprint and is not
+        forwarded to the wrapped tool.
         """
+        explicit = parse_explicit_request_id(kwargs)
+        if explicit is not None:
+            return explicit
+
         if transition_binding is not None:
             return derive_transition_key_for_call(
                 tool, args, kwargs, transition_binding
             )
 
-        if "request_id" in kwargs:
-            return str(kwargs["request_id"])
         if "tool_call_id" in kwargs:
             return str(kwargs["tool_call_id"])
         active_dispatch_id = get_active_dispatch_id()
@@ -3140,6 +3173,39 @@ def _bind_args(args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, Any]:
 def _drop_ledger_keys(kwargs: dict[str, Any]) -> dict[str, Any]:
     """Remove Mycelium bookkeeping keys before calling the actual tool."""
     return {k: v for k, v in kwargs.items() if k not in LEDGER_KWARG_KEYS}
+
+
+def _identity_scopes_differ(
+    existing: LedgerEntry,
+    kwargs: dict[str, Any],
+    binding: ToolTransitionBinding | None,
+) -> bool:
+    """True when incoming scope does not match the stored claim's scope."""
+    scope_from = binding.scope_from if binding is not None else {}
+    incoming = resolve_scope(scope_from=scope_from, kwargs=kwargs)
+    stored = _scope_from_stored_kwargs(dict(existing.kwargs), scope_from)
+    return (
+        incoming.thread_id != stored[0]
+        or incoming.run_id != stored[1]
+        or incoming.node != stored[2]
+    )
+
+
+def _scope_from_stored_kwargs(
+    kwargs: dict[str, Any],
+    scope_from: dict[str, str],
+) -> tuple[str, str, str]:
+    """Read scope from a stored claim only — not the current execution_scope."""
+    resolved = {"thread_id": "", "run_id": "", "node": ""}
+    for field_name, source in scope_from.items():
+        if field_name not in resolved:
+            continue
+        if source in kwargs and kwargs[source]:
+            resolved[field_name] = str(kwargs[source])
+    for field_name in resolved:
+        if field_name in kwargs and kwargs[field_name]:
+            resolved[field_name] = str(kwargs[field_name])
+    return (resolved["thread_id"], resolved["run_id"], resolved["node"])
 
 
 def _args_drift_exclude_keys(

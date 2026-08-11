@@ -14,6 +14,11 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
   `error` — the error names the tool and recommends
   `file/sqlite/redis/postgres`. Reads may keep using memory storage.
   Shipped `mycelium init` templates default the action ledger to SQLite.
+- **Host-owned `request_id`:** an optional non-empty `request_id` kwarg is
+  the transition identity across retries (`charge-order:{order_id}`). It is
+  excluded from the args fingerprint and not forwarded to the tool. Omitted
+  `request_id` keeps derived `tool_call_id` identity. Reusing the same id
+  with a different tool, scope, or meaningful arguments is fail-closed.
 
 ## 1.30.0 (2026-08-11)
 
