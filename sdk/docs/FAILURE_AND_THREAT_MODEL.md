@@ -190,8 +190,11 @@ section; the tests are concrete `file::test_name` entries.
     *Where:* [Enforcing the same provider idempotency key](../README.md#enforcing-the-same-provider-idempotency-key-provider_idempotency_key_param).
 
 15. **Key derivation is deterministic and sound.** Identical redispatches map
-    to one key; changing a *real* argument produces a new key; `tool_call_id`
-    binds the dispatch identity but is excluded from the args fingerprint.
+    to one key. With derived identity, changing a *real* argument produces a
+    new key; `tool_call_id` binds the dispatch identity but is excluded from
+    the args fingerprint. An explicit host-owned `request_id` is itself the
+    key, and reuse with a different tool, scope, or meaningful argument is
+    fail-closed.
     *Where:* [Transition identity and host-owned `request_id`](../README.md#transition-identity-and-host-owned-request_id).
 
 16. **Task-level idempotency.** The task ledger returns a stored result for a
@@ -212,13 +215,16 @@ than the code makes.
   guarantee — see `test_operator_release.py` for the one-shot/fail-closed
   semantics, and `test_audit_receipt.py::test_tampered_receipt_fails_verification`
   for tamper-evidence when receipts are enabled.)*
-- **Identity-conflict rejection (default soft).** Same `request_id` /
-  `tool_call_id` + changed args → refuse the second body within the same run
-  (`run_id` / `thread_id`; other runs isolated): soft → `ToolBoundaryError`,
-  hard → `LedgerHardBlockError`. Transition keys still differ by args; set
-  `on_args_drift: off` for the old dual-execute escape hatch. Default soft
-  pinned by `tests/test_args_drift.py::test_default_is_soft_not_off`; key
-  split + `off` escape hatch by
+- **Identity-conflict rejection (default soft).** Same derived `tool_call_id` +
+  changed args refuses the second body within the same run (`run_id` /
+  `thread_id`; other runs isolated): soft → `ToolBoundaryError`, hard →
+  `LedgerHardBlockError`. Derived transition keys still differ by args;
+  `on_args_drift: off` retains the old dual-execute escape hatch. An explicit
+  host-owned `request_id` is the storage key, and reuse with a different tool,
+  scope, or meaningful arguments is fail-closed even when drift checking is
+  off. Default soft pinned by
+  `tests/test_args_drift.py::test_default_is_soft_not_off`; derived key split +
+  `off` escape hatch by
   `tests/test_mengchheang_public_repro.py::test_semantic_identity`.
 - **Budget / runaway spend (without `budget:`).** If a caller produces many
   distinct transition keys, the ledger does not stop the calls. Optional

@@ -533,13 +533,14 @@ double-execute.
 
 **Args-drift / identity-conflict gate (AF-002):** default
 `action_ledger.on_args_drift: soft`. Mycelium compares claim-time
-`args_fingerprint` to prior entries for the same dispatch ticket (same storage
-key, or same ticket under a different transition key), scoped to the same run
-(`run_id`, else `thread_id`) — other runs are isolated. Soft →
-`ToolBoundaryError` (loop can retry with original args or a new ticket); hard →
-`LedgerHardBlockError` (freeze for a human); `off` → escape hatch restoring
-"new args = new transition" dual execution. Same ticket + same args still
-idempotently returns.
+`args_fingerprint` to prior entries for the same dispatch ticket. Explicit
+`request_id` conflicts include a changed tool or scope and are always refused,
+including when `on_args_drift` is `off`. Derived `tool_call_id` drift checks are
+scoped to the same run (`run_id`, else `thread_id`) — other runs are isolated.
+Soft → `ToolBoundaryError` (loop can retry with original args or a new ticket);
+hard → `LedgerHardBlockError` (freeze for a human); `off` → escape hatch
+restoring "new args = new transition" dual execution for derived identities
+only. Same ticket + same args still idempotently returns.
 
 ```yaml
 action_ledger:

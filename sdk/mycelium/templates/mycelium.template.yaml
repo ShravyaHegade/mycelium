@@ -102,7 +102,8 @@ action_ledger:
   on_args_drift: soft           # soft (default) | hard | off — same dispatch
                                 # ticket + different args → ToolBoundaryError /
                                 # LedgerHardBlockError (identity-conflict gate);
-                                # off = escape hatch for "new args = new transition"
+                                # off only permits derived-key argument drift;
+                                # explicit request_id conflicts always fail closed
   # table: mycelium_action_ledger
   # url_env: MYCELIUM_REDIS_URL          # redis (multi-worker)
   # dsn_env: MYCELIUM_POSTGRES_DSN       # postgres (multi-worker / audit)
