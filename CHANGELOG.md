@@ -7,6 +7,10 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
 
 ### Fixed
 
+- **BudgetGuard `warn_at` no longer refuses the step** (Honey): soft warn
+  emits `warnings.warn` once per dimension and allows the step. Declared
+  ceilings stay honest — `warn_at=0.8` is not an 80% hard cap.
+  `max_steps=N` pinned to allow exactly N bodies before hard-block.
 - **CI runs the at-most-once concurrency proofs** (#69): Redis + Postgres
   services in `.github/workflows/ci.yml`; install `redis`/`psycopg` extras;
   `MYCELIUM_CI_REQUIRE_REDIS` / `MYCELIUM_CI_REQUIRE_POSTGRES` fail hard if

@@ -1042,10 +1042,11 @@ def charge(*, tool_call_id: str) -> None:
 ```
 
 Manual `guard.check("llm")` still works if you own the turn loop yourself.
-Soft warn → `ToolBoundaryError` (`budget_warning`); hard → `LedgerHardBlockError`
-on the **next** step (never kill mid-flight). Operator:
-`mycelium budget status|release` (`clear` / `allow-once` / `abort-run`).
-Status exposes deterministic `remaining_budget` (pitch word: runway).
+Soft warn (`warn_at`) → `warnings.warn` once per dimension; the step **still
+runs**. Hard → `LedgerHardBlockError` only at the declared ceiling (never kill
+mid-flight). Operator: `mycelium budget status|release` (`clear` /
+`allow-once` / `abort-run`). Status exposes deterministic `remaining_budget`
+(pitch word: runway).
 
 ```bash
 mycelium loops status --stuck --config mycelium.yaml

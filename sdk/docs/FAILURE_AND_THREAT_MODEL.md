@@ -45,7 +45,8 @@ This document is **explicitly out of scope** for:
 - **Spend / time budget enforcement** *unless* optional `budget:` is
   configured — the ledger does not meter tokens or USD. With `budget:`,
   host-declared `max_duration` / `max_steps` / `max_tokens` / `max_usd`
-  ceilings soft-warn then hard-block the **next** LLM/tool step (never
+  ceilings soft-warn (`warnings.warn`, step still allowed) then hard-block
+  only at the declared ceiling on the **next** LLM/tool step (never
   mid-flight kill). Tokens/USD are host-reported via `record_usage`;
   `on_missing_meter: hard` fail-closes if those ceilings are declared but
   never metered. Optional `loop_guard:` (AF-003) only halts consecutive
