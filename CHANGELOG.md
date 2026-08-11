@@ -5,26 +5,11 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
 
 ## Unreleased
 
-### Fixed
+## 1.30.0 (2026-08-11)
 
-- **BudgetGuard `warn_at` no longer refuses the step** (Honey): soft warn
-  emits `warnings.warn` once per dimension and allows the step. Declared
-  ceilings stay honest — `warn_at=0.8` is not an 80% hard cap.
-  `max_steps=N` pinned to allow exactly N bodies before hard-block.
-- **CI runs the at-most-once concurrency proofs** (#69): Redis + Postgres
-  services in `.github/workflows/ci.yml`; install `redis`/`psycopg` extras;
-  `MYCELIUM_CI_REQUIRE_REDIS` / `MYCELIUM_CI_REQUIRE_POSTGRES` fail hard if
-  backends are missing (no silent skip). File-ledger multiprocess tests no
-  longer module-gated behind Redis reachability.
-- **Version-line hygiene** (#71): READMEs no longer hardcode current
-  `vX.Y.Z` / shields `&release=` pins; release policy documents batching
-  docs into release PRs; CI `version-hygiene` job blocks drive-by
-  `pyproject.toml` bumps without a matching CHANGELOG header.
-
-### Changed
-
-- Release checklist skill + `AGENTS.md` / `sdk/docs/RELEASE.md` aligned:
-  only the release PR moves the version line; badges track PyPI.
+MINOR: supervisor handoff audit glue + async peer-wait DX, LangGraph/Redis
+adoption recipe, BudgetGuard soft-warn honesty, and CI that actually runs the
+concurrency proofs. Batched so partners can `pip install` once.
 
 ### Added
 
@@ -43,6 +28,27 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
   (`examples/langgraph_redis_crash/`): adoption recipe — redispatch RETURN with
   signed receipt, then mid-flight kill → `HARD_BLOCK` (body once). No new
   capability; stitches existing LangGraph / Redis / receipt / crash paths.
+
+### Fixed
+
+- **BudgetGuard `warn_at` no longer refuses the step** (Honey): soft warn
+  emits `warnings.warn` once per dimension and allows the step. Declared
+  ceilings stay honest — `warn_at=0.8` is not an 80% hard cap.
+  `max_steps=N` pinned to allow exactly N bodies before hard-block.
+- **CI runs the at-most-once concurrency proofs** (#69): Redis + Postgres
+  services in `.github/workflows/ci.yml`; install `redis`/`psycopg` extras;
+  `MYCELIUM_CI_REQUIRE_REDIS` / `MYCELIUM_CI_REQUIRE_POSTGRES` fail hard if
+  backends are missing (no silent skip). File-ledger multiprocess tests no
+  longer module-gated behind Redis reachability.
+- **Version-line hygiene** (#71): READMEs no longer hardcode current
+  `vX.Y.Z` / Docs `&release=` pins; release policy documents batching
+  docs into release PRs; CI `version-hygiene` job blocks drive-by
+  `pyproject.toml` bumps without a matching CHANGELOG header.
+
+### Changed
+
+- Release checklist skill + `AGENTS.md` / `sdk/docs/RELEASE.md` aligned:
+  only the release PR moves the version line; badges track PyPI.
 
 ## 1.29.0 (2026-08-09)
 

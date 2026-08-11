@@ -40,7 +40,7 @@ Developers running **agents with side-effect tools** in production (payments, em
 
 Python 3.10+. Framework-agnostic. Drop in via YAML + `mycelium run`, or decorators.
 
-## How it works (v1.28.x)
+## How it works
 
 Mycelium wraps tool calls after the LLM returns `tool_calls` and returns a verdict: run, return a stored result, wait, ask the provider what happened, or hard-stop.
 

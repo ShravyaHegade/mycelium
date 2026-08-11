@@ -562,6 +562,10 @@ Each duplicate dispatch is classified to a gate. Read-only and side-effecting to
 | `ALLOW` | no prior transition, or policy permits retry (e.g. `FAILED_BEFORE_EFFECT` + same provider key) | tool runs |
 | `RETURN` | `COMPLETED` | return stored result — no re-execution |
 | `POLL` | `IN_FLIGHT` with valid lease (`LeaseValidity.HELD`) | wait for the other worker |
+| `RECLAIM` | read-only `EXPIRED` / `FAILED_*` | take over stale lease and run |
+| `REPAIR` | incomplete durable key / boundary / terminal (healable) | fix record, re-resolve — **no** second side effect |
+| `SOFT_BLOCK` | read-only `UNKNOWN` / `BLOCKED` only | **retry by default** (safe — reads don't spend); opt into deferral with `defer_read_only_unknown=True` → `LedgerSoftBlockError` |
+| `HARD_BLOCK` | ambiguous mutating transition | stop; run `Reconciler` when `external_operation_ref` is present, else fail-closed |
 
 Decorator claim paths already poll. For a custom async LangGraph node that
 already knows the peer `request_id` and only needs to wait (no re-claim):
@@ -573,10 +577,21 @@ entry = await ledger.wait_for_transition_async(request_id)
 
 `wait_for_transition` is the sync twin. Timeout raises `LedgerPollTimeoutError`
 and does **not** mark `UNKNOWN` (claim loops own that policy).
-| `RECLAIM` | read-only `EXPIRED` / `FAILED_*` | take over stale lease and run |
-| `REPAIR` | incomplete durable key / boundary / terminal (healable) | fix record, re-resolve — **no** second side effect |
-| `SOFT_BLOCK` | read-only `UNKNOWN` / `BLOCKED` only | **retry by default** (safe — reads don't spend); opt into deferral with `defer_read_only_unknown=True` → `LedgerSoftBlockError` |
-| `HARD_BLOCK` | ambiguous mutating transition | stop; run `Reconciler` when `external_operation_ref` is present, else fail-closed |
+
+**Thin handoff identity (audit causation):** after a supervisor/spawn claim,
+wrap subagent tool calls in `handoff_scope(parent_request_id, handoff_id=…)`
+so child ledger entries record `parent_request_id` / `handoff_id`. Audit glue
+only — does not grant capabilities or change at-most-once claim keys.
+`list_transitions(parent_request_id=…)` and
+`mycelium transitions list --parent` / `show` expose the link.
+
+```python
+from mycelium import handoff_scope
+
+# parent_id = the supervisor transition's request_id
+with handoff_scope(parent_id, handoff_id="spawn-pay"):
+    charge(amount=10, tool_call_id="child-1")  # stamped with parent link
+```
 
 Teachable in-process repros for the partner-facing gates:
 [examples/failure_cases/](examples/failure_cases/) (`run_all.py`).
