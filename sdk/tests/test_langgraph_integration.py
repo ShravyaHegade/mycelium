@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import re
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from langchain_core.messages import AIMessage
@@ -32,13 +33,21 @@ tools:
     )
 
 
-def _tool_message(amount: float = 10.0, call_id: str = "call_1") -> AIMessage:
+def _tool_message(
+    amount: float = 10.0,
+    call_id: str = "call_1",
+    *,
+    request_id: str | None = None,
+) -> AIMessage:
+    args: dict[str, Any] = {"amount": amount}
+    if request_id is not None:
+        args["request_id"] = request_id
     return AIMessage(
         content="",
         tool_calls=[
             {
                 "name": "send_payment",
-                "args": {"amount": amount},
+                "args": args,
                 "id": call_id,
                 "type": "tool_call",
             }
@@ -205,3 +214,59 @@ def test_existing_runtime_parameter_is_rejected() -> None:
             """Send one payment."""
             del runtime
             return {"amount": amount}
+
+
+def test_langgraph_request_id_in_tool_args_is_transition_identity() -> None:
+    config = _config()
+    executions: list[float] = []
+    request_id = "charge-order:ORD-123"
+
+    @config.apply
+    def send_payment(amount: float, request_id: str | None = None) -> dict[str, float]:
+        """Send one payment."""
+        executions.append(amount)
+        return {"amount": amount}
+
+    graph = _graph_for(send_payment)
+    runtime_config = {
+        "configurable": {"thread_id": "thread_1"},
+        "run_id": "run_1",
+    }
+    message = _tool_message(10.0, "call_stable", request_id=request_id)
+
+    first = graph.invoke({"messages": [message]}, runtime_config)
+    second = graph.invoke({"messages": [message]}, runtime_config)
+
+    # request_id in the tool args overrides the LangGraph-derived identity:
+    # both dispatches are the same transition, body runs once.
+    assert executions == [10.0]
+    assert '"amount": 10.0' in first["messages"][-1].content
+    assert '"amount": 10.0' in second["messages"][-1].content
+
+    ledger = get_ledger(send_payment)
+    assert ledger is not None
+    entries = ledger._storage.list_all()
+    assert len(entries) == 1
+    assert entries[0].request_id == request_id
+
+
+def test_langgraph_request_id_not_forwarded_to_tool_body() -> None:
+    config = _config()
+    seen: list[dict[str, object]] = []
+
+    @config.apply
+    def send_payment(amount: float, request_id: str | None = None) -> dict[str, float]:
+        """Send one payment."""
+        seen.append({"request_id": request_id})
+        return {"amount": amount}
+
+    graph = _graph_for(send_payment)
+    runtime_config = {
+        "configurable": {"thread_id": "thread_1"},
+        "run_id": "run_1",
+    }
+    message = _tool_message(10.0, "call_stable", request_id="charge-order:ORD-123")
+
+    graph.invoke({"messages": [message]}, runtime_config)
+
+    assert seen == [{"request_id": None}]  # stripped before the tool body runs

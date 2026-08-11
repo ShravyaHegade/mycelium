@@ -21,8 +21,10 @@ from mycelium import (
     ToolTransitionBinding,
     TransitionScope,
     execution_scope,
+    get_ledger,
     ledger,
     ledger_sync,
+    load_config_from_string,
     parse_explicit_request_id,
     side_effect,
 )
@@ -294,3 +296,167 @@ def test_derive_request_id_uses_explicit_value() -> None:
     )
     assert hashed != _BUSINESS_ID
     assert len(hashed) == 64
+
+
+# --- through YAML / config.apply (not just the raw decorator) ----------------
+
+
+def _config_yaml() -> str:
+    return """
+transition:
+  agent_id: config-rid
+  policy_version: "1"
+action_ledger:
+  storage: memory
+  tools: [send_payment]
+tools:
+  send_payment:
+    side_effect_class: non_idempotent_mutate
+"""
+
+
+def test_config_apply_request_id_is_transition_identity() -> None:
+    config = load_config_from_string(_config_yaml())
+    executions: list[int] = []
+
+    @config.apply
+    def send_payment(amount: int) -> dict[str, int]:
+        executions.append(amount)
+        return {"charged": amount}
+
+    first = send_payment(amount=10, request_id=_BUSINESS_ID)
+    replay = send_payment(amount=10, request_id=_BUSINESS_ID)
+    assert first == replay == {"charged": 10}
+    assert executions == [10]
+
+    ledger_inst = get_ledger(send_payment)
+    assert ledger_inst is not None
+    stored = ledger_inst.get(_BUSINESS_ID)
+    assert stored is not None
+    assert stored.request_id == _BUSINESS_ID
+
+
+def test_config_apply_request_id_not_forwarded_to_body() -> None:
+    config = load_config_from_string(_config_yaml())
+    seen: list[dict[str, object]] = []
+
+    @config.apply
+    def send_payment(amount: int, **kwargs: object) -> dict[str, int]:
+        seen.append(dict(kwargs))
+        return {"charged": amount}
+
+    send_payment(amount=10, request_id=_BUSINESS_ID)
+    assert seen == [{}]
+
+
+def test_config_apply_request_id_args_drift_fail_closed() -> None:
+    config = load_config_from_string(_config_yaml())
+    executions: list[int] = []
+
+    @config.apply
+    def send_payment(amount: int) -> dict[str, int]:
+        executions.append(amount)
+        return {"charged": amount}
+
+    send_payment(amount=10, request_id=_BUSINESS_ID)
+    with pytest.raises(ToolBoundaryError, match="identity conflict"):
+        send_payment(amount=11, request_id=_BUSINESS_ID)
+    assert executions == [10]
+
+
+def test_config_apply_missing_request_id_keeps_tool_call_id_identity() -> None:
+    config = load_config_from_string(_config_yaml())
+    executions: list[int] = []
+
+    @config.apply
+    def send_payment(amount: int) -> dict[str, int]:
+        executions.append(amount)
+        return {"charged": amount}
+
+    with execution_scope(TransitionScope(thread_id="t1", run_id="r1")):
+        a = send_payment(amount=10, tool_call_id="call_1")
+        b = send_payment(amount=10, tool_call_id="call_1")
+        c = send_payment(amount=10, tool_call_id="call_2")
+
+    assert a == b == c == {"charged": 10}
+    assert executions == [10, 10]
+
+
+def test_apply_tool_request_id_explicit_identity() -> None:
+    config = load_config_from_string(_config_yaml())
+    executions: list[int] = []
+
+    def send_payment(amount: int) -> dict[str, int]:
+        executions.append(amount)
+        return {"charged": amount}
+
+    wrapped = config.apply_tool("send_payment", send_payment)
+    assert wrapped(amount=10, request_id=_BUSINESS_ID) == {"charged": 10}
+    assert wrapped(amount=10, request_id=_BUSINESS_ID) == {"charged": 10}
+    assert executions == [10]
+
+
+def test_config_apply_keyed_retry_reuses_same_provider_key() -> None:
+    yaml_text = """
+transition:
+  agent_id: config-rid
+  policy_version: "1"
+  reclaim_requires_death_signal: false
+action_ledger:
+  storage: memory
+  tools: [send_payment]
+tools:
+  send_payment:
+    side_effect_class: keyed_mutate
+    provider_idempotency_key_param: idempotency_key
+"""
+    config = load_config_from_string(yaml_text)
+    attempts = {"n": 0}
+
+    @config.apply
+    def send_payment(amount: float, idempotency_key: str) -> dict[str, str]:
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise RuntimeError("gateway timeout before charge")
+        return {"status": "sent"}
+
+    with execution_scope(TransitionScope(thread_id="t1", run_id="r1")):
+        with pytest.raises(RuntimeError):
+            send_payment(amount=10.0, idempotency_key="k1", request_id=_BUSINESS_ID)
+        result = send_payment(amount=10.0, idempotency_key="k1", request_id=_BUSINESS_ID)
+
+    assert attempts["n"] == 2
+    assert result == {"status": "sent"}
+
+
+def test_config_apply_keyed_retry_different_provider_key_hard_blocks() -> None:
+    yaml_text = """
+transition:
+  agent_id: config-rid
+  policy_version: "1"
+  reclaim_requires_death_signal: false
+action_ledger:
+  storage: memory
+  tools: [send_payment]
+tools:
+  send_payment:
+    side_effect_class: keyed_mutate
+    provider_idempotency_key_param: idempotency_key
+"""
+    config = load_config_from_string(yaml_text)
+    attempts = {"n": 0}
+
+    @config.apply
+    def send_payment(amount: float, idempotency_key: str) -> dict[str, str]:
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise RuntimeError("gateway timeout before charge")
+        return {"status": "sent"}
+
+    with execution_scope(TransitionScope(thread_id="t1", run_id="r1")):
+        with pytest.raises(RuntimeError):
+            send_payment(amount=10.0, idempotency_key="k1", request_id=_BUSINESS_ID)
+        with pytest.raises(LedgerHardBlockError):
+            send_payment(amount=10.0, idempotency_key="k2", request_id=_BUSINESS_ID)
+
+    assert attempts["n"] == 1  # second body never executed
