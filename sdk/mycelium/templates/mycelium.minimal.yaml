@@ -85,6 +85,7 @@ loop_guard:
   storage: file
   path: ./mycelium-loop.json
   escalate_after_soft: 1
+  missing_run_id_policy: error  # warn (default) | error
   consecutive_soft:
     read: 5
     idempotent_mutate: 3

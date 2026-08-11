@@ -18,7 +18,12 @@ from pathlib import Path
 from typing import Any, ParamSpec, TypeVar
 
 from mycelium.action_ledger import LedgerHardBlockError
-from mycelium.loop_guard import resolve_loop_scope_key
+from mycelium.loop_guard import (
+    MISSING_RUN_ID_POLICIES,
+    MISSING_RUN_ID_POLICY_WARN,
+    enforce_run_identity,
+    resolve_loop_scope_key,
+)
 from mycelium.storage.json_file import LockedJsonDictFile
 from mycelium.tool_boundary import ToolBoundaryError
 
@@ -166,21 +171,32 @@ class ScopeGuard:
         on_violation: str = ON_VIOLATION_SOFT,
         exclude: list[str] | None = None,
         auto_bind: bool = True,
+        missing_run_id_policy: str = MISSING_RUN_ID_POLICY_WARN,
     ) -> None:
         if on_violation not in ON_VIOLATION_MODES:
             raise ValueError(
                 f"on_violation must be one of {sorted(ON_VIOLATION_MODES)}, "
                 f"got {on_violation!r}"
             )
+        if missing_run_id_policy not in MISSING_RUN_ID_POLICIES:
+            raise ValueError(
+                f"missing_run_id_policy must be one of "
+                f"{sorted(MISSING_RUN_ID_POLICIES)}, got {missing_run_id_policy!r}"
+            )
         self._storage = storage or InMemoryScopeGuardStorage()
         self._default_grant = default_grant
         self._on_violation = on_violation
         self._exclude = frozenset(exclude or [])
         self._auto_bind = auto_bind
+        self._missing_run_id_policy = missing_run_id_policy
 
     @property
     def storage(self) -> ScopeGuardStorage:
         return self._storage
+
+    @property
+    def missing_run_id_policy(self) -> str:
+        return self._missing_run_id_policy
 
     @property
     def default_grant(self) -> ScopeGrant | None:
@@ -240,15 +256,13 @@ class ScopeGuard:
         if tool in self._exclude:
             return
 
-        scope_key = resolve_loop_scope_key(kwargs=kwargs)
+        scope_key = enforce_run_identity(
+            "ScopeGuard",
+            tool=tool,
+            policy=self._missing_run_id_policy,
+            kwargs=kwargs,
+        )
         if scope_key is None:
-            if not _SCOPE_MISSING_WARNED:
-                warnings.warn(
-                    "ScopeGuard skipped: no run_id or thread_id in execution scope; "
-                    "wire transition.scope_from / execution_scope for AF-008 protection.",
-                    stacklevel=2,
-                )
-                _SCOPE_MISSING_WARNED = True
             return
 
         state = self._storage.get(scope_key)

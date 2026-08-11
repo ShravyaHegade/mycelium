@@ -229,7 +229,9 @@ than the code makes.
 - **Budget / runaway spend (without `budget:`).** If a caller produces many
   distinct transition keys, the ledger does not stop the calls. Optional
   AF-003 `loop_guard:` halts consecutive identical *action* hashes (tool + args)
-  across new dispatch ids; it is **not** a general spend/time budget. Optional
+  across new dispatch ids; it is **not** a general spend/time budget. Without a
+  stable `run_id` the detector skips (default `missing_run_id_policy: warn`).
+  Set `error` so an enabled guard cannot run unprotected. Optional
   `budget:` (not AF-010) hard-stops on host-declared duration/steps/tokens/USD
   ceilings before the next step; residual risk remains if the host skips
   `instrument_llm` / `@budget_llm` (or manual `check("llm")`) +
@@ -246,7 +248,9 @@ than the code makes.
 - **Allowlist widen (without `scope_guard:`).** A handoff or
   `registry.allow(...)` that adds tools mid-run is invisible to the ledger.
   Optional AF-008 `scope_guard:` freezes the run tool allowlist and
-  re-checks every step; entity/path remain `@bounded`'s job.
+  re-checks every step; entity/path remain `@bounded`'s job. Missing
+  `run_id` skips by default (`missing_run_id_policy: warn`); `error` refuses
+  before the tool runs.
 - **Trusting the reconciler.** If your reconciler returns `NOT_EXECUTED` when
   the effect actually happened, the runtime will re-execute once. Reconcilers
   are read-only *by contract*, not enforced by Mycelium.

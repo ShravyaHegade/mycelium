@@ -1021,6 +1021,7 @@ loop_guard:
   storage: file
   path: ./mycelium-loop.json
   escalate_after_soft: 1
+  missing_run_id_policy: error   # warn (default) | error
   consecutive_soft:
     read: 5
     idempotent_mutate: 3
@@ -1028,6 +1029,32 @@ loop_guard:
     non_idempotent_mutate: 2
     irreversible: 2
 ```
+
+LoopGuard and ScopeGuard key state by `run_id` (fallback `thread_id` for
+grouping only). Missing identity **warns and skips** by default so existing
+callers keep working. Production should set `missing_run_id_policy: error` so
+an enabled guard cannot silently run unprotected. A valid `run_id` is a
+non-empty host-generated string, identical for every step, retry, checkpoint
+restore, and worker redispatch of one logical run. Do not mint a random id per
+tool call.
+
+```python
+run_id = server_run.id  # created once by the host; reuse on every step
+
+with execution_scope(
+    TransitionScope(
+        thread_id=conversation.id,
+        run_id=run_id,
+    )
+):
+    agent.run(...)
+```
+
+`thread_id` may span multiple runs and is not a substitute in `error` mode.
+`tool_call_id` / transition `request_id` identify one tool operation, not the
+run. LangGraph's adapter copies an existing framework `run_id` into
+`execution_scope` — do not pass a duplicate when the adapter already provides
+one.
 
 Wrapper order: `@budget_guard` → `@loop_guard` → `@ledger` → `@bounded` → `@protect` → `func`.
 
@@ -1114,6 +1141,7 @@ call** and re-checks every step.
 scope_guard:
   storage: file
   path: ./mycelium-scope.json
+  missing_run_id_policy: error   # warn (default, skip if no run_id) | error
   # allowed_tools: from_registry   # default → registry.allowed / tools:
   # on_violation: soft             # soft | hard
 ```
@@ -1446,6 +1474,7 @@ registry:
 loop_guard:
   storage: file
   path: ./mycelium-loop.json
+  missing_run_id_policy: error
 
 history_guard:
   max_tokens: 100000

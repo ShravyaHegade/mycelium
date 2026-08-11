@@ -19,6 +19,12 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
   excluded from the args fingerprint and not forwarded to the tool. Omitted
   `request_id` keeps derived `tool_call_id` identity. Reusing the same id
   with a different tool, scope, or meaningful arguments is fail-closed.
+- **`missing_run_id_policy` on `loop_guard` / `scope_guard`:** `warn` (default,
+  skip when no run identity, backward compatible) or `error`. Strict mode
+  raises `MissingRunIdentityError` before the tool, ledger claim, or external
+  side effect when an enabled guard has no stable host `run_id`. Empty and
+  whitespace-only values are missing. `thread_id` remains a grouping fallback
+  only under `warn`.
 
 ## 1.30.0 (2026-08-11)
 

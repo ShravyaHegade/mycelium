@@ -59,6 +59,9 @@ from mycelium.integrations.langgraph import (
 )
 from mycelium.loop_guard import (
     DEFAULT_CONSECUTIVE_SOFT,
+    MISSING_RUN_ID_POLICIES,
+    MISSING_RUN_ID_POLICY_ERROR,
+    MISSING_RUN_ID_POLICY_WARN,
     FileLoopGuardStorage,
     InMemoryLoopGuardStorage,
     LoopGuard,
@@ -699,6 +702,9 @@ class MyceliumConfig:
         exclude = raw.get("exclude") or []
         if not isinstance(exclude, list):
             raise ConfigError("'loop_guard.exclude' must be a list of tool names")
+        missing_run_id_policy = _missing_run_id_policy(
+            raw, "loop_guard.missing_run_id_policy"
+        )
         agent_id = "loop-guard"
         if self.transition is not None and self.transition.agent_id:
             agent_id = self.transition.agent_id
@@ -710,6 +716,7 @@ class MyceliumConfig:
             exclude=[str(item) for item in exclude],
             outcome_emitter=self.build_outcome_emitter(),
             agent_id=agent_id,
+            missing_run_id_policy=missing_run_id_policy,
         )
         return self._loop_guard
 
@@ -860,12 +867,16 @@ class MyceliumConfig:
         auto_bind = raw.get("auto_bind", True)
         if not isinstance(auto_bind, bool):
             raise ConfigError("'scope_guard.auto_bind' must be a bool")
+        missing_run_id_policy = _missing_run_id_policy(
+            raw, "scope_guard.missing_run_id_policy"
+        )
         self._scope_guard = ScopeGuard(
             storage,
             default_grant=grant,
             on_violation=str(on_violation),
             exclude=[str(item) for item in exclude],
             auto_bind=auto_bind,
+            missing_run_id_policy=missing_run_id_policy,
         )
         return self._scope_guard
 
@@ -1930,6 +1941,19 @@ def _validate_transition_tools(
             )
 
 
+def _missing_run_id_policy(raw: dict[str, Any] | None, field_path: str) -> str:
+    """Return ``missing_run_id_policy``, defaulting to ``warn``."""
+    if raw is None:
+        return MISSING_RUN_ID_POLICY_WARN
+    value = raw.get("missing_run_id_policy", MISSING_RUN_ID_POLICY_WARN)
+    if value not in MISSING_RUN_ID_POLICIES:
+        raise ConfigError(
+            f"'{field_path}' must be {MISSING_RUN_ID_POLICY_WARN!r} or "
+            f"{MISSING_RUN_ID_POLICY_ERROR!r}, got {value!r}"
+        )
+    return str(value)
+
+
 def _memory_storage_policy(action_ledger: dict[str, Any] | None) -> str:
     """Return the configured memory-storage policy, defaulting to ``warn``."""
     if action_ledger is None:
@@ -2160,6 +2184,7 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
         tools_sel = loop_guard_raw.get("tools", "all")
         if tools_sel != "all" and not isinstance(tools_sel, list):
             raise ConfigError("'loop_guard.tools' must be 'all' or a list of tool names")
+        _missing_run_id_policy(loop_guard_raw, "loop_guard.missing_run_id_policy")
 
     budget_raw = data.get("budget")
     if budget_raw is not None and not isinstance(budget_raw, dict):
@@ -2218,6 +2243,7 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
                 f"'scope_guard.on_violation' must be one of "
                 f"{sorted(ON_VIOLATION_MODES)}"
             )
+        _missing_run_id_policy(scope_guard_raw, "scope_guard.missing_run_id_policy")
         _scope_grant_from_config(
             scope_guard_raw,
             registry_allowed=registry_allowed,
