@@ -5,6 +5,12 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
 
 ## Unreleased
 
+## 1.31.0 (2026-08-11)
+
+MINOR: production-safe identity and storage. Host-owned `request_id`,
+strict run-id / memory-storage policies, and `profile: production` so a
+deployment cannot silently skip those guards. Library defaults stay `warn`.
+
 ### Added
 
 - **`action_ledger.memory_storage_policy`:** `warn` (default, backward
