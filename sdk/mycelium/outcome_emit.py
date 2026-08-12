@@ -1,9 +1,13 @@
 """OutcomeEmitter: compact, append-only resolution telemetry + the DTTR metric.
 
-Rows are flat and warehouse-friendly (one JSON object per line) and are
-emitted only on resolution events — never per poll tick — so a small store
-stays small. Emitters are fault-tolerant by design: an append failure is
-logged and swallowed so telemetry can never break the tool path.
+Rows are flat and warehouse-friendly and are emitted only on resolution
+events — never per poll tick — so a small store stays small. Backends:
+in-memory (development), local NDJSON file (single-node), PostgreSQL
+(recommended distributed durable), and Redis Streams (requires an explicit
+persistence acknowledgement in production). Development emitters are
+fault-tolerant: an append failure is logged and swallowed so telemetry
+cannot break the tool path. Production emitters fail closed when a required
+row cannot be durably recorded.
 
 The Duplicate Tool Transition Rate (DTTR) is computed after the fact from
 the rows: it is the number of *silent duplicate* tool-body executions divided
@@ -16,13 +20,25 @@ from __future__ import annotations
 import json
 import logging
 import time
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from mycelium.storage.file_lock import PathFileLock
 
 _logger = logging.getLogger(__name__)
+
+OUTCOME_ON_FAILURE_WARN = "warn"
+OUTCOME_ON_FAILURE_ERROR = "error"
+OUTCOME_ON_FAILURE_POLICIES = frozenset(
+    {OUTCOME_ON_FAILURE_WARN, OUTCOME_ON_FAILURE_ERROR}
+)
+
+
+class OutcomeEmitError(Exception):
+    """Raised when a required outcome row cannot be durably recorded."""
+
 
 # Discrete resolution events an emitter row can carry.
 EVENT_RESOLUTION = "resolution"      # a claim/dispatch resolved to a gate
@@ -64,6 +80,13 @@ class OutcomeRow:
     authorized_reexec: bool = False
     owner: str | None = None
     error_class: str | None = None
+    run_id: str | None = None
+    policy_version: str | None = None
+    external_operation_ref: str | None = None
+    resolution_reason: str | None = None
+    parent_request_id: str | None = None
+    handoff_id: str | None = None
+    event_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -81,10 +104,23 @@ class OutcomeRow:
             "authorized_reexec": self.authorized_reexec,
             "owner": self.owner,
             "error_class": self.error_class,
+            "run_id": self.run_id,
+            "policy_version": self.policy_version,
+            "external_operation_ref": self.external_operation_ref,
+            "resolution_reason": self.resolution_reason,
+            "parent_request_id": self.parent_request_id,
+            "handoff_id": self.handoff_id,
+            "event_id": self.event_id,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> OutcomeRow:
+        required = ("ts", "agent_id", "tool", "request_id", "event")
+        missing = [key for key in required if key not in data]
+        if missing:
+            raise ValueError(
+                f"malformed outcome row; missing required fields: {missing}"
+            )
         return cls(
             ts=float(data["ts"]),
             agent_id=str(data["agent_id"]),
@@ -100,6 +136,15 @@ class OutcomeRow:
             authorized_reexec=bool(data.get("authorized_reexec", False)),
             owner=data.get("owner"),
             error_class=data.get("error_class"),
+            run_id=data.get("run_id"),
+            policy_version=data.get("policy_version"),
+            external_operation_ref=data.get("external_operation_ref"),
+            resolution_reason=data.get("resolution_reason"),
+            parent_request_id=data.get("parent_request_id"),
+            handoff_id=data.get("handoff_id"),
+            event_id=(
+                str(data["event_id"]) if data.get("event_id") is not None else None
+            ),
         )
 
 
@@ -160,28 +205,49 @@ class FileOutcomeStorage(OutcomeStorage):
 
 
 class OutcomeEmitter:
-    """Fault-tolerant sink for :class:`OutcomeRow` telemetry.
+    """Sink for :class:`OutcomeRow` telemetry.
 
-    ``emit``/``emit_event`` never raise: a storage failure is logged and
-    swallowed so emission can never break the tool path.
+    ``on_failure='warn'`` (development default): a storage failure is logged
+    and swallowed so emission cannot break the tool path.
+    ``on_failure='error'`` (production): raise :class:`OutcomeEmitError`.
     """
 
     def __init__(
         self,
         agent_id: str,
         storage: OutcomeStorage | None = None,
+        *,
+        on_failure: str = OUTCOME_ON_FAILURE_WARN,
     ) -> None:
+        if on_failure not in OUTCOME_ON_FAILURE_POLICIES:
+            raise ValueError(
+                "on_failure must be "
+                f"{OUTCOME_ON_FAILURE_WARN!r} or {OUTCOME_ON_FAILURE_ERROR!r}, "
+                f"got {on_failure!r}"
+            )
         self.agent_id = agent_id
         self._storage = storage if storage is not None else InMemoryOutcomeStorage()
+        self._on_failure = on_failure
 
     @property
     def storage(self) -> OutcomeStorage:
         return self._storage
 
+    @property
+    def fail_closed(self) -> bool:
+        return self._on_failure == OUTCOME_ON_FAILURE_ERROR
+
     def emit(self, row: OutcomeRow) -> None:
+        if not row.event_id:
+            row = replace(row, event_id=str(uuid.uuid4()))
         try:
             self._storage.append(row)
-        except Exception:
+        except Exception as exc:
+            if self.fail_closed:
+                raise OutcomeEmitError(
+                    f"failed to record outcome {row.event!r} for "
+                    f"{row.tool!r} / {row.request_id!r}"
+                ) from exc
             _logger.exception(
                 "outcome emitter storage failed for %s/%s",
                 row.request_id,
@@ -203,6 +269,12 @@ class OutcomeEmitter:
         authorized_reexec: bool = False,
         owner: str | None = None,
         error_class: str | None = None,
+        run_id: str | None = None,
+        policy_version: str | None = None,
+        external_operation_ref: str | None = None,
+        resolution_reason: str | None = None,
+        parent_request_id: str | None = None,
+        handoff_id: str | None = None,
     ) -> None:
         self.emit(
             OutcomeRow(
@@ -220,6 +292,12 @@ class OutcomeEmitter:
                 authorized_reexec=authorized_reexec,
                 owner=owner,
                 error_class=error_class,
+                run_id=run_id,
+                policy_version=policy_version,
+                external_operation_ref=external_operation_ref,
+                resolution_reason=resolution_reason,
+                parent_request_id=parent_request_id,
+                handoff_id=handoff_id,
             )
         )
 
@@ -386,6 +464,10 @@ __all__ = [
     "GATE_RETURN",
     "GATE_SOFT_BLOCK",
     "InMemoryOutcomeStorage",
+    "OUTCOME_ON_FAILURE_ERROR",
+    "OUTCOME_ON_FAILURE_POLICIES",
+    "OUTCOME_ON_FAILURE_WARN",
+    "OutcomeEmitError",
     "OutcomeEmitter",
     "OutcomeRow",
     "OutcomeStorage",

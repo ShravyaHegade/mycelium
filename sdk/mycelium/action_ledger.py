@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import hashlib
+import inspect
 import json
 import logging
 import os
@@ -31,8 +32,13 @@ from mycelium.storage._helpers import (
 from mycelium.storage.json_file import LockedJsonDictFile
 from mycelium.tool_boundary import ToolBoundaryError
 from mycelium.transition import (
+    CONSEQUENTIAL_SIDE_EFFECT_CLASSES,
     LEDGER_KWARG_KEYS,
+    REQUEST_IDENTITY_POLICIES,
+    REQUEST_IDENTITY_POLICY_DERIVED,
+    REQUEST_IDENTITY_POLICY_REQUIRE_EXPLICIT,
     LeaseValidity,
+    MissingRequestIdentityError,
     SideEffectBoundary,
     SideEffectClass,
     TerminalOutcome,
@@ -47,6 +53,7 @@ from mycelium.transition import (
     has_worker_death_evidence,
     legacy_status_from_terminal,
     parse_explicit_request_id,
+    request_id_from_argument,
     resolve_lease_validity,
     resolve_scope,
     resolve_terminal_outcome,
@@ -919,6 +926,7 @@ class ActionLedger:
         on_args_drift: str = ARGS_DRIFT_SOFT,
         reclaim_requires_death_signal: bool = False,
         presumed_dead_after: float | None = None,
+        request_identity_policy: str = REQUEST_IDENTITY_POLICY_DERIVED,
     ) -> None:
         self._storage = storage if storage is not None else InMemoryLedgerStorage()
         self._lease_ttl = lease_ttl
@@ -969,6 +977,14 @@ class ActionLedger:
             if presumed_dead_after is not None
             else lease_ttl * DEFAULT_PRESUMED_DEAD_AFTER_RATIO
         )
+        if request_identity_policy not in REQUEST_IDENTITY_POLICIES:
+            raise ValueError(
+                "request_identity_policy must be "
+                f"{REQUEST_IDENTITY_POLICY_DERIVED!r} or "
+                f"{REQUEST_IDENTITY_POLICY_REQUIRE_EXPLICIT!r}, "
+                f"got {request_identity_policy!r}"
+            )
+        self._request_identity_policy = request_identity_policy
 
     # --- storage boundary (fail-closed; see LedgerStorageUnavailableError) ---
 
@@ -1157,12 +1173,12 @@ class ActionLedger:
         authorized_reexec: bool = False,
         owner: str | None = None,
         error_class: str | None = None,
+        policy_version: str | None = None,
     ) -> None:
         """Emit one outcome row, backfilling state from the stored entry.
 
-        Fault-tolerant by design: any failure (including a storage read) is
-        logged and swallowed so telemetry can never alter claim/CAS/reconcile
-        semantics or break the tool path.
+        Fail-closed emitters re-raise; warn-mode emitters log and swallow
+        so telemetry cannot alter claim/CAS/reconcile semantics.
         """
         if self._outcome_emitter is None:
             return
@@ -1170,11 +1186,27 @@ class ActionLedger:
             entry = self.get(request_id)
         except Exception:
             entry = None
+        run_id: str | None = None
+        external_operation_ref: str | None = None
+        resolution_reason: str | None = None
+        parent_request_id: str | None = None
+        handoff_id: str | None = None
         if entry is not None:
             if terminal_outcome is None:
                 terminal_outcome = entry.resolved_terminal_outcome()
             if boundary is None:
                 boundary = SideEffectBoundary(entry.side_effect_boundary)
+            stored_kwargs = dict(entry.kwargs or {})
+            raw_run = stored_kwargs.get("run_id")
+            run_id = str(raw_run) if raw_run else None
+            external_operation_ref = entry.external_operation_ref
+            resolution_reason = entry.resolution_reason
+            parent_request_id = entry.parent_request_id
+            handoff_id = entry.handoff_id
+        if not run_id:
+            scope = get_active_execution_scope()
+            if scope is not None and scope.run_id:
+                run_id = scope.run_id
         try:
             self._outcome_emitter.emit_event(
                 tool=tool,
@@ -1193,8 +1225,16 @@ class ActionLedger:
                 authorized_reexec=authorized_reexec,
                 owner=owner,
                 error_class=error_class,
+                run_id=run_id,
+                policy_version=policy_version,
+                external_operation_ref=external_operation_ref,
+                resolution_reason=resolution_reason,
+                parent_request_id=parent_request_id,
+                handoff_id=handoff_id,
             )
         except Exception:
+            if getattr(self._outcome_emitter, "fail_closed", False):
+                raise
             _logger.exception("failed to emit outcome row for %s", request_id)
 
     # --- one-time operator warnings ---
@@ -3101,6 +3141,7 @@ class ActionLedger:
         kwargs: dict[str, Any],
         *,
         transition_binding: ToolTransitionBinding | None = None,
+        identity_kwargs: dict[str, Any] | None = None,
     ) -> str:
         """Determine the request id for a tool invocation.
 
@@ -3109,18 +3150,43 @@ class ActionLedger:
         from a stable, server-owned business record
         (``f"charge-order:{order_id}"``), not from model output.
 
-        When omitted, identity is unchanged:
+        ``request_id_from`` on the binding mints
+        ``{tool}:{field}:{value}`` when ``request_id`` is omitted.
 
-        * with ``transition_binding`` — rich transition key (scope + tool +
-          args + policy + ``tool_call_id``)
-        * legacy — ``tool_call_id``, then Session hash, then a random UUID
+        When both are omitted:
+
+        * ``require_explicit`` + a consequential side-effect class raises
+          :class:`MissingRequestIdentityError` (no ``tool_call_id`` /
+          random fallback).
+        * ``derived`` (default) keeps the previous identity:
+          transition key, then ``tool_call_id``, Session hash, or UUID.
 
         ``request_id`` is never part of the argument fingerprint and is not
         forwarded to the wrapped tool.
         """
-        explicit = parse_explicit_request_id(kwargs)
+        lookup = identity_kwargs if identity_kwargs is not None else kwargs
+        explicit = parse_explicit_request_id(kwargs) or parse_explicit_request_id(
+            lookup
+        )
         if explicit is not None:
             return explicit
+
+        field = (
+            transition_binding.request_id_from
+            if transition_binding is not None
+            else None
+        )
+        if field:
+            return request_id_from_argument(tool, field, lookup)
+
+        if (
+            self._request_identity_policy
+            == REQUEST_IDENTITY_POLICY_REQUIRE_EXPLICIT
+            and transition_binding is not None
+            and transition_binding.side_effect_class
+            in CONSEQUENTIAL_SIDE_EFFECT_CLASSES
+        ):
+            raise MissingRequestIdentityError(tool=tool)
 
         if transition_binding is not None:
             return derive_transition_key_for_call(
@@ -3401,6 +3467,23 @@ def _record_failure(
         ledger.fail(request_id, exc, _expected_owner=_expected_owner)
 
 
+def _identity_lookup_kwargs(
+    func: Callable[..., Any],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge bound positional names so ``request_id_from`` can see them."""
+    merged = dict(kwargs)
+    try:
+        bound = inspect.signature(func).bind_partial(*args, **kwargs)
+        for name, value in bound.arguments.items():
+            if name not in merged and name not in {"args", "kwargs"}:
+                merged[name] = value
+    except (TypeError, ValueError):
+        return merged
+    return merged
+
+
 def _run_ledgered(
     func: Callable[P, R],
     tool_name: str,
@@ -3410,11 +3493,13 @@ def _run_ledgered(
     audit_emitter: AuditReceiptEmitter | None = None,
     transition_binding: ToolTransitionBinding | None = None,
 ) -> R:
+    identity_kwargs = _identity_lookup_kwargs(func, args, kwargs)
     request_id = ledger.derive_request_id(
         tool_name,
         args,
         kwargs,
         transition_binding=transition_binding,
+        identity_kwargs=identity_kwargs,
     )
     clean_kwargs = _drop_ledger_keys(kwargs)
     claim_kwargs = _claim_kwargs(kwargs, clean_kwargs)
@@ -3429,22 +3514,36 @@ def _run_ledgered(
             transition_binding,
         )
     except LedgerHardBlockError:
-        ledger._emit_outcome(
-            request_id=request_id,
-            tool=tool_name,
-            event="resolution",
-            gate="HARD_BLOCK",
-            error_class="LedgerHardBlockError",
-        )
+        try:
+            ledger._emit_outcome(
+                request_id=request_id,
+                tool=tool_name,
+                event="resolution",
+                gate="HARD_BLOCK",
+                error_class="LedgerHardBlockError",
+            )
+        except Exception:
+            _logger.exception(
+                "could not emit HARD_BLOCK outcome for %s; "
+                "original ledger error follows",
+                request_id,
+            )
         raise
     except LedgerSoftBlockError:
-        ledger._emit_outcome(
-            request_id=request_id,
-            tool=tool_name,
-            event="resolution",
-            gate="SOFT_BLOCK",
-            error_class="LedgerSoftBlockError",
-        )
+        try:
+            ledger._emit_outcome(
+                request_id=request_id,
+                tool=tool_name,
+                event="resolution",
+                gate="SOFT_BLOCK",
+                error_class="LedgerSoftBlockError",
+            )
+        except Exception:
+            _logger.exception(
+                "could not emit SOFT_BLOCK outcome for %s; "
+                "original ledger error follows",
+                request_id,
+            )
         raise
     if existing.is_terminal_completed():
         ledger._emit_outcome(
@@ -3511,15 +3610,27 @@ def _run_ledgered(
                 "original tool error follows",
                 request_id,
             )
-        ledger._emit_outcome(
-            request_id=request_id,
-            tool=tool_name,
-            event="body_fail",
-            side_effect_class=side_effect_class,
-            authorized_reexec=authorized_reexec,
-            owner=owner,
-            error_class=type(exc).__name__,
-        )
+        try:
+            ledger._emit_outcome(
+                request_id=request_id,
+                tool=tool_name,
+                event="body_fail",
+                side_effect_class=side_effect_class,
+                authorized_reexec=authorized_reexec,
+                owner=owner,
+                error_class=type(exc).__name__,
+                policy_version=(
+                    transition_binding.policy_version
+                    if transition_binding is not None
+                    else None
+                ),
+            )
+        except Exception:
+            _logger.exception(
+                "could not emit body_fail outcome for %s; "
+                "original tool error follows",
+                request_id,
+            )
         raise
     finally:
         _active_transition_var.reset(token)
@@ -3544,6 +3655,11 @@ def _run_ledgered(
         authorized_reexec=authorized_reexec,
         owner=owner,
         error_class=None if complete_ok else "LedgerOutcomeAlreadySetError",
+        policy_version=(
+            transition_binding.policy_version
+            if transition_binding is not None
+            else None
+        ),
     )
     return result
 
@@ -3557,11 +3673,13 @@ async def _run_ledgered_async(
     audit_emitter: AuditReceiptEmitter | None = None,
     transition_binding: ToolTransitionBinding | None = None,
 ) -> R:
+    identity_kwargs = _identity_lookup_kwargs(func, args, kwargs)
     request_id = ledger.derive_request_id(
         tool_name,
         args,
         kwargs,
         transition_binding=transition_binding,
+        identity_kwargs=identity_kwargs,
     )
     clean_kwargs = _drop_ledger_keys(kwargs)
     claim_kwargs = _claim_kwargs(kwargs, clean_kwargs)
@@ -3576,22 +3694,36 @@ async def _run_ledgered_async(
             transition_binding,
         )
     except LedgerHardBlockError:
-        ledger._emit_outcome(
-            request_id=request_id,
-            tool=tool_name,
-            event="resolution",
-            gate="HARD_BLOCK",
-            error_class="LedgerHardBlockError",
-        )
+        try:
+            ledger._emit_outcome(
+                request_id=request_id,
+                tool=tool_name,
+                event="resolution",
+                gate="HARD_BLOCK",
+                error_class="LedgerHardBlockError",
+            )
+        except Exception:
+            _logger.exception(
+                "could not emit HARD_BLOCK outcome for %s; "
+                "original ledger error follows",
+                request_id,
+            )
         raise
     except LedgerSoftBlockError:
-        ledger._emit_outcome(
-            request_id=request_id,
-            tool=tool_name,
-            event="resolution",
-            gate="SOFT_BLOCK",
-            error_class="LedgerSoftBlockError",
-        )
+        try:
+            ledger._emit_outcome(
+                request_id=request_id,
+                tool=tool_name,
+                event="resolution",
+                gate="SOFT_BLOCK",
+                error_class="LedgerSoftBlockError",
+            )
+        except Exception:
+            _logger.exception(
+                "could not emit SOFT_BLOCK outcome for %s; "
+                "original ledger error follows",
+                request_id,
+            )
         raise
     if existing.is_terminal_completed():
         ledger._emit_outcome(
@@ -3658,15 +3790,27 @@ async def _run_ledgered_async(
                 "original tool error follows",
                 request_id,
             )
-        ledger._emit_outcome(
-            request_id=request_id,
-            tool=tool_name,
-            event="body_fail",
-            side_effect_class=side_effect_class,
-            authorized_reexec=authorized_reexec,
-            owner=owner,
-            error_class=type(exc).__name__,
-        )
+        try:
+            ledger._emit_outcome(
+                request_id=request_id,
+                tool=tool_name,
+                event="body_fail",
+                side_effect_class=side_effect_class,
+                authorized_reexec=authorized_reexec,
+                owner=owner,
+                error_class=type(exc).__name__,
+                policy_version=(
+                    transition_binding.policy_version
+                    if transition_binding is not None
+                    else None
+                ),
+            )
+        except Exception:
+            _logger.exception(
+                "could not emit body_fail outcome for %s; "
+                "original tool error follows",
+                request_id,
+            )
         raise
     finally:
         _active_transition_var.reset(token)
@@ -3691,6 +3835,11 @@ async def _run_ledgered_async(
         authorized_reexec=authorized_reexec,
         owner=owner,
         error_class=None if complete_ok else "LedgerOutcomeAlreadySetError",
+        policy_version=(
+            transition_binding.policy_version
+            if transition_binding is not None
+            else None
+        ),
     )
     return result
 
@@ -3716,6 +3865,7 @@ def ledger(
     on_args_drift: str = ARGS_DRIFT_SOFT,
     reclaim_requires_death_signal: bool = False,
     presumed_dead_after: float | None = None,
+    request_identity_policy: str = REQUEST_IDENTITY_POLICY_DERIVED,
 ) -> Callable[[Callable[P, Awaitable[R]]], Callable[P, Awaitable[R]]]:
     """Decorator that records async tool invocations in an ActionLedger.
 
@@ -3745,6 +3895,7 @@ def ledger(
         outcome_emitter=outcome_emitter,
         unclassified_policy=unclassified_policy,
         on_args_drift=on_args_drift,
+        request_identity_policy=request_identity_policy,
         **ledger_kwargs,
     )
 
@@ -3785,6 +3936,7 @@ def ledger_sync(
     on_args_drift: str = ARGS_DRIFT_SOFT,
     reclaim_requires_death_signal: bool = False,
     presumed_dead_after: float | None = None,
+    request_identity_policy: str = REQUEST_IDENTITY_POLICY_DERIVED,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """Decorator that records sync tool invocations in an ActionLedger.
 
@@ -3814,6 +3966,7 @@ def ledger_sync(
         outcome_emitter=outcome_emitter,
         unclassified_policy=unclassified_policy,
         on_args_drift=on_args_drift,
+        request_identity_policy=request_identity_policy,
         **ledger_kwargs,
     )
 
@@ -3858,6 +4011,10 @@ __all__ = [
     "ARGS_DRIFT_POLICIES",
     "UNCLASSIFIED_POLICY_WARN",
     "UNCLASSIFIED_POLICY_STRICT",
+    "REQUEST_IDENTITY_POLICY_DERIVED",
+    "REQUEST_IDENTITY_POLICY_REQUIRE_EXPLICIT",
+    "REQUEST_IDENTITY_POLICIES",
+    "MissingRequestIdentityError",
     "FileLedgerStorage",
     "InMemoryLedgerStorage",
     "LedgerAlreadyResolvedError",

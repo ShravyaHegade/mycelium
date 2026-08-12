@@ -32,6 +32,7 @@ from mycelium.loop_guard import (
     VERIFIED_CLEAR,
     VERIFIED_RESOLUTIONS,
     resolve_loop_scope_key,
+    resolve_run_id,
 )
 from mycelium.storage.json_file import LockedJsonDictFile
 
@@ -50,9 +51,16 @@ ON_MISSING_METER_MODES = frozenset(
     {ON_MISSING_HARD, ON_MISSING_WARN, ON_MISSING_OFF}
 )
 
+MISSING_USAGE_POLICY_WARN = "warn"
+MISSING_USAGE_POLICY_ERROR = "error"
+MISSING_USAGE_POLICIES = frozenset(
+    {MISSING_USAGE_POLICY_WARN, MISSING_USAGE_POLICY_ERROR}
+)
+
 VIOLATION_BUDGET = "budget_exceeded"
 VIOLATION_BUDGET_WARN = "budget_warning"
 VIOLATION_MISSING_METER = "budget_missing_meter"
+VIOLATION_MISSING_USAGE = "budget_missing_usage"
 
 _DURATION_RE = re.compile(
     r"^\s*(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>ms|s|m|h|d)?\s*$",
@@ -61,6 +69,19 @@ _DURATION_RE = re.compile(
 
 _SCOPE_MISSING_WARNED = False
 _MISSING_METER_WARNED: set[str] = set()
+_MISSING_USAGE_WARNED: set[str] = set()
+
+
+class BudgetAccountingError(Exception):
+    """Raised when an LLM turn has no measurable usage under ``error`` policy.
+
+    Subsequent LLM calls for the same ``run_id`` are blocked. Token counts
+    are never invented. Provider exceptions are not replaced by this error.
+    """
+
+    def __init__(self, message: str, *, scope_key: str) -> None:
+        super().__init__(message)
+        self.scope_key = scope_key
 
 
 def parse_duration_seconds(value: Any) -> float:
@@ -156,6 +177,9 @@ class BudgetRunState:
     resolved_by: str | None = None
     reason: str | None = None
     resolved_at: float | None = None
+    usage_unknown: bool = False
+    last_model: str | None = None
+    last_provider: str | None = None
     updated_at: float = field(default_factory=time.time)
 
     @property
@@ -182,6 +206,9 @@ class BudgetRunState:
             "resolved_by": self.resolved_by,
             "reason": self.reason,
             "resolved_at": self.resolved_at,
+            "usage_unknown": self.usage_unknown,
+            "last_model": self.last_model,
+            "last_provider": self.last_provider,
             "updated_at": self.updated_at,
         }
 
@@ -207,6 +234,15 @@ class BudgetRunState:
             resolved_by=data.get("resolved_by"),
             reason=data.get("reason"),
             resolved_at=data.get("resolved_at"),
+            usage_unknown=bool(data.get("usage_unknown")),
+            last_model=(
+                str(data["last_model"]) if data.get("last_model") is not None else None
+            ),
+            last_provider=(
+                str(data["last_provider"])
+                if data.get("last_provider") is not None
+                else None
+            ),
             updated_at=float(data.get("updated_at") or time.time()),
         )
 
@@ -632,12 +668,18 @@ class BudgetGuard:
         max_usd: float | None = None,
         warn_at: float = 0.8,
         on_missing_meter: str = ON_MISSING_HARD,
+        missing_usage_policy: str = MISSING_USAGE_POLICY_WARN,
         exclude: list[str] | None = None,
     ) -> None:
         if on_missing_meter not in ON_MISSING_METER_MODES:
             raise ValueError(
                 f"on_missing_meter must be one of {sorted(ON_MISSING_METER_MODES)}, "
                 f"got {on_missing_meter!r}"
+            )
+        if missing_usage_policy not in MISSING_USAGE_POLICIES:
+            raise ValueError(
+                f"missing_usage_policy must be one of "
+                f"{sorted(MISSING_USAGE_POLICIES)}, got {missing_usage_policy!r}"
             )
         if not 0.0 < warn_at <= 1.0:
             raise ValueError("warn_at must be in (0, 1]")
@@ -657,7 +699,12 @@ class BudgetGuard:
         self._ceilings = ceilings
         self._warn_at = float(warn_at)
         self._on_missing_meter = on_missing_meter
+        self._missing_usage_policy = missing_usage_policy
         self._exclude = frozenset(exclude or [])
+
+    @property
+    def missing_usage_policy(self) -> str:
+        return self._missing_usage_policy
 
     @property
     def storage(self) -> BudgetGuardStorage:
@@ -710,7 +757,10 @@ class BudgetGuard:
                 return BudgetRunState(scope_key="excluded")
             return self._storage.get(key) or BudgetRunState(scope_key=key)
 
-        key = scope_key or resolve_loop_scope_key(kwargs=kwargs)
+        if kind == KIND_LLM:
+            key = scope_key or resolve_run_id(kwargs=kwargs)
+        else:
+            key = scope_key or resolve_loop_scope_key(kwargs=kwargs)
         if key is None:
             if not _SCOPE_MISSING_WARNED:
                 warnings.warn(
@@ -727,6 +777,21 @@ class BudgetGuard:
             now = time.time()
             if state.operator_resolution == VERIFIED_ABORT_RUN:
                 state.hard_blocked = True
+
+            if (
+                kind == KIND_LLM
+                and state.usage_unknown
+                and self._missing_usage_policy == MISSING_USAGE_POLICY_ERROR
+            ):
+                outcome["exc"] = BudgetAccountingError(
+                    f"BudgetGuard: run {key!r} has unknown LLM usage "
+                    f"(missing_usage_policy={MISSING_USAGE_POLICY_ERROR!r}); "
+                    "later LLM calls are blocked. Wire a usage extractor or "
+                    "record_usage() — token counts are never invented.",
+                    scope_key=key,
+                )
+                outcome["state"] = state
+                return state
 
             if state.hard_blocked and not state.allow_once:
                 outcome["exc"] = LedgerHardBlockError(
@@ -803,6 +868,8 @@ class BudgetGuard:
         tokens: int | None = None,
         usd: float | None = None,
         steps: int = 0,
+        model: str | None = None,
+        provider: str | None = None,
     ) -> BudgetRunState:
         """Atomically add host-reported usage and gate for the next step.
 
@@ -812,7 +879,9 @@ class BudgetGuard:
         """
         global _SCOPE_MISSING_WARNED
 
-        key = scope_key or resolve_loop_scope_key(kwargs=kwargs)
+        key = scope_key or resolve_run_id(kwargs=kwargs) or resolve_loop_scope_key(
+            kwargs=kwargs
+        )
         if key is None:
             if not _SCOPE_MISSING_WARNED:
                 warnings.warn(
@@ -853,6 +922,10 @@ class BudgetGuard:
             state.tokens_out += add_out
             state.usd += add_usd
             state.steps += add_steps
+            if model:
+                state.last_model = str(model)
+            if provider:
+                state.last_provider = str(provider)
 
             now = time.time()
             hard = self._hard_dimension(state, now=now, pending_steps=0)
@@ -947,6 +1020,46 @@ class BudgetGuard:
             raise outcome["exc"]
         assert outcome["state"] is not None
         return outcome["state"]
+
+    def note_missing_usage(
+        self,
+        *,
+        scope_key: str | None = None,
+        kwargs: dict[str, Any] | None = None,
+        reason: str = "no token usage in the provider/framework response",
+    ) -> None:
+        """Handle a completed or closed LLM turn with no measurable usage.
+
+        ``warn`` (default): one bounded warning per run; do not record zero.
+        ``error``: mark the run's LLM accounting unknown and raise
+        ``BudgetAccountingError`` so later LLM calls are blocked.
+        """
+        key = scope_key or resolve_run_id(kwargs=kwargs)
+        if key is None:
+            return
+        msg = (
+            f"BudgetGuard: run {key!r} LLM turn had no measurable usage "
+            f"({reason}). Token counts are never invented."
+        )
+        if self._missing_usage_policy == MISSING_USAGE_POLICY_WARN:
+            if key not in _MISSING_USAGE_WARNED:
+                warnings.warn(msg, UserWarning, stacklevel=3)
+                _MISSING_USAGE_WARNED.add(key)
+            return
+
+        def apply(state: BudgetRunState) -> BudgetRunState:
+            state.usage_unknown = True
+            state.blocked_dimension = VIOLATION_MISSING_USAGE
+            return state
+
+        self._storage.update(key, apply)
+        raise BudgetAccountingError(
+            msg
+            + f" missing_usage_policy={MISSING_USAGE_POLICY_ERROR!r}; "
+            "later LLM calls for this run are blocked. Register a usage "
+            "extractor or call record_usage() with real counts.",
+            scope_key=key,
+        )
 
     def _missing_meter_verdict(self, state: BudgetRunState) -> Exception | None:
         if not self._ceilings.requires_usage_meter():
@@ -1103,6 +1216,9 @@ def apply_budget_guard(
 __all__ = [
     "KIND_LLM",
     "KIND_TOOL",
+    "MISSING_USAGE_POLICIES",
+    "MISSING_USAGE_POLICY_ERROR",
+    "MISSING_USAGE_POLICY_WARN",
     "ON_MISSING_HARD",
     "ON_MISSING_METER_MODES",
     "ON_MISSING_OFF",
@@ -1111,6 +1227,8 @@ __all__ = [
     "VIOLATION_BUDGET",
     "VIOLATION_BUDGET_WARN",
     "VIOLATION_MISSING_METER",
+    "VIOLATION_MISSING_USAGE",
+    "BudgetAccountingError",
     "BudgetCeilings",
     "BudgetGuard",
     "BudgetGuardStorage",

@@ -37,6 +37,9 @@ action_ledger:
   storage: sqlite
   path: {tmp_path / "ledger.db"}
   tools: [charge]
+outcome_emit:
+  storage: file
+  path: {tmp_path / "outcomes.jsonl"}
 tools:
   charge:
     side_effect_class: non_idempotent_mutate
@@ -73,6 +76,9 @@ transition:
 action_ledger:
   storage: memory
   tools: [charge]
+outcome_emit:
+  storage: file
+  path: ./mycelium-test-outcomes.jsonl
 tools:
   charge:
     side_effect_class: non_idempotent_mutate
@@ -91,6 +97,9 @@ transition:
 action_ledger:
   storage: memory
   tools: [search]
+outcome_emit:
+  storage: file
+  path: ./mycelium-test-outcomes.jsonl
 tools:
   search:
     side_effect_class: read
@@ -119,6 +128,9 @@ transition:
 action_ledger:
   {block}
   tools: [charge]
+outcome_emit:
+  storage: file
+  path: {tmp_path / "outcomes.jsonl"}
 tools:
   charge:
     side_effect_class: non_idempotent_mutate
@@ -201,8 +213,8 @@ loop_guard:
 
     wrapped = cfg.apply_tool("charge", charge)
     with execution_scope(TransitionScope(thread_id="t1", run_id="run-123")):
-        assert wrapped(tool_call_id="c0") == "paid"
-        assert wrapped(tool_call_id="c0") == "paid"
+        assert wrapped(tool_call_id="c0", request_id="charge:ORD-1") == "paid"
+        assert wrapped(tool_call_id="c0", request_id="charge:ORD-1") == "paid"
     assert calls["n"] == 1
 
 
@@ -217,8 +229,8 @@ def test_production_disabled_guards_do_not_require_run_id(tmp_path) -> None:
         return "ok"
 
     wrapped = cfg.apply_tool("charge", charge)
-    assert wrapped(tool_call_id="c0") == "ok"
-    assert wrapped(tool_call_id="c0") == "ok"
+    assert wrapped(tool_call_id="c0", request_id="charge:ORD-1") == "ok"
+    assert wrapped(tool_call_id="c0", request_id="charge:ORD-1") == "ok"
     assert calls["n"] == 1
 
 
@@ -290,6 +302,9 @@ action_ledger:
   path: ./ledger.db
   memory_storage_policy: warn
   tools: [charge]
+outcome_emit:
+  storage: file
+  path: ./mycelium-test-outcomes.jsonl
 tools:
   charge:
     side_effect_class: non_idempotent_mutate
@@ -311,6 +326,9 @@ profile: production
 loop_guard:
   storage: memory
   missing_run_id_policy: warn
+outcome_emit:
+  storage: file
+  path: ./mycelium-test-outcomes.jsonl
 tools:
   search:
     side_effect_class: read
@@ -327,6 +345,9 @@ scope_guard:
   storage: memory
   allowed_tools: [search]
   missing_run_id_policy: warn
+outcome_emit:
+  storage: file
+  path: ./mycelium-test-outcomes.jsonl
 tools:
   search:
     side_effect_class: read
@@ -346,6 +367,9 @@ action_ledger:
 loop_guard:
   storage: memory
   missing_run_id_policy: error
+outcome_emit:
+  storage: file
+  path: {tmp_path / "outcomes.jsonl"}
 tools:
   charge:
     side_effect_class: non_idempotent_mutate

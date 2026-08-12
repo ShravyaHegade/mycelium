@@ -16,8 +16,10 @@ from typing import Any
 import pytest
 
 from mycelium import (
+    ConfigError,
     InMemoryLedgerStorage,
     LedgerHardBlockError,
+    OutcomeEmitError,
     ReconcileResult,
     SideEffectBoundary,
     SideEffectClass,
@@ -535,6 +537,129 @@ def test_config_outcome_emit_agent_id_not_supported() -> None:
             "transition:\n  agent_id: a\n  policy_version: '1'\noutcome_emit:\n"
             "  agent_id: x\n  storage: memory\n"
         )
+
+
+def test_production_without_outcome_emit_raises() -> None:
+    with pytest.raises(ConfigError, match="outcome_emit"):
+        load_config_from_string(
+            """
+profile: production
+tools:
+  ping: {}
+"""
+        )
+
+
+def test_production_memory_outcome_storage_raises() -> None:
+    with pytest.raises(ConfigError, match="memory storage"):
+        load_config_from_string(
+            """
+profile: production
+outcome_emit:
+  storage: memory
+tools:
+  ping: {}
+"""
+        )
+
+
+def test_production_durable_outcome_storage_loads(tmp_path: Path) -> None:
+    cfg = load_config_from_string(
+        f"""
+profile: production
+outcome_emit:
+  storage: file
+  path: {tmp_path / "outcomes.jsonl"}
+tools:
+  ping: {{}}
+"""
+    )
+    emitter = cfg.build_outcome_emitter()
+    assert emitter is not None
+    assert emitter.fail_closed
+    assert isinstance(emitter.storage, FileOutcomeStorage)
+
+
+def test_development_may_omit_outcome_emit() -> None:
+    cfg = load_config_from_string("tools:\n  ping: {}\n")
+    assert cfg.outcome_emit is None
+    assert cfg.build_outcome_emitter() is None
+
+
+def test_production_emit_failure_blocks_before_tool(tmp_path: Path) -> None:
+    class _BoomStorage:
+        def append(self, row: Any) -> None:
+            raise OSError("disk full")
+
+        def list_all(self) -> list[Any]:
+            return []
+
+    calls = {"n": 0}
+
+    @ledger_sync(
+        storage=InMemoryLedgerStorage(),
+        transition_binding=_BINDING,
+        outcome_emitter=OutcomeEmitter(
+            "prod", storage=_BoomStorage(), on_failure="error"
+        ),
+    )
+    def charge(amount: int) -> str:
+        calls["n"] += 1
+        return "paid"
+
+    with pytest.raises(OutcomeEmitError, match="disk full|failed to record"):
+        charge(1, request_id="charge:ORD-boom")
+    assert calls["n"] == 0
+
+
+def test_emit_failure_does_not_replace_tool_exception() -> None:
+    class _FailAfterStart:
+        def __init__(self) -> None:
+            self.n = 0
+            self._rows: list[Any] = []
+
+        def append(self, row: Any) -> None:
+            self.n += 1
+            if row.event == EVENT_BODY_FAIL:
+                raise OSError("disk full")
+            self._rows.append(row)
+
+        def list_all(self) -> list[Any]:
+            return list(self._rows)
+
+    @ledger_sync(
+        storage=InMemoryLedgerStorage(),
+        transition_binding=_BINDING,
+        outcome_emitter=OutcomeEmitter(
+            "prod", storage=_FailAfterStart(), on_failure="error"
+        ),
+    )
+    def explode(amount: int) -> str:
+        raise RuntimeError("provider down")
+
+    with pytest.raises(RuntimeError, match="provider down"):
+        explode(1, request_id="charge:ORD-keep")
+
+
+def test_restart_preserves_emitted_evidence(tmp_path: Path) -> None:
+    path = tmp_path / "outcomes.jsonl"
+
+    @ledger_sync(
+        storage=InMemoryLedgerStorage(),
+        transition_binding=_BINDING,
+        outcome_emitter=OutcomeEmitter(
+            "a", storage=FileOutcomeStorage(path), on_failure="error"
+        ),
+    )
+    def charge(amount: int) -> str:
+        return "paid"
+
+    charge(1, request_id="charge:ORD-persist")
+    restored = FileOutcomeStorage(path).list_all()
+    assert restored
+    assert any(row.request_id == "charge:ORD-persist" for row in restored)
+    assert any(row.event == EVENT_BODY_COMPLETE for row in restored)
+    assert any(row.gate == GATE_ALLOW for row in restored)
 
 
 # ---------------------------------------------------------------------------

@@ -16,6 +16,15 @@ TRANSITION_SCHEMA = "mycelium.transition/v1"
 
 SCOPE_FIELDS = ("thread_id", "run_id", "node")
 
+REQUEST_IDENTITY_POLICY_DERIVED = "derived"
+REQUEST_IDENTITY_POLICY_REQUIRE_EXPLICIT = "require_explicit"
+REQUEST_IDENTITY_POLICIES = frozenset(
+    {
+        REQUEST_IDENTITY_POLICY_DERIVED,
+        REQUEST_IDENTITY_POLICY_REQUIRE_EXPLICIT,
+    }
+)
+
 LEDGER_KWARG_KEYS = frozenset(
     {
         "request_id",
@@ -31,6 +40,44 @@ LEDGER_KWARG_KEYS = frozenset(
         "handoff_id",
     }
 )
+
+
+class MissingRequestIdentityError(Exception):
+    """Raised when a consequential tool has no host-owned business identity.
+
+    ``request_id`` must come from a server-owned business record. It is not
+    ``tool_call_id``, ``run_id``, ``thread_id``, or a random fallback.
+    """
+
+    def __init__(
+        self,
+        *,
+        tool: str,
+        field: str | None = None,
+        detail: str | None = None,
+    ) -> None:
+        self.tool = tool
+        self.field = field
+        if detail:
+            message = detail
+        elif field:
+            message = (
+                f"Tool {tool!r} request_id_from={field!r} is missing or empty. "
+                "The configured field must be a non-empty value from a "
+                "server-owned business record, not model-generated data. "
+                "The tool was not claimed or executed."
+            )
+        else:
+            message = (
+                f"Tool {tool!r} requires a stable host-owned request_id "
+                f"(request_identity_policy={REQUEST_IDENTITY_POLICY_REQUIRE_EXPLICIT!r}). "
+                f"Pass request_id derived from a server-owned business record "
+                f'(for example request_id=f"{tool}:{{order_id}}") or set '
+                f"tools.{tool}.request_id_from. Do not use tool_call_id, "
+                "run_id, thread_id, or a random id. The tool was not claimed "
+                "or executed."
+            )
+        super().__init__(message)
 
 
 class SideEffectClass(StrEnum):
@@ -50,6 +97,16 @@ class SideEffectClass(StrEnum):
     KEYED_MUTATE = "keyed_mutate"
     NON_IDEMPOTENT_MUTATE = "non_idempotent_mutate"
     IRREVERSIBLE = "irreversible"
+
+
+CONSEQUENTIAL_SIDE_EFFECT_CLASSES = frozenset(
+    {
+        SideEffectClass.IDEMPOTENT_MUTATE,
+        SideEffectClass.KEYED_MUTATE,
+        SideEffectClass.NON_IDEMPOTENT_MUTATE,
+        SideEffectClass.IRREVERSIBLE,
+    }
+)
 
 
 # Legacy YAML / API names accepted by :func:`parse_side_effect_class`.
@@ -443,6 +500,7 @@ class ToolTransitionBinding:
     spendability: Spendability = Spendability.SINGLE_USE
     provider_idempotency_key_param: str | None = None
     provider_idempotency_key_ttl: float | None = None
+    request_id_from: str | None = None
 
     @classmethod
     def for_tool(
@@ -457,6 +515,7 @@ class ToolTransitionBinding:
         spendability: Spendability | None = None,
         provider_idempotency_key_param: str | None = None,
         provider_idempotency_key_ttl: float | None = None,
+        request_id_from: str | None = None,
     ) -> ToolTransitionBinding:
         return cls(
             agent_id=agent_id,
@@ -472,6 +531,7 @@ class ToolTransitionBinding:
             spendability=resolve_spendability(side_effect_class, spendability),
             provider_idempotency_key_param=provider_idempotency_key_param,
             provider_idempotency_key_ttl=provider_idempotency_key_ttl,
+            request_id_from=request_id_from,
         )
 
 
@@ -658,6 +718,20 @@ def parse_explicit_request_id(kwargs: dict[str, Any]) -> str | None:
     return value
 
 
+def request_id_from_argument(
+    tool: str,
+    field: str,
+    kwargs: dict[str, Any],
+) -> str:
+    """Build ``{tool}:{field}:{value}`` from a trusted host argument."""
+    if field not in kwargs:
+        raise MissingRequestIdentityError(tool=tool, field=field)
+    value = kwargs[field]
+    if not isinstance(value, str) or not value.strip():
+        raise MissingRequestIdentityError(tool=tool, field=field)
+    return f"{tool}:{field}:{value.strip()}"
+
+
 def derive_dispatch_id(kwargs: dict[str, Any]) -> str | None:
     """Return explicit dispatch identity, then any active framework identity."""
     if "tool_call_id" in kwargs:
@@ -778,7 +852,12 @@ def derive_transition_key_for_call(
 
 
 __all__ = [
+    "CONSEQUENTIAL_SIDE_EFFECT_CLASSES",
     "LEDGER_KWARG_KEYS",
+    "MissingRequestIdentityError",
+    "REQUEST_IDENTITY_POLICIES",
+    "REQUEST_IDENTITY_POLICY_DERIVED",
+    "REQUEST_IDENTITY_POLICY_REQUIRE_EXPLICIT",
     "SCOPE_FIELDS",
     "SIDE_EFFECT_CLASS_ALIASES",
     "TRANSITION_SCHEMA",
@@ -802,6 +881,7 @@ __all__ = [
     "canonical_json",
     "derive_dispatch_id",
     "parse_explicit_request_id",
+    "request_id_from_argument",
     "derive_transition_key",
     "derive_transition_key_for_call",
     "dispatch_scope",

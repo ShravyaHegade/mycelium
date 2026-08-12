@@ -5,6 +5,51 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
 
 ## Unreleased
 
+### Added
+
+- **Production request identity:** `action_ledger.request_identity_policy`
+  (`derived` development default, `require_explicit` in
+  `profile: production`). Consequential tools must pass a host-owned
+  `request_id` or declare `request_id_from` before claim or execution.
+  `tool_call_id` / `run_id` / `thread_id` are not accepted as business IDs.
+  Weaker explicit `derived` under production is rejected.
+- **Production outcome emission:** `profile: production` requires
+  `outcome_emit:` with durable (non-memory) storage. Emission failure is
+  fail-closed and does not replace a tool/provider exception. File storage
+  is single-node. Development may still omit outcome emission.
+- **Distributed outcome storage:** `outcome_emit.storage` accepts
+  `postgres` (recommended multi-node durable backend) and `redis`
+  (Redis Streams + event-id dedupe). Production Redis requires an explicit
+  `persistence: required` acknowledgement; Mycelium cannot verify the
+  server's AOF/durable configuration. File remains single-node. Memory
+  stays development-only. `OutcomeRow.event_id` supports idempotent
+  retried inserts.
+
+
+- **Automatic LLM budget enforcement:** when `budget:` is enabled, supported
+  LangGraph/LangChain chat models are patched so `invoke` / `ainvoke` /
+  `stream` check limits before the provider call and record usage once from
+  response metadata. `missing_usage_policy: warn` (default) or `error`.
+  Production requires an explicitly selected LLM adapter
+  (`integrations.langgraph.enabled` or `register_llm_budget_adapter` —
+  merely having LangGraph installed is not enough) and `error` whenever
+  token/cost limits are set; `max_usd` needs a registered cost resolver.
+  Step/time-only budgets may run without token metadata. Manual
+  `check("llm")` / `record_usage` / `register_llm_budget_adapter` remain
+  the custom-provider fallback.
+- **Automatic CompletionContract terminals:** when `completion:` is enabled,
+  supported frameworks (LangGraph `END` via `invoke` / `ainvoke` / `stream`)
+  run the checklist after a finished stream that reached END. `stream` /
+  `astream` yield intermediate chunks as they arrive and withhold the
+  last (terminal) chunk until the check passes. Developers
+  configure the YAML checklist only — no `complete_run()` call. Production
+  verifies an explicitly selected adapter at startup (`ConfigError` if
+  `completion:` is on but `integrations.langgraph.enabled` is absent and
+  no `register_terminal_adapter` ran). Development warns and keeps
+  `wrap_final_message` / `gate_graph_end` / `complete_run` /
+  `register_terminal_adapter` as the custom-runtime fallback. Wiring is
+  idempotent.
+
 ## 1.31.0 (2026-08-11)
 
 MINOR: production-safe identity and storage. Host-owned `request_id`,

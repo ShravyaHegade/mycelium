@@ -9,6 +9,8 @@ Public vocabulary: allow / allow_with_warnings / refuse (not soft/hard).
 
 from __future__ import annotations
 
+import functools
+import inspect
 import threading
 import time
 import warnings
@@ -29,6 +31,78 @@ RESOLVED_STATUSES = frozenset({STATUS_SUCCESS, STATUS_FAILED, STATUS_ABANDONED})
 TerminalVerdict = Literal["allow", "allow_with_warnings", "refuse"]
 
 _SCOPE_MISSING_WARNED = False
+
+COMPLETION_WRAPPED_MARK = "_mycelium_completion_wrapped"
+TERMINAL_ADAPTER_LANGGRAPH = "langgraph"
+TERMINAL_ADAPTER_FINAL_MESSAGE = "final_message"
+TERMINAL_ADAPTER_GRAPH_END = "graph_end"
+TERMINAL_ADAPTER_MANUAL = "manual"
+
+_MYCELIUM_WRAPPER_MARKERS = (
+    COMPLETION_WRAPPED_MARK,
+    "_mycelium_config_applied",
+    "_mycelium_ledger",
+    "_mycelium_ledger_instance",
+    "_mycelium_task_ledger",
+    "_mycelium_bounded",
+    "_mycelium_protected",
+    "_mycelium_loop_guarded",
+    "_mycelium_budget_guarded",
+    "_mycelium_scope_guarded",
+    "_mycelium_state_authority",
+    "_mycelium_langgraph_integration",
+)
+
+_active_completion_contract: CompletionContract | None = None
+_registered_terminal_adapters: set[str] = set()
+_unwired_completion_warned = False
+
+
+def get_active_completion_contract() -> CompletionContract | None:
+    """Return the contract activated by the latest ``completion:`` config."""
+    return _active_completion_contract
+
+
+def set_active_completion_contract(contract: CompletionContract | None) -> None:
+    """Bind or clear the process-wide contract used by automatic terminals."""
+    global _active_completion_contract
+    _active_completion_contract = contract
+
+
+def registered_terminal_adapters() -> frozenset[str]:
+    """Return adapters declared via ``register_terminal_adapter``."""
+    return frozenset(_registered_terminal_adapters)
+
+
+def register_terminal_adapter(name: str) -> None:
+    """Declare a custom-runtime terminal adapter before ``load_config``.
+
+    Supported frameworks (LangGraph END) register themselves. Custom
+    runtimes call this, then ``wrap_final_message`` / ``gate_graph_end`` /
+    ``complete_run``. Production startup requires at least one verified
+    adapter when ``completion:`` is enabled.
+    """
+    label = str(name).strip()
+    if not label:
+        raise ValueError("terminal adapter name must be non-empty")
+    _registered_terminal_adapters.add(label)
+
+
+def reset_completion_terminal_state() -> None:
+    """Clear process-wide completion terminal state (tests)."""
+    global _active_completion_contract, _unwired_completion_warned
+    _active_completion_contract = None
+    _registered_terminal_adapters.clear()
+    _unwired_completion_warned = False
+
+
+def _preserve_mycelium_markers(src: Any, dst: Any) -> None:
+    for mark in _MYCELIUM_WRAPPER_MARKERS:
+        if hasattr(src, mark):
+            setattr(dst, mark, getattr(src, mark))
+    signature = getattr(src, "__signature__", None)
+    if signature is not None:
+        dst.__signature__ = signature
 
 
 class CompletionError(Exception):
@@ -413,15 +487,32 @@ def wrap_final_message(
 ) -> Callable[..., Any]:
     """Adapter: call ``complete_run`` before emitting a final message / answer.
 
-    Use when the host owns an explicit "emit final answer" callable.
+    Official LangGraph integrations are wired automatically from YAML.
+    Use this for custom runtimes that own an explicit "emit final answer"
+    callable. Applying twice is idempotent.
     """
+    if getattr(emit, COMPLETION_WRAPPED_MARK, False):
+        return emit
 
-    def wrapped(*args: Any, **kwargs: Any) -> Any:
-        contract.complete_run(kwargs=kwargs)
-        return emit(*args, **kwargs)
+    if inspect.iscoroutinefunction(emit):
 
-    wrapped.__name__ = getattr(emit, "__name__", "final_message")
-    wrapped.__doc__ = getattr(emit, "__doc__", None)
+        @functools.wraps(emit)
+        async def async_wrapped(*args: Any, **kwargs: Any) -> Any:
+            contract.complete_run(kwargs=kwargs)
+            return await emit(*args, **kwargs)
+
+        wrapped: Callable[..., Any] = async_wrapped
+    else:
+
+        @functools.wraps(emit)
+        def sync_wrapped(*args: Any, **kwargs: Any) -> Any:
+            contract.complete_run(kwargs=kwargs)
+            return emit(*args, **kwargs)
+
+        wrapped = sync_wrapped
+
+    _preserve_mycelium_markers(emit, wrapped)
+    setattr(wrapped, COMPLETION_WRAPPED_MARK, True)
     return wrapped
 
 
@@ -431,5 +522,9 @@ def gate_graph_end(
     scope_key: str | None = None,
     kwargs: dict[str, Any] | None = None,
 ) -> CompleteRunResult | None:
-    """Adapter: LangGraph (or other) END / last-node hook → ``complete_run``."""
+    """Adapter: LangGraph (or other) END / last-node hook → ``complete_run``.
+
+    Supported LangGraph graphs are patched automatically. Call this only
+    from a custom runtime's genuine terminal boundary.
+    """
     return contract.complete_run(scope_key=scope_key, kwargs=kwargs)

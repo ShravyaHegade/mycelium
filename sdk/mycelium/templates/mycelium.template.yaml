@@ -63,18 +63,23 @@
 # LangGraph: install `mycelium-runtime[langgraph]`, then enable the optional
 #   integration below. command mode or `@config.apply` adds ToolRuntime metadata
 #   and maps tool_call_id / thread_id / run_id / node into transition identity.
+#   `completion:` also auto-protects LangGraph END (no complete_run() call).
 # To reconcile automatically instead of hard-blocking, pass a read-only
 #   Reconciler in code: `@ledger_sync(reconciler=...)` or
 #   `ActionLedger(reconciler=...)`. It returns COMPLETED / NOT_EXECUTED /
 #   UNKNOWN and is fail-closed (reconcilers can't be declared in YAML).
 
 # ---------------------------------------------------------------------------
-# profile  (omit for development; production tightens two safety policies)
+# profile  (omit for development; production tightens safety policies)
 # ---------------------------------------------------------------------------
 # profile: production
 #   → action_ledger.memory_storage_policy: error
+#   → action_ledger.request_identity_policy: require_explicit
 #   → loop_guard / scope_guard missing_run_id_policy: error (when enabled)
-#   Weaker explicit `warn` settings are rejected.
+#   → outcome_emit: required, durable storage, on_failure: error
+#   → completion: requires a verified terminal adapter at startup
+#   Weaker explicit warn/derived/memory-outcome settings are rejected.
+#   unclassified_policy: warn remains an accepted product choice.
 
 # ---------------------------------------------------------------------------
 # integrations (optional framework metadata; core remains framework-agnostic)
@@ -110,6 +115,7 @@ action_ledger:
   unclassified_policy: strict   # warn (default): one-time warning on failed retry
                                 # strict: hard-block unclassified failed retries
   # memory_storage_policy: warn # warn (default) | error — reject memory + mutate
+  # request_identity_policy: derived  # derived (dev default) | require_explicit
   on_args_drift: soft           # soft (default) | hard | off — same dispatch
                                 # ticket + different args → ToolBoundaryError /
                                 # LedgerHardBlockError (identity-conflict gate);
@@ -151,18 +157,34 @@ audit_receipt:
   auto: true
 
 # ---------------------------------------------------------------------------
-# outcome_emit  (opt-in resolution telemetry + DTTR; omit if unused)
-#   Emits one flat NDJSON row per resolution event (gate decision, body start/
-#   complete/fail, operator release) — never per poll tick. Off by default.
-#   storage: memory | file (no analytics SaaS deps; v1 is local-only)
+# outcome_emit  (opt-in in development; required in profile: production)
+#   Emits one flat row per resolution event (gate decision, body start/
+#   complete/fail, operator release) — never per poll tick.
+#   storage:
+#     memory   — development only
+#     file     — durable, single-node (not cross-node)
+#     postgres — recommended distributed durable backend (url/url_env or dsn/dsn_env)
+#     redis    — Redis Streams; production requires persistence: required
+#               (AOF or equivalently durable Redis; Mycelium cannot verify it)
+#   production rejects a missing section, storage: memory, incomplete backend
+#   config, and redis without persistence: required. Backend outages fail closed.
+#   on_failure: warn (dev default) | error (production default, fail-closed)
 #   long_running_after: seconds; transitions older than this count as
 #     "long-running" in the DTTR denominator (default: lease_ttl). The metric:
 #     DTTR = silent_duplicates / max(long_running_or_redispatched, 1), target 0.
 #   Inspect with: mycelium outcomes dttr
 # ---------------------------------------------------------------------------
 # outcome_emit:
-#   storage: file
-#   path: ./mycelium-outcomes.jsonl
+#   storage: postgres
+#   url_env: DATABASE_URL
+#   table: mycelium_outcomes
+#   on_failure: error
+#   # storage: redis
+#   # url_env: REDIS_URL
+#   # key_prefix: mycelium:outcomes
+#   # persistence: required
+#   # storage: file
+#   # path: ./mycelium-outcomes.jsonl
 #   long_running_after: 3600
 
 # ---------------------------------------------------------------------------
@@ -210,32 +232,40 @@ loop_guard:
 
 # ---------------------------------------------------------------------------
 # budget  (not AF-010 — cost / time / step ceilings; refuse next step)
-# Host check("llm") before model turns; record_usage for tokens/USD.
+# LangGraph/LangChain LLM turns are wired automatically from YAML.
 # Storage: memory | file | sqlite | redis | postgres (atomic update()).
+# missing_usage_policy: warn (default) | error (required in production
+#   when max_tokens / max_usd are set). Step/time-only budgets need no
+#   token metadata. max_usd needs register_llm_cost_resolver in production.
 # ---------------------------------------------------------------------------
 # budget:
 #   storage: file
 #   path: ./mycelium-budget.json
 #   max_duration: 15m
-#   max_steps: 40
-#   max_tokens: 200000
-#   max_usd: 5.00
+#   max_steps: 30
+#   max_tokens: 100000
+#   max_cost_usd: 10
+#   missing_usage_policy: error
 #   warn_at: 0.8
 #   on_missing_meter: hard
 
 # ---------------------------------------------------------------------------
 # completion  (AF-007 — refuse terminal while required subtasks are pending)
-# Opt-in. Host-declared checklist; mark success|failed|abandoned before
-# complete_run() / graph END / final-message adapter. Unmarked required →
-# refuse; unmarked optional → warn and allow. Vocabulary: allow /
+# Opt-in. Host-declared checklist only — supported frameworks (LangGraph
+# END) are wired automatically. Mark success|failed|abandoned; unmarked
+# required → refuse; unmarked optional → warn and allow. Vocabulary: allow /
 # allow_with_warnings / refuse (not soft/hard).
+# profile: production verifies an explicitly selected adapter
+# (integrations.langgraph.enabled or register_terminal_adapter). Having
+# LangGraph installed is not enough. Custom runtimes: wrap_final_message
+# / gate_graph_end / register_terminal_adapter before load_config.
 # ---------------------------------------------------------------------------
 # completion:
 #   storage: file
 #   path: ./mycelium-completion.json
 #   required:
-#     - id: send_email
-#     - id: write_pr
+#     - id: charge_customer
+#     - id: send_receipt
 #   optional:
 #     - id: post_slack
 

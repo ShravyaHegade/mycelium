@@ -96,13 +96,13 @@ loop_guard:
     non_idempotent_mutate: 2
     irreversible: 2
 
-# completion:                         # AF-007 opt-in checklist before terminal
+# completion:                         # AF-007 opt-in; LangGraph END auto-wired
 #   storage: file
 #   path: ./mycelium-completion.json
 #   required:
-#     - id: send_email
+#     - id: charge_customer
 #   optional:
-#     - id: post_slack
+#     - id: send_receipt
 
 # state_authority:                    # opt-in superseded-state gate
 #   canonical_callable: your_package.state:get_canonical_state_ref

@@ -47,9 +47,13 @@ This document is **explicitly out of scope** for:
   host-declared `max_duration` / `max_steps` / `max_tokens` / `max_usd`
   ceilings soft-warn (`warnings.warn`, step still allowed) then hard-block
   only at the declared ceiling on the **next** LLM/tool step (never
-  mid-flight kill). Tokens/USD are host-reported via `record_usage`;
-  `on_missing_meter: hard` fail-closes if those ceilings are declared but
-  never metered. Optional `loop_guard:` (AF-003) only halts consecutive
+  mid-flight kill). Supported LangGraph/LangChain clients record usage
+  automatically when `integrations.langgraph.enabled` is set; token counts
+  are never invented. Manual `record_usage` remains the custom-provider
+  path. `missing_usage_policy: error` and `on_missing_meter: hard`
+  fail-close when those ceilings cannot be metered. Production requires
+  an explicitly selected LLM adapter.
+  Optional `loop_guard:` (AF-003) only halts consecutive
   identical action hashes — it is **not** a spend ceiling.
 - **Premature “done” / incomplete checklists** *unless* optional
   `completion:` (AF-007) is configured — the ledger does not gate run-exit.
@@ -233,14 +237,21 @@ than the code makes.
   stable `run_id` the detector skips (default `missing_run_id_policy: warn`).
   Set `error` so an enabled guard cannot run unprotected. Optional
   `budget:` (not AF-010) hard-stops on host-declared duration/steps/tokens/USD
-  ceilings before the next step; residual risk remains if the host skips
-  `instrument_llm` / `@budget_llm` (or manual `check("llm")`) +
-  `record_usage` wiring.
+  ceilings before the next step. Supported LangGraph/LangChain model
+  boundaries are wired automatically. Residual risk remains for custom
+  providers if the host skips `instrument_llm` / `@budget_llm` (or manual
+  `check("llm")`) + `record_usage`. `missing_usage_policy: error` (required
+  in production for token/cost limits) blocks later LLM calls when usage
+  metadata is missing instead of inventing zeros.
 - **Premature terminal (without `completion:`).** The ledger does not stop an
   agent from emitting “done” with unfinished work. Optional AF-007
   `completion:` refuses terminal when **required** checklist ids are still
-  pending; it does not judge open-ended goals (AF-005) and never fires unless
-  an entry point (`complete_run` / END / final-message wrap) is wired.
+  pending; it does not judge open-ended goals (AF-005). Supported frameworks
+  (LangGraph END) are wired automatically from YAML when
+  `integrations.langgraph.enabled` is set. `profile: production`
+  fails startup if `completion:` is enabled but no adapter was
+  explicitly selected. Custom runtimes still use `complete_run` /
+  `gate_graph_end` / `wrap_final_message`.
 - **Superseded state (without `state_authority:`).** A redispatch from a stale
   checkpoint that mints a new `tool_call_id` / changed args has no prior claim
   and PROCEEDs. Optional `state_authority:` compares a frozen `state_ref` to the
@@ -357,7 +368,13 @@ Still can go wrong — even with everything above configured correctly:
   authorized by a consumed `NOT_EXECUTED` verdict, over transitions that were
   long-running or redispatched. See the
   [README section](../README.md#outcome-telemetry--dttr-v120) for the exact
-  definition.
+  definition. In `profile: production`, outcome emission is required and
+  fail-closed: prefer `storage: postgres` for shared durable evidence;
+  `storage: file` is single-node only; `storage: redis` requires an explicit
+  `persistence: required` acknowledgement (AOF or equivalently durable Redis
+  — Mycelium cannot verify the server). A backend outage blocks successful
+  paths rather than silently dropping decision evidence.
+
 
 ---
 

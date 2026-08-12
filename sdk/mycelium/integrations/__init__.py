@@ -4,6 +4,7 @@ from mycelium.integrations.crewai import instrument_crewai_llm
 from mycelium.integrations.langgraph import (
     LangGraphIntegrationError,
     completion_gate_end,
+    install_langgraph_completion_terminal,
     instrument_langgraph_llm,
     instrument_langgraph_tool,
 )
@@ -11,6 +12,7 @@ from mycelium.integrations.langgraph import (
 __all__ = [
     "LangGraphIntegrationError",
     "completion_gate_end",
+    "install_langgraph_completion_terminal",
     "instrument_crewai_llm",
     "instrument_langgraph_llm",
     "instrument_langgraph_tool",

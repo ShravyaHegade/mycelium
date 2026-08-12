@@ -33,6 +33,9 @@ from mycelium.audit_receipt import (
     resolve_signing_key,
 )
 from mycelium.budget_guard import (
+    MISSING_USAGE_POLICIES,
+    MISSING_USAGE_POLICY_ERROR,
+    MISSING_USAGE_POLICY_WARN,
     ON_MISSING_HARD,
     ON_MISSING_METER_MODES,
     BudgetCeilings,
@@ -51,10 +54,13 @@ from mycelium.completion_contract import (
     CompletionStorage,
     FileCompletionStorage,
     InMemoryCompletionStorage,
+    registered_terminal_adapters,
+    set_active_completion_contract,
 )
 from mycelium.history_guard import HistoryGuard
 from mycelium.integrations.langgraph import (
     LangGraphIntegrationError,
+    install_langgraph_completion_terminal,
     instrument_langgraph_tool,
 )
 from mycelium.loop_guard import (
@@ -76,6 +82,9 @@ from mycelium.loop_guard import (
 )
 from mycelium.message_validator import MessageValidator
 from mycelium.outcome_emit import (
+    OUTCOME_ON_FAILURE_ERROR,
+    OUTCOME_ON_FAILURE_POLICIES,
+    OUTCOME_ON_FAILURE_WARN,
     FileOutcomeStorage,
     InMemoryOutcomeStorage,
     OutcomeEmitter,
@@ -117,6 +126,9 @@ from mycelium.tool_boundary import bounded, bounded_sync
 from mycelium.tool_registry import ToolRegistry
 from mycelium.tool_runner import ToolRunner
 from mycelium.transition import (
+    REQUEST_IDENTITY_POLICIES,
+    REQUEST_IDENTITY_POLICY_DERIVED,
+    REQUEST_IDENTITY_POLICY_REQUIRE_EXPLICIT,
     RetryPermission,
     SideEffectBoundary,
     SideEffectClass,
@@ -278,6 +290,7 @@ class ToolConfig:
     spendability: Spendability | None = None
     provider_idempotency_key_param: str | None = None
     provider_idempotency_key_ttl: float | None = None
+    request_id_from: str | None = None
     callable_path: str | None = None
     # Per-tool loop_guard: None=inherit global, False=disable, dict=overrides
     loop_guard: dict[str, Any] | bool | None = None
@@ -355,6 +368,8 @@ class MyceliumConfig:
     _completion: CompletionContract | None = None
     _state_flush: StateFlush | None = None
     _audit_auto: bool = False
+    _terminal_adapters: frozenset[str] = frozenset()
+    _llm_adapters: frozenset[str] = frozenset()
 
     def apply(self, func: Callable[..., Any]) -> Callable[..., Any]:
         """
@@ -499,6 +514,9 @@ class MyceliumConfig:
                     f"{sorted(ARGS_DRIFT_POLICIES)}, got {on_args_drift!r}"
                 )
             ledger_kwargs["on_args_drift"] = on_args_drift
+            ledger_kwargs["request_identity_policy"] = _request_identity_policy(
+                action_ledger_cfg, profile=self.profile
+            )
             if is_async:
                 func = ledger(
                     storage=storage,
@@ -769,14 +787,21 @@ class MyceliumConfig:
         exclude = raw.get("exclude") or []
         if not isinstance(exclude, list):
             raise ConfigError("'budget.exclude' must be a list of tool names")
+        missing_usage = _missing_usage_policy(raw, profile=self.profile)
         self._budget_guard = BudgetGuard(
             storage,
             ceilings=ceilings,
             warn_at=warn_at_f,
             on_missing_meter=str(on_missing),
+            missing_usage_policy=missing_usage,
             exclude=[str(item) for item in exclude],
         )
         return self._budget_guard
+
+    @property
+    def llm_budget_wired(self) -> bool:
+        """Whether a real LLM adapter was verified for ``budget:``."""
+        return bool(self._llm_adapters)
 
     def instrument_llm(
         self,
@@ -797,8 +822,17 @@ class MyceliumConfig:
             raise ConfigError(
                 "instrument_llm requires a 'budget:' block in the config"
             )
-        from mycelium.budget_llm import instrument_llm as _instrument_llm
+        from mycelium.budget_llm import (
+            LlmBudgetAdapter,
+            register_llm_budget_adapter,
+        )
+        from mycelium.budget_llm import (
+            instrument_llm as _instrument_llm,
+        )
 
+        register_llm_budget_adapter(
+            LlmBudgetAdapter(name="manual", measures_tokens=True, measures_cost=False)
+        )
         return _instrument_llm(
             target,
             guard,
@@ -806,6 +840,116 @@ class MyceliumConfig:
             scope_key=scope_key,
             record_usage=record_usage,
         )
+
+    def _activate_llm_budget(self) -> None:
+        """Bind the budget guard and verify an LLM adapter when needed."""
+        import importlib
+
+        budget_llm_mod = importlib.import_module("mycelium.budget_llm")
+        install_langgraph_llm_budget = budget_llm_mod.install_langgraph_llm_budget
+        registered_llm_budget_adapters = (
+            budget_llm_mod.registered_llm_budget_adapters
+        )
+        set_active_budget_guard = budget_llm_mod.set_active_budget_guard
+
+        if self.budget is None:
+            set_active_budget_guard(None)
+            self._llm_adapters = frozenset()
+            return
+
+        guard = self.build_budget_guard()
+        set_active_budget_guard(guard)
+        adapters = set(registered_llm_budget_adapters())
+        install_error: str | None = None
+        if self.langgraph_enabled:
+            try:
+                installed = install_langgraph_llm_budget()
+            except Exception as exc:  # pragma: no cover - defensive
+                installed = False
+                install_error = str(exc)
+            else:
+                install_error = None
+            if installed:
+                adapters.add("langgraph")
+        self._llm_adapters = frozenset(adapters)
+        self._verify_llm_budget_coverage(
+            adapters, install_error, budget_llm_mod
+        )
+
+    def _verify_llm_budget_coverage(
+        self,
+        adapters: set[str],
+        install_error: str | None,
+        budget_llm_mod: Any,
+    ) -> None:
+        ceilings = _budget_ceilings_from_config(self.budget or {})
+        token_or_cost = ceilings.requires_usage_meter()
+        if not token_or_cost:
+            return
+
+        measures_tokens = "langgraph" in adapters
+        measures_cost = bool(budget_llm_mod._cost_resolvers)
+        for name in adapters:
+            adapter = budget_llm_mod._registered_llm_adapters.get(name)
+            if adapter is None:
+                continue
+            measures_tokens = measures_tokens or adapter.measures_tokens
+            if adapter.resolve_cost is not None:
+                measures_cost = True
+
+        if self.profile == PROFILE_PRODUCTION:
+            if not adapters:
+                if install_error:
+                    detail = (
+                        "the LangGraph/LangChain LLM adapter was not installed "
+                        f"({install_error})"
+                    )
+                elif not self.langgraph_enabled:
+                    detail = (
+                        "no LLM adapter was explicitly selected. Set "
+                        "integrations.langgraph.enabled: true (and install "
+                        "'mycelium-runtime[langgraph]') or "
+                        "register_llm_budget_adapter(...) before load_config(). "
+                        "Having LangGraph installed is not enough"
+                    )
+                else:
+                    detail = (
+                        "the LangGraph/LangChain LLM adapter was not installed"
+                    )
+                raise ConfigError(
+                    f"profile is {PROFILE_PRODUCTION!r} and 'budget:' sets "
+                    f"token/cost limits, but {detail}. LLM calls would bypass "
+                    "the budget."
+                )
+            if ceilings.max_tokens is not None and not measures_tokens:
+                raise ConfigError(
+                    "profile is 'production' and budget.max_tokens is set, but "
+                    "the selected LLM adapter cannot measure tokens. Register "
+                    "an adapter with measures_tokens=True."
+                )
+            if ceilings.max_usd is not None and not measures_cost:
+                raise ConfigError(
+                    "profile is 'production' and budget.max_usd/max_cost_usd "
+                    "is set, but no cost resolver is registered. Mycelium "
+                    "never invents prices — call register_llm_cost_resolver "
+                    "or register_llm_budget_adapter(..., resolve_cost=...) "
+                    "before load_config(). measures_cost=True without "
+                    "resolve_cost is rejected. Step/time-only budgets do not "
+                    "need this."
+                )
+            return
+
+        if not adapters and not budget_llm_mod._unwired_llm_warned:
+            warnings.warn(
+                "'budget:' token/cost limits are enabled but no LLM adapter "
+                "is wired; model calls are not automatically protected. "
+                "Install mycelium-runtime[langgraph] or use instrument_llm / "
+                "register_llm_budget_adapter. Development mode allows this "
+                "fallback; profile: production fails startup.",
+                UserWarning,
+                stacklevel=3,
+            )
+            budget_llm_mod._unwired_llm_warned = True
 
     @staticmethod
     def _build_budget_guard_storage(raw: dict[str, Any]) -> BudgetGuardStorage:
@@ -905,6 +1049,86 @@ class MyceliumConfig:
                 "use 'memory' or 'file'"
             )
         raise ConfigError(f"unknown scope_guard storage type: {storage_type!r}")
+
+    @property
+    def completion_terminal_wired(self) -> bool:
+        """Whether a real terminal adapter was verified for ``completion:``."""
+        return bool(self._terminal_adapters)
+
+    def _activate_completion_terminal(self) -> None:
+        """Bind the contract and verify a terminal adapter is installed."""
+        from mycelium.completion_contract import TERMINAL_ADAPTER_LANGGRAPH
+
+        if self.completion is None:
+            set_active_completion_contract(None)
+            self._terminal_adapters = frozenset()
+            return
+
+        contract = self.build_completion_contract()
+        set_active_completion_contract(contract)
+
+        adapters = set(registered_terminal_adapters())
+        install_error: str | None = None
+        if self.langgraph_enabled:
+            try:
+                installed = install_langgraph_completion_terminal()
+            except LangGraphIntegrationError as exc:
+                installed = False
+                install_error = str(exc)
+            if installed:
+                adapters.add(TERMINAL_ADAPTER_LANGGRAPH)
+        self._terminal_adapters = frozenset(adapters)
+
+        if adapters:
+            return
+        self._reject_unwired_completion_terminal(install_error)
+
+    def _reject_unwired_completion_terminal(
+        self, install_error: str | None
+    ) -> None:
+        import mycelium.completion_contract as completion_mod
+
+        framework = "LangGraph"
+        if install_error:
+            detail = (
+                f"{framework} terminal adapter was not installed ({install_error})"
+            )
+        elif not self.langgraph_enabled:
+            detail = (
+                f"no terminal adapter was explicitly selected. Set "
+                f"integrations.langgraph.enabled: true (and install "
+                f"'mycelium-runtime[langgraph]') so {framework} END is "
+                f"protected automatically. Having LangGraph installed is "
+                f"not enough"
+            )
+        else:
+            detail = (
+                f"no supported terminal path is wired. Enable "
+                f"integrations.langgraph (install 'mycelium-runtime[langgraph]') "
+                f"so {framework} END is protected automatically"
+            )
+        manual = (
+            "Manual fallback for custom runtimes: wrap_final_message(...), "
+            "gate_graph_end(...), or register_terminal_adapter('custom') "
+            "before load_config()."
+        )
+        if self.profile == PROFILE_PRODUCTION:
+            raise ConfigError(
+                f"profile is {PROFILE_PRODUCTION!r} and 'completion:' is "
+                f"enabled, but {detail}. Completion checks would be bypassed. "
+                f"{manual}"
+            )
+        if not completion_mod._unwired_completion_warned:
+            warnings.warn(
+                "'completion:' is enabled but no terminal adapter is wired; "
+                f"{framework} END / final-message paths are not automatically "
+                "protected. Enable integrations.langgraph or use "
+                "wrap_final_message / gate_graph_end. Development mode allows "
+                "this fallback; profile: production fails startup.",
+                UserWarning,
+                stacklevel=3,
+            )
+            completion_mod._unwired_completion_warned = True
 
     def build_completion_contract(self) -> CompletionContract | None:
         """Build a CompletionContract if the config declares ``completion:``."""
@@ -1085,9 +1309,13 @@ class MyceliumConfig:
         if self.transition is not None:
             agent_id = self.transition.agent_id
         storage = self._build_outcome_storage(self.outcome_emit)
+        on_failure = _outcome_on_failure(
+            self.outcome_emit, profile=self.profile
+        )
         self._outcome_emitter = OutcomeEmitter(
             agent_id=str(agent_id),
             storage=storage,
+            on_failure=on_failure,
         )
         return self._outcome_emitter
 
@@ -1152,6 +1380,7 @@ class MyceliumConfig:
             provider_idempotency_key_ttl=(
                 tool_config.provider_idempotency_key_ttl
             ),
+            request_id_from=tool_config.request_id_from,
         )
 
     def _ledger_timing_kwargs(self) -> dict[str, float | bool]:
@@ -1334,6 +1563,36 @@ class MyceliumConfig:
             return FileOutcomeStorage(path)
         if storage_type == "memory":
             return InMemoryOutcomeStorage()
+        if storage_type == "postgres":
+            from mycelium.storage._helpers import resolve_storage_url
+            from mycelium.storage.postgres_outcome import PostgresOutcomeStorage
+
+            try:
+                dsn = resolve_storage_url(raw, url_key="url", alt_keys=("dsn",))
+            except ValueError as exc:
+                raise ConfigError(
+                    f"outcome_emit storage 'postgres' is incomplete: {exc}"
+                ) from exc
+            table = str(raw.get("table", "mycelium_outcomes"))
+            try:
+                return PostgresOutcomeStorage(dsn, table=table)
+            except ValueError as exc:
+                raise ConfigError(str(exc)) from exc
+        if storage_type == "redis":
+            from mycelium.storage._helpers import resolve_storage_url
+            from mycelium.storage.redis_outcome import RedisOutcomeStorage
+
+            try:
+                url = resolve_storage_url(raw, url_key="url")
+            except ValueError as exc:
+                raise ConfigError(
+                    f"outcome_emit storage 'redis' is incomplete: {exc}"
+                ) from exc
+            key_prefix = raw.get("key_prefix", raw.get("prefix", "mycelium:outcomes"))
+            try:
+                return RedisOutcomeStorage(url, key_prefix=str(key_prefix))
+            except ValueError as exc:
+                raise ConfigError(str(exc)) from exc
         raise ConfigError(f"unknown outcome_emit storage type: {storage_type!r}")
 
     def wrap_module(self, module: Any) -> Any:
@@ -1423,6 +1682,7 @@ def _budget_ceilings_from_config(raw: dict[str, Any]) -> BudgetCeilings:
     max_steps_raw = raw.get("max_steps")
     max_tokens_raw = raw.get("max_tokens")
     max_usd_raw = raw.get("max_usd")
+    max_cost_raw = raw.get("max_cost_usd")
     max_duration: float | None = None
     max_steps: int | None = None
     max_tokens: int | None = None
@@ -1440,11 +1700,25 @@ def _budget_ceilings_from_config(raw: dict[str, Any]) -> BudgetCeilings:
         if not isinstance(max_tokens_raw, int) or isinstance(max_tokens_raw, bool):
             raise ConfigError("'budget.max_tokens' must be a positive int")
         max_tokens = max_tokens_raw
+    parsed_usd: float | None = None
+    parsed_cost: float | None = None
     if max_usd_raw is not None:
         try:
-            max_usd = float(max_usd_raw)
+            parsed_usd = float(max_usd_raw)
         except (TypeError, ValueError) as exc:
             raise ConfigError("'budget.max_usd' must be a positive number") from exc
+    if max_cost_raw is not None:
+        try:
+            parsed_cost = float(max_cost_raw)
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(
+                "'budget.max_cost_usd' must be a positive number"
+            ) from exc
+    if parsed_usd is not None and parsed_cost is not None and parsed_usd != parsed_cost:
+        raise ConfigError(
+            "'budget.max_usd' and 'budget.max_cost_usd' disagree; use one"
+        )
+    max_usd = parsed_usd if parsed_usd is not None else parsed_cost
     try:
         return BudgetCeilings(
             max_duration=max_duration,
@@ -1454,6 +1728,43 @@ def _budget_ceilings_from_config(raw: dict[str, Any]) -> BudgetCeilings:
         )
     except ValueError as exc:
         raise ConfigError(f"budget: {exc}") from exc
+
+
+def _missing_usage_policy(
+    raw: dict[str, Any] | None,
+    *,
+    profile: str = PROFILE_DEVELOPMENT,
+) -> str:
+    """Return ``missing_usage_policy``, defaulting to ``warn``.
+
+    ``profile: production`` with token/cost limits treats an omitted policy
+    as ``error``. An explicit ``warn`` is rejected so production cannot be
+    silently weakened.
+    """
+    ceilings = _budget_ceilings_from_config(raw or {})
+    token_or_cost = ceilings.requires_usage_meter()
+    if raw is None:
+        return MISSING_USAGE_POLICY_WARN
+    if "missing_usage_policy" in raw:
+        value = raw["missing_usage_policy"]
+        if value not in MISSING_USAGE_POLICIES:
+            raise ConfigError(
+                f"'budget.missing_usage_policy' must be "
+                f"{MISSING_USAGE_POLICY_WARN!r} or "
+                f"{MISSING_USAGE_POLICY_ERROR!r}, got {value!r}"
+            )
+        if (
+            profile == PROFILE_PRODUCTION
+            and token_or_cost
+            and value == MISSING_USAGE_POLICY_WARN
+        ):
+            _reject_weaker_production_policy(
+                "budget.missing_usage_policy", str(value)
+            )
+        return str(value)
+    if profile == PROFILE_PRODUCTION and token_or_cost:
+        return MISSING_USAGE_POLICY_ERROR
+    return MISSING_USAGE_POLICY_WARN
 
 
 def _storage_settings(cfg: dict[str, Any] | None) -> dict[str, Any]:
@@ -1550,6 +1861,16 @@ def _parse_tool_config(
             )
         provider_idempotency_key_ttl = float(value)
 
+    request_id_from: str | None = None
+    if "request_id_from" in raw:
+        value = raw["request_id_from"]
+        if not isinstance(value, str) or not value.strip():
+            raise ConfigError(
+                f"tool '{name}': request_id_from must be a non-empty string "
+                "naming a server-owned business argument"
+            )
+        request_id_from = value.strip()
+
     callable_path = _parse_callable_path(
         raw.get("callable"),
         kind="tool",
@@ -1622,6 +1943,7 @@ def _parse_tool_config(
         spendability=spendability,
         provider_idempotency_key_param=provider_idempotency_key_param,
         provider_idempotency_key_ttl=provider_idempotency_key_ttl,
+        request_id_from=request_id_from,
         callable_path=callable_path,
         loop_guard=loop_guard_cfg,
         budget_guard=budget_guard_cfg,
@@ -1725,6 +2047,7 @@ def _apply_action_ledger_tools(
             spendability=existing.spendability,
             provider_idempotency_key_param=existing.provider_idempotency_key_param,
             provider_idempotency_key_ttl=existing.provider_idempotency_key_ttl,
+            request_id_from=existing.request_id_from,
             callable_path=existing.callable_path,
             loop_guard=existing.loop_guard,
             budget_guard=existing.budget_guard,
@@ -2027,6 +2350,138 @@ def _memory_storage_policy(
     return MEMORY_STORAGE_POLICY_WARN
 
 
+def _request_identity_policy(
+    action_ledger: dict[str, Any] | None,
+    *,
+    profile: str = PROFILE_DEVELOPMENT,
+) -> str:
+    """Return ``request_identity_policy``, defaulting to ``derived``.
+
+    ``profile: production`` treats an omitted policy as ``require_explicit``.
+    An explicit ``derived`` is rejected so production cannot be silently
+    weakened.
+    """
+    if action_ledger is not None and "request_identity_policy" in action_ledger:
+        raw = action_ledger["request_identity_policy"]
+        if raw not in REQUEST_IDENTITY_POLICIES:
+            raise ConfigError(
+                "'action_ledger.request_identity_policy' must be "
+                f"{REQUEST_IDENTITY_POLICY_DERIVED!r} or "
+                f"{REQUEST_IDENTITY_POLICY_REQUIRE_EXPLICIT!r}, got {raw!r}"
+            )
+        if (
+            profile == PROFILE_PRODUCTION
+            and raw == REQUEST_IDENTITY_POLICY_DERIVED
+        ):
+            raise ConfigError(
+                f"profile is {PROFILE_PRODUCTION!r} but "
+                "'action_ledger.request_identity_policy' is "
+                f"{REQUEST_IDENTITY_POLICY_DERIVED!r}; production requires "
+                f"{REQUEST_IDENTITY_POLICY_REQUIRE_EXPLICIT!r} and will not "
+                "silently weaken. Remove it or set it to "
+                f"{REQUEST_IDENTITY_POLICY_REQUIRE_EXPLICIT!r}."
+            )
+        return str(raw)
+    if profile == PROFILE_PRODUCTION:
+        return REQUEST_IDENTITY_POLICY_REQUIRE_EXPLICIT
+    return REQUEST_IDENTITY_POLICY_DERIVED
+
+
+def _outcome_on_failure(
+    outcome_emit: dict[str, Any] | None,
+    *,
+    profile: str = PROFILE_DEVELOPMENT,
+) -> str:
+    if outcome_emit is not None and "on_failure" in outcome_emit:
+        raw = outcome_emit["on_failure"]
+        if raw not in OUTCOME_ON_FAILURE_POLICIES:
+            raise ConfigError(
+                "'outcome_emit.on_failure' must be "
+                f"{OUTCOME_ON_FAILURE_WARN!r} or "
+                f"{OUTCOME_ON_FAILURE_ERROR!r}, got {raw!r}"
+            )
+        if profile == PROFILE_PRODUCTION and raw == OUTCOME_ON_FAILURE_WARN:
+            raise ConfigError(
+                f"profile is {PROFILE_PRODUCTION!r} but "
+                "'outcome_emit.on_failure' is 'warn'; production requires "
+                "'error' and will not silently weaken. Remove it or set it "
+                "to 'error'."
+            )
+        return str(raw)
+    if profile == PROFILE_PRODUCTION:
+        return OUTCOME_ON_FAILURE_ERROR
+    return OUTCOME_ON_FAILURE_WARN
+
+
+def _enforce_production_outcome_emit(
+    outcome_emit: dict[str, Any] | None,
+    *,
+    profile: str,
+) -> None:
+    """Production must declare durable outcome emission."""
+    if profile != PROFILE_PRODUCTION:
+        return
+    if outcome_emit is None:
+        raise ConfigError(
+            f"profile is {PROFILE_PRODUCTION!r} but 'outcome_emit:' is "
+            "missing. Production requires durable, machine-readable "
+            "decision evidence. Add outcome_emit with storage: "
+            "postgres (recommended for distributed), redis "
+            "(with persistence: required), or file (single-node)."
+        )
+    storage_type = outcome_emit.get("storage", "memory")
+    if storage_type == "memory":
+        raise ConfigError(
+            f"profile is {PROFILE_PRODUCTION!r} but outcome_emit uses "
+            "memory storage. Production requires a durable backend: "
+            "postgres (recommended), redis with persistence: required, "
+            "or file (single-node only)."
+        )
+    if storage_type == "file":
+        if not outcome_emit.get("path"):
+            raise ConfigError("outcome_emit storage 'file' requires a 'path'")
+    elif storage_type == "postgres":
+        from mycelium.storage._helpers import resolve_storage_url
+
+        try:
+            resolve_storage_url(outcome_emit, url_key="url", alt_keys=("dsn",))
+        except ValueError as exc:
+            raise ConfigError(
+                f"outcome_emit storage 'postgres' is incomplete: {exc}"
+            ) from exc
+        table = outcome_emit.get("table", "mycelium_outcomes")
+        if not isinstance(table, str) or not table:
+            raise ConfigError(
+                "outcome_emit storage 'postgres' table must be a non-empty string"
+            )
+    elif storage_type == "redis":
+        from mycelium.storage._helpers import resolve_storage_url
+
+        try:
+            resolve_storage_url(outcome_emit, url_key="url")
+        except ValueError as exc:
+            raise ConfigError(
+                f"outcome_emit storage 'redis' is incomplete: {exc}"
+            ) from exc
+        persistence = outcome_emit.get("persistence")
+        if persistence != "required":
+            raise ConfigError(
+                f"profile is {PROFILE_PRODUCTION!r} but outcome_emit "
+                "storage is redis without persistence: required. Redis is "
+                "only accepted as production-durable when you explicitly "
+                "acknowledge that AOF (or an equivalently durable Redis "
+                "deployment) is enabled. Mycelium cannot independently "
+                "verify the server's persistence configuration."
+            )
+    else:
+        raise ConfigError(
+            f"unknown outcome_emit storage type for production: "
+            f"{storage_type!r}. Use storage: postgres, redis "
+            "(with persistence: required), or file (single-node)."
+        )
+    _outcome_on_failure(outcome_emit, profile=profile)
+
+
 def _side_effecting_memory_tools(
     tools: dict[str, ToolConfig],
 ) -> list[tuple[str, SideEffectClass]]:
@@ -2199,6 +2654,8 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
     _enforce_memory_storage_policy(
         tools, transition, action_ledger_raw, profile=profile
     )
+    _request_identity_policy(action_ledger_raw, profile=profile)
+    _enforce_production_outcome_emit(outcome_emit_raw, profile=profile)
 
     tasks_raw = data.get("tasks", {})
     if not isinstance(tasks_raw, dict):
@@ -2290,6 +2747,7 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
                 f"'budget.on_missing_meter' must be one of "
                 f"{sorted(ON_MISSING_METER_MODES)}"
             )
+        _missing_usage_policy(budget_raw, profile=profile)
 
     scope_guard_raw = data.get("scope_guard")
     if scope_guard_raw is not None and not isinstance(scope_guard_raw, dict):
@@ -2387,7 +2845,7 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
 
     integrations = _parse_integrations(data)
 
-    return MyceliumConfig(
+    cfg = MyceliumConfig(
         tools=tools,
         tasks=tasks,
         registry_allowed=registry_allowed,
@@ -2409,6 +2867,9 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
         profile=profile,
         _audit_auto=audit_auto,
     )
+    cfg._activate_completion_terminal()
+    cfg._activate_llm_budget()
+    return cfg
 
 
 def load_config_from_string(text: str) -> MyceliumConfig:
@@ -2442,6 +2903,9 @@ __all__ = [
     "PROFILE_DEVELOPMENT",
     "PROFILE_PRODUCTION",
     "PROFILES",
+    "REQUEST_IDENTITY_POLICIES",
+    "REQUEST_IDENTITY_POLICY_DERIVED",
+    "REQUEST_IDENTITY_POLICY_REQUIRE_EXPLICIT",
     "MyceliumConfig",
     "ToolConfig",
     "TransitionConfig",

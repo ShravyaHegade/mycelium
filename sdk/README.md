@@ -61,7 +61,7 @@ Mycelium sits between your agent loop and your tools (after the LLM returns `too
 |---|---------------|-------------------|
 | **Core** | **AF-002 Observability black hole** | **Flagship:** any tool, any provider — prove run-or-not, at-most-once. Ledger · lease · gates · `Reconciler` · operator release · receipts (Gmail/Stripe adapters = demos) |
 | **Opt-in** | **AF-003 Infinite action loops** | `loop_guard:` — action-hash streak across *new* `tool_call_id`s; soft then hard; operator `mycelium loops release` |
-| **Opt-in** | **Budget / runaway spend (not AF-010)** | `budget:` — `max_duration` / `max_steps` / `max_tokens` / `max_usd`; `@budget_guard` on tools + **one-shot LLM wrap** (`instrument_llm` / `@budget_llm`); atomic `record_usage`; operator `mycelium budget release` |
+| **Opt-in** | **Budget / runaway spend (not AF-010)** | `budget:` — `max_duration` / `max_steps` / `max_tokens` / `max_usd`; tools auto-wrapped; **LLM turns auto-wired** on LangGraph/LangChain; `missing_usage_policy`; operator `mycelium budget release` |
 | **Opt-in** | **AF-004 Tool misuse** | `@bounded` input/output/scope checks; optional `ToolRegistry` allowlist — block before the tool runs |
 | **Opt-in** | **AF-006 Context corruption** | TTL cache (`@protect` / `Session`); optional `MessageValidator` / `HistoryGuard` before the next LLM turn |
 | **Opt-in** | **AF-007 Premature termination** | `completion:` — host checklist; unmarked **required** → refuse terminal; unmarked **optional** → warn and allow |
@@ -521,10 +521,29 @@ keeps ledger identity and provider dedupe aligned.
 |--------|---|--------------|
 | Same explicit `request_id` + same tool/scope/args | → | Same transition — return stored result or poll |
 | Same explicit `request_id` + **different** tool, scope, or meaningful args | → | Fail-closed identity conflict (`ToolBoundaryError` / hard-block) |
-| `request_id` omitted | → | Unchanged derived identity (`tool_call_id` + scope + args + policy) |
+| `request_id` omitted (development / `derived`) | → | Unchanged derived identity (`tool_call_id` + scope + args + policy) |
+| `request_id` omitted (production / `require_explicit`) | → | `MissingRequestIdentityError` for consequential tools |
 
 Mycelium does **not** infer “this is a retry” from arguments alone. If you
-omit `request_id`, a new `tool_call_id` is a new transition.
+omit `request_id` under the development `derived` policy, a new
+`tool_call_id` is a new transition. Production does not accept
+`tool_call_id` as a business ID.
+
+Optional YAML helper — derive identity from one trusted server-owned
+argument. Explicit `request_id` still wins. Mycelium does not infer
+identity from arbitrary fields:
+
+```yaml
+tools:
+  charge_customer:
+    side_effect_class: keyed_mutate
+    request_id_from: order_id
+    provider_idempotency_key_param: idempotency_key
+```
+
+That mints `charge_customer:order_id:ORD-123`. Pass the same stable value
+as the provider idempotency key yourself when the provider supports it —
+Mycelium does not silently assume the provider uses its request ID.
 
 When `request_id` is omitted, the derived transition key still encodes args
 (same `tool_call_id` + different args → different key). **By default Mycelium
@@ -1064,51 +1083,56 @@ Wrapper order: `@budget_guard` → `@loop_guard` → `@ledger` → `@bounded` �
 Loop guard stops *identical* action thrash. Budget stops **total burn** when
 every call is different — including pure LLM chat loops with no tools.
 
+Supported frameworks are wired automatically. Configure limits in YAML; do
+not call `BudgetGuard.check("llm")` or `record_usage()` on LangGraph /
+LangChain chat models. Mycelium checks step / token / cost / time **before**
+the provider call and records usage **once** from response metadata
+(`extract_token_usage`). Streaming aggregates chunks and records when the
+stream completes or closes — an incomplete stream is never treated as zero
+usage.
+
+| Meter | What it limits | Needs usage metadata? |
+|-------|----------------|------------------------|
+| `max_steps` | LLM + tool turns | No |
+| `max_duration` | Wall clock since run start | No |
+| `max_tokens` | Sum of input+output tokens | Yes (adapter) |
+| `max_usd` / `max_cost_usd` | Host-reported USD | Yes (cost resolver) |
+
 ```yaml
+integrations:
+  langgraph:
+    enabled: true
+
 budget:
   storage: file
   path: ./mycelium-budget.json
-  max_duration: 15m
-  max_steps: 40
-  max_tokens: 200000
-  max_usd: 5.00
-  warn_at: 0.8
-  on_missing_meter: hard   # if max_tokens/max_usd set but host never records
+  max_steps: 30
+  max_tokens: 100000
+  max_cost_usd: 10
+  missing_usage_policy: error   # warn is the library default
 ```
 
 ```python
-from mycelium import (
-    BudgetGuard,
-    budget_guard_sync,
-    budget_llm,
-    execution_scope,
-    instrument_langgraph_llm,
-    instrument_crewai_llm,
-)
-from mycelium.transition import TransitionScope
+from mycelium import load_config
 
-guard = BudgetGuard(max_steps=40, max_usd=5.0)
-
-# Prefer: wrap the model once (framework glue — not per provider).
-model = instrument_langgraph_llm(chat_model, guard)   # LangGraph / LangChain
-# llm = instrument_crewai_llm(crew_llm, guard)        # CrewAI
-# or: config.instrument_llm(chat_model)               # when budget: is in YAML
-
-@budget_llm(guard)   # raw Python loop
-def call_model(messages):
-    return client.complete(messages)
-
-with execution_scope(TransitionScope(thread_id="t", run_id="r1", node="agent")):
-    model.invoke(messages)   # check("llm") runs inside the wrap
-    # Optional: still record USD yourself (Mycelium never invents prices)
-    guard.record_usage(usd=0.02)
-
-@budget_guard_sync(guard)
-def charge(*, tool_call_id: str) -> None:
-    ...
+cfg = load_config("mycelium.yaml")
+# chat_model.invoke(...) / .ainvoke / .stream are gated automatically.
 ```
 
-Manual `guard.check("llm")` still works if you own the turn loop yourself.
+`missing_usage_policy: warn` (default) emits one warning per run and does
+not invent token counts. `error` marks the run's LLM accounting unknown and
+blocks later LLM calls (`BudgetAccountingError`). `profile: production`
+requires `error` whenever token/cost limits are set, verifies an
+**explicitly selected** LLM adapter at startup
+(`integrations.langgraph.enabled: true` or
+`register_llm_budget_adapter` — having LangGraph installed is not
+enough), and rejects `max_usd` unless a cost resolver is registered
+(`register_llm_cost_resolver`). Step/time-only budgets may run
+without token metadata.
+
+Custom providers only: `wrap_llm_callable` / `instrument_llm` /
+`register_llm_budget_adapter` / manual `check("llm")` + `record_usage()`.
+Official LangGraph/LangChain integrations do not need those calls.
 Soft warn (`warn_at`) → `warnings.warn` once per dimension; the step **still
 runs**. Hard → `LedgerHardBlockError` only at the declared ceiling (never kill
 mid-flight). Operator: `mycelium budget status|release` (`clear` /
@@ -1180,34 +1204,46 @@ contract.
 Resolved marks: `success` | `failed` | `abandoned` (abandoned needs a reason).
 Scope: `run_id` (fallback `thread_id`); missing scope → warn and skip.
 
+Supported frameworks are wired automatically. Configure the checklist in
+YAML; do not call `complete_run()` on LangGraph `invoke` / `ainvoke` /
+`stream`. Intermediate stream chunks are yielded as they arrive. The
+**last** (terminal) chunk is withheld until the contract passes.
+Unmarked **required** items refuse (`CompletionRefusedError`, the
+terminal chunk is never emitted); unmarked **optional** items warn and
+allow. Partial / cancelled streams skip the gate.
+
 ```yaml
+integrations:
+  langgraph:
+    enabled: true
+
 completion:
   storage: file
   path: ./mycelium-completion.json
   required:
-    - id: send_email
-    - id: write_pr
-  optional:
-    - id: post_slack
+    - id: charge_customer
+    - id: send_receipt
 ```
 
 ```python
-from mycelium import CompletionContract, wrap_final_message, execution_scope
-from mycelium.transition import TransitionScope
+from mycelium import load_config
 
-contract = CompletionContract(required=["send_email"], optional=["slack"])
-finalize = wrap_final_message(contract, lambda text: text)
-
-with execution_scope(TransitionScope(thread_id="t", run_id="r1", node="end")):
-    contract.mark("send_email", "success")
-    # optional still pending → allow_with_warnings
-    contract.complete_run()
-    finalize("Done.")
+cfg = load_config("mycelium.yaml")
+# graph.invoke(...) is gated automatically — no complete_run() call.
+cfg.mark_completion("charge_customer", "success", scope_key=run_id)
 ```
 
-Entry points (same gate): `complete_run()`, LangGraph
-`completion_gate_end(contract, config=...)` before END, or
-`wrap_final_message`. Wire at least one or the guard never fires.
+`profile: production` verifies an **explicitly selected** terminal adapter
+at startup. Having LangGraph installed is not enough — set
+`integrations.langgraph.enabled: true` or call
+`register_terminal_adapter(...)` before `load_config`. If `completion:`
+is enabled but no adapter was selected, load raises `ConfigError` so the
+app cannot look protected while checks are bypassed. Development mode
+warns and keeps the manual fallback.
+
+Custom runtimes only: `wrap_final_message`, `gate_graph_end`,
+`complete_run`, or `register_terminal_adapter(...)` before `load_config`.
+Official LangGraph integrations do not need those calls.
 
 ```bash
 mycelium completion status <run_id> --config mycelium.yaml
@@ -1409,31 +1445,79 @@ Separate YAML sections per guard type. Global ledger settings inherit into tools
 so you do not repeat storage paths on every function.
 
 **Deployments:** set `profile: production`. That does not change library defaults
-for omitted configs (still `warn`). It applies two fail-closed policies:
+for omitted configs (still `warn` / `derived`). It applies fail-closed
+policies:
 
 - `action_ledger.memory_storage_policy: error` — side-effecting tools cannot
   use memory storage
+- `action_ledger.request_identity_policy: require_explicit` —
+  `idempotent_mutate` / `keyed_mutate` / `non_idempotent_mutate` /
+  `irreversible` tools need a host-owned `request_id` (or
+  `request_id_from`) before claim or execution. Reads may keep derived
+  identity. `tool_call_id` / `run_id` / `thread_id` are not business IDs.
 - `loop_guard` / `scope_guard` `missing_run_id_policy: error` when those
   guards are enabled — missing `run_id` raises `MissingRunIdentityError`
-  before the guard, ledger claim, tool, or side effect. `thread_id` is not a
-  substitute; Mycelium never invents a random id.
+- `outcome_emit:` is required with durable storage (not memory). Prefer
+  `storage: postgres` for distributed deployments. `storage: file` is
+  single-node only. `storage: redis` needs `persistence: required` (AOF
+  or equivalently durable Redis; Mycelium cannot verify the server).
+  Emission failure is fail-closed.
 
-Explicit `warn` under production is rejected (`ConfigError`), not silently
-weakened. Omit `profile` or set `profile: development` for tests.
+Explicit weaker settings (`warn`, `derived`, memory outcomes) under
+production are rejected (`ConfigError`), not silently weakened. Omit
+`profile` or set `profile: development` for tests.
+
+`unclassified_policy: warn` remains an accepted product choice. Important
+tools should still declare `side_effect_class`.
 
 ```yaml
 profile: production
 
+integrations:
+  langgraph:
+    enabled: true
+
+transition:
+  agent_id: my-agent
+  policy_version: "2026.08.1"
+  reclaim_requires_death_signal: true
+
 action_ledger:
   storage: postgres
   dsn_env: MYCELIUM_POSTGRES_DSN
+  unclassified_policy: warn
+  memory_storage_policy: error
+  request_identity_policy: require_explicit
 
 loop_guard:
-  storage: file
+  missing_run_id_policy: error
 
 scope_guard:
+  missing_run_id_policy: error
+
+completion:
   storage: file
-  allowed_tools: from_registry
+  path: ./mycelium-completion.json
+  required: []
+
+budget:
+  storage: file
+  path: ./mycelium-budget.json
+  missing_usage_policy: error
+
+outcome_emit:
+  storage: postgres
+  url_env: DATABASE_URL
+  table: mycelium_outcomes
+  on_failure: error
+  # Single-node alternative:
+  # storage: file
+  # path: ./mycelium-outcomes.jsonl
+  # Redis Streams (requires durable Redis + explicit ack):
+  # storage: redis
+  # url_env: REDIS_URL
+  # key_prefix: mycelium:outcomes
+  # persistence: required
 ```
 
 **Minimum integration (3 steps):**
@@ -1593,16 +1677,29 @@ loudly the day it doesn't.
 
 **Solution:** opt-in `OutcomeEmitter` resolution telemetry plus a pinned
 metric, the **Duplicate Tool Transition Rate (DTTR)**, computed after the fact
-from flat append-only rows. Off by default; memory or file storage only in v1
-(no analytics SaaS dependency).
+from flat append-only rows. Off by default in development. `profile:
+production` requires `outcome_emit:` with durable storage (not memory).
+**Postgres** is the recommended distributed durable backend. **File** is
+single-node only. **Redis** uses Streams and is accepted in production only
+with `persistence: required` (you must enable AOF or an equivalently durable
+Redis deployment; Mycelium cannot independently verify that). Backend
+outages fail closed in production (`on_failure: error`).
 
 Enable it in YAML and every ledgered tool starts emitting:
 
 ```yaml
 outcome_emit:
-  storage: file                 # memory | file
-  path: ./mycelium-outcomes.jsonl
+  storage: postgres             # recommended multi-node durable
+  url_env: DATABASE_URL         # or url: / dsn: / dsn_env:
+  table: mycelium_outcomes
   long_running_after: 3600      # seconds (default: lease_ttl)
+  on_failure: error             # production default; development defaults to warn
+  # storage: file               # durable, single-node only
+  # path: ./mycelium-outcomes.jsonl
+  # storage: redis              # Streams; not durable unless Redis persistence is on
+  # url_env: REDIS_URL
+  # key_prefix: mycelium:outcomes
+  # persistence: required       # required in production; acknowledgement only
 ```
 
 Or pass an emitter directly:
@@ -1617,11 +1714,14 @@ def charge(amount):
     ...
 ```
 
-Rows are one JSON object per line, emitted only on resolution events — a
-dispatch resolving to a gate (`ALLOW` / `RETURN` / `HARD_BLOCK` /
-`SOFT_BLOCK`), the tool body starting / completing / failing, and operator
-releases. Poll ticks never emit. Emission is fault-tolerant: a storage
-failure is logged and swallowed, so telemetry can never break the tool path.
+Rows are flat JSON objects (NDJSON for file storage), emitted only on
+resolution events — a dispatch resolving to a gate (`ALLOW` / `RETURN` /
+`HARD_BLOCK` / `SOFT_BLOCK`), the tool body starting / completing / failing,
+and operator releases. Poll ticks never emit. Development emission is
+fault-tolerant (storage failures are logged and swallowed). Production
+emission is fail-closed: a required durable write failure raises
+`OutcomeEmitError` on success paths, and never replaces an existing
+tool/provider exception.
 
 Compute the metric with the CLI or the library:
 

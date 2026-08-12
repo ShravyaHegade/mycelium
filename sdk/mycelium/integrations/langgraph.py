@@ -153,6 +153,122 @@ def instrument_langgraph_tool(
     return wrapper
 
 
+def _stream_reached_end(graph: Any, config: Any) -> bool:
+    """True when the compiled graph has no further nodes (genuine END)."""
+    if not config:
+        return True
+    getter = getattr(graph, "get_state", None)
+    if getter is None:
+        return True
+    try:
+        snapshot = getter(config)
+    except Exception:
+        return True
+    nxt = getattr(snapshot, "next", None)
+    if not nxt:
+        return True
+    return len(tuple(nxt)) == 0
+
+
+def _run_active_completion_gate(config: dict[str, Any] | None) -> None:
+    from mycelium.completion_contract import get_active_completion_contract
+
+    contract = get_active_completion_contract()
+    if contract is None:
+        return
+    completion_gate_end(contract, config=config)
+
+
+def _maybe_gate_terminal(graph: Any, config: Any) -> None:
+    from mycelium.completion_contract import get_active_completion_contract
+
+    if get_active_completion_contract() is None:
+        return
+    if _stream_reached_end(graph, config):
+        _run_active_completion_gate(
+            config if isinstance(config, dict) else None
+        )
+
+
+def _gated_chunk_stream(graph: Any, chunks: Any, config: Any) -> Any:
+    """Yield intermediate chunks; withhold the last until the END gate passes."""
+    iterator = iter(chunks)
+    try:
+        held = next(iterator)
+    except StopIteration:
+        return
+    for chunk in iterator:
+        yield held
+        held = chunk
+    _maybe_gate_terminal(graph, config)
+    yield held
+
+
+async def _gated_chunk_astream(graph: Any, chunks: Any, config: Any) -> Any:
+    """Async counterpart of ``_gated_chunk_stream``."""
+    iterator = chunks.__aiter__()
+    try:
+        held = await iterator.__anext__()
+    except StopAsyncIteration:
+        return
+    async for chunk in iterator:
+        yield held
+        held = chunk
+    _maybe_gate_terminal(graph, config)
+    yield held
+
+
+def install_langgraph_completion_terminal() -> bool:
+    """Patch LangGraph ``stream`` / ``astream`` once so END runs CompletionContract.
+
+    Returns True when a real Pregel adapter is installed. Idempotent: a
+    second call does not wrap again. Intermediate chunks stream as they
+    arrive. The last chunk is withheld until the completion check passes
+    on a finished stream that reached END. Partial / cancelled streams
+    skip the gate and do not emit a held terminal chunk.
+    """
+    from mycelium.completion_contract import COMPLETION_WRAPPED_MARK
+
+    try:
+        from langgraph.pregel import Pregel
+    except ImportError:
+        return False
+
+    if getattr(Pregel.stream, COMPLETION_WRAPPED_MARK, False):
+        return True
+
+    original_stream = Pregel.stream
+    original_astream = Pregel.astream
+
+    @functools.wraps(original_stream)
+    def stream(self: Any, input: Any, config: Any = None, **kwargs: Any) -> Any:
+        from mycelium.completion_contract import get_active_completion_contract
+
+        inner = original_stream(self, input, config, **kwargs)
+        if get_active_completion_contract() is None:
+            yield from inner
+            return
+        yield from _gated_chunk_stream(self, inner, config)
+
+    @functools.wraps(original_astream)
+    async def astream(self: Any, input: Any, config: Any = None, **kwargs: Any) -> Any:
+        from mycelium.completion_contract import get_active_completion_contract
+
+        inner = original_astream(self, input, config, **kwargs)
+        if get_active_completion_contract() is None:
+            async for chunk in inner:
+                yield chunk
+            return
+        async for chunk in _gated_chunk_astream(self, inner, config):
+            yield chunk
+
+    setattr(stream, COMPLETION_WRAPPED_MARK, True)
+    setattr(astream, COMPLETION_WRAPPED_MARK, True)
+    Pregel.stream = stream  # type: ignore[method-assign]
+    Pregel.astream = astream  # type: ignore[method-assign]
+    return True
+
+
 def completion_gate_end(
     contract: Any,
     *,
@@ -162,21 +278,14 @@ def completion_gate_end(
 ) -> Any:
     """AF-007 adapter: call before a LangGraph END / last node returns.
 
+    Official integrations are patched automatically when ``completion:``
+    is enabled. Keep this for custom graphs that do not use Pregel
+    ``invoke`` / ``stream``.
+
     Resolves ``run_id`` from an explicit argument, else LangGraph
     ``config["configurable"]`` / ``config["run_id"]``, else active
     ``execution_scope``. Raises ``CompletionRefusedError`` when required
     subtasks are still pending.
-
-    Example (last node)::
-
-        from mycelium import load_config
-        from mycelium.integrations.langgraph import completion_gate_end
-
-        contract = load_config("mycelium.yaml").build_completion_contract()
-
-        def finalize(state, config):
-            completion_gate_end(contract, config=config)
-            return state
     """
     from mycelium.completion_contract import gate_graph_end
     from mycelium.transition import TransitionScope, execution_scope
@@ -241,4 +350,5 @@ __all__ = [
     "instrument_langgraph_tool",
     "instrument_langgraph_llm",
     "completion_gate_end",
+    "install_langgraph_completion_terminal",
 ]

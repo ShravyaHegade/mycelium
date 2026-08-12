@@ -10,6 +10,9 @@ from mycelium.action_ledger import (
     ARGS_DRIFT_SOFT,
     OPERATOR_RESOLUTION_COMPLETED,
     OPERATOR_RESOLUTION_NOT_EXECUTED,
+    REQUEST_IDENTITY_POLICIES,
+    REQUEST_IDENTITY_POLICY_DERIVED,
+    REQUEST_IDENTITY_POLICY_REQUIRE_EXPLICIT,
     UNCLASSIFIED_POLICY_STRICT,
     UNCLASSIFIED_POLICY_WARN,
     ActionLedger,
@@ -47,6 +50,9 @@ from mycelium.audit_receipt import (
 from mycelium.budget_guard import (
     KIND_LLM,
     KIND_TOOL,
+    MISSING_USAGE_POLICIES,
+    MISSING_USAGE_POLICY_ERROR,
+    MISSING_USAGE_POLICY_WARN,
     ON_MISSING_HARD,
     ON_MISSING_METER_MODES,
     ON_MISSING_OFF,
@@ -54,6 +60,8 @@ from mycelium.budget_guard import (
     VIOLATION_BUDGET,
     VIOLATION_BUDGET_WARN,
     VIOLATION_MISSING_METER,
+    VIOLATION_MISSING_USAGE,
+    BudgetAccountingError,
     BudgetCeilings,
     BudgetGuard,
     BudgetGuardStorage,
@@ -70,11 +78,18 @@ from mycelium.budget_guard import (
     parse_duration_seconds,
 )
 from mycelium.budget_llm import (
+    LlmBudgetAdapter,
     budget_llm,
+    extract_model_identity,
     extract_token_usage,
+    install_langgraph_llm_budget,
     instrument_crewai_llm,
     instrument_langgraph_llm,
     instrument_llm,
+    register_llm_budget_adapter,
+    register_llm_cost_resolver,
+    registered_llm_budget_adapters,
+    reset_llm_budget_state,
     wrap_llm_callable,
 )
 from mycelium.completion_contract import (
@@ -93,6 +108,9 @@ from mycelium.completion_contract import (
     InMemoryCompletionStorage,
     SubtaskMark,
     gate_graph_end,
+    register_terminal_adapter,
+    registered_terminal_adapters,
+    reset_completion_terminal_state,
     wrap_final_message,
 )
 from mycelium.config import (
@@ -135,9 +153,13 @@ from mycelium.loop_guard import (
 )
 from mycelium.message_validator import MessageValidationError, MessageValidator
 from mycelium.outcome_emit import (
+    OUTCOME_ON_FAILURE_ERROR,
+    OUTCOME_ON_FAILURE_POLICIES,
+    OUTCOME_ON_FAILURE_WARN,
     DttrReport,
     FileOutcomeStorage,
     InMemoryOutcomeStorage,
+    OutcomeEmitError,
     OutcomeEmitter,
     OutcomeRow,
     OutcomeStorage,
@@ -186,7 +208,9 @@ from mycelium.state_flush import (
     StateSnapshot,
 )
 from mycelium.storage.postgres_ledger import PostgresLedgerStorage, PostgresTaskLedgerStorage
+from mycelium.storage.postgres_outcome import PostgresOutcomeStorage
 from mycelium.storage.redis_ledger import RedisLedgerStorage, RedisTaskLedgerStorage
+from mycelium.storage.redis_outcome import RedisOutcomeStorage
 from mycelium.storage.sqlite_ledger import SqliteLedgerStorage, SqliteTaskLedgerStorage
 from mycelium.task_ledger import (
     TaskFileLedgerStorage,
@@ -212,6 +236,7 @@ from mycelium.tool_runner import ToolRunner
 from mycelium.transition import (
     HandoffLink,
     LeaseValidity,
+    MissingRequestIdentityError,
     ProviderKeyValidity,
     RetryPermission,
     SideEffectBoundary,
@@ -228,6 +253,7 @@ from mycelium.transition import (
     has_worker_death_evidence,
     parse_explicit_request_id,
     provider_key_validity,
+    request_id_from_argument,
     resolve_lease_validity,
 )
 from mycelium.transition_resolution import (
@@ -265,6 +291,15 @@ __all__ = [
     "OPERATOR_RESOLUTION_NOT_EXECUTED",
     "UNCLASSIFIED_POLICY_WARN",
     "UNCLASSIFIED_POLICY_STRICT",
+    "REQUEST_IDENTITY_POLICY_DERIVED",
+    "REQUEST_IDENTITY_POLICY_REQUIRE_EXPLICIT",
+    "REQUEST_IDENTITY_POLICIES",
+    "MissingRequestIdentityError",
+    "request_id_from_argument",
+    "OutcomeEmitError",
+    "OUTCOME_ON_FAILURE_WARN",
+    "OUTCOME_ON_FAILURE_ERROR",
+    "OUTCOME_ON_FAILURE_POLICIES",
     "MEMORY_STORAGE_POLICY_WARN",
     "PROFILE_DEVELOPMENT",
     "PROFILE_PRODUCTION",
@@ -291,6 +326,9 @@ __all__ = [
     "InMemoryAuditReceiptStorage",
     "verify_receipt",
     "KIND_LLM",
+    "MISSING_USAGE_POLICIES",
+    "MISSING_USAGE_POLICY_ERROR",
+    "MISSING_USAGE_POLICY_WARN",
     "KIND_TOOL",
     "ON_MISSING_HARD",
     "ON_MISSING_METER_MODES",
@@ -299,6 +337,8 @@ __all__ = [
     "VIOLATION_BUDGET",
     "VIOLATION_BUDGET_WARN",
     "VIOLATION_MISSING_METER",
+    "VIOLATION_MISSING_USAGE",
+    "BudgetAccountingError",
     "BudgetCeilings",
     "BudgetGuard",
     "BudgetGuardStorage",
@@ -314,9 +354,16 @@ __all__ = [
     "budget_guard_sync",
     "budget_llm",
     "extract_token_usage",
+    "LlmBudgetAdapter",
+    "extract_model_identity",
+    "install_langgraph_llm_budget",
     "instrument_crewai_llm",
     "instrument_langgraph_llm",
     "instrument_llm",
+    "register_llm_budget_adapter",
+    "register_llm_cost_resolver",
+    "registered_llm_budget_adapters",
+    "reset_llm_budget_state",
     "wrap_llm_callable",
     "parse_duration_seconds",
     "OutcomeEmitter",
@@ -324,6 +371,8 @@ __all__ = [
     "OutcomeStorage",
     "FileOutcomeStorage",
     "InMemoryOutcomeStorage",
+    "PostgresOutcomeStorage",
+    "RedisOutcomeStorage",
     "DttrReport",
     "TransitionDttr",
     "compute_dttr",
@@ -433,6 +482,9 @@ __all__ = [
     "InMemoryCompletionStorage",
     "SubtaskMark",
     "gate_graph_end",
+    "register_terminal_adapter",
+    "registered_terminal_adapters",
+    "reset_completion_terminal_state",
     "wrap_final_message",
     "ON_MISMATCH_HARD",
     "ON_MISMATCH_SOFT",

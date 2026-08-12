@@ -125,14 +125,58 @@ def lease_allows_renew(lease_until: float | None, *, now: float) -> bool:
     return resolve_lease_validity(lease_until, now=now) != LeaseValidity.EXPIRED
 
 
-def resolve_storage_url(raw: dict[str, Any], *, url_key: str = "url") -> str:
-    """Resolve a connection string from config or an environment variable."""
-    if url_key in raw:
-        return str(raw[url_key])
-    env_key = raw.get(f"{url_key}_env")
-    if env_key:
-        value = os.environ.get(str(env_key))
-        if not value:
-            raise ValueError(f"environment variable {env_key!r} is not set")
-        return value
-    raise ValueError(f"storage requires {url_key!r} or {url_key}_env")
+def expand_env_value(value: str) -> str:
+    """Expand ``$VAR`` / ``${VAR}`` placeholders from the process environment."""
+    return os.path.expandvars(value)
+
+
+def redact_secrets(text: str) -> str:
+    """Redact userinfo / password material from URLs and DSNs in messages."""
+    import re
+
+    # postgresql://user:pass@host → postgresql://***@host
+    # redis://:pass@host → redis://***@host
+    redacted = re.sub(
+        r"(?i)\b([a-z][a-z0-9+.-]*://)([^/\s:@]+):([^/\s@]+)@",
+        r"\1***@",
+        text,
+    )
+    redacted = re.sub(
+        r"(?i)\b([a-z][a-z0-9+.-]*://):([^/\s@]+)@",
+        r"\1***@",
+        redacted,
+    )
+    # password=... / passwd=... query or keyword forms
+    redacted = re.sub(
+        r"(?i)\b(password|passwd|pwd)\s*=\s*([^\s\"']+)",
+        r"\1=***",
+        redacted,
+    )
+    return redacted
+
+
+def resolve_storage_url(
+    raw: dict[str, Any],
+    *,
+    url_key: str = "url",
+    alt_keys: tuple[str, ...] = (),
+) -> str:
+    """Resolve a connection string from config or an environment variable.
+
+    Prefers ``url_key`` / ``{url_key}_env``, then each name in *alt_keys*
+    (e.g. ``("dsn",)`` so Postgres configs may use either ``url`` or ``dsn``).
+    Values support ``$VAR`` / ``${VAR}`` expansion.
+    """
+    keys = (url_key, *alt_keys)
+    for key in keys:
+        if key in raw and raw[key] is not None and str(raw[key]).strip():
+            return expand_env_value(str(raw[key]))
+        env_key = raw.get(f"{key}_env")
+        if env_key:
+            value = os.environ.get(str(env_key))
+            if not value:
+                raise ValueError(f"environment variable {env_key!r} is not set")
+            return expand_env_value(value)
+    labels = " or ".join(repr(k) for k in keys)
+    env_labels = " or ".join(f"{k}_env" for k in keys)
+    raise ValueError(f"storage requires {labels} or {env_labels}")

@@ -1,5 +1,8 @@
 """AF-007 demo: host checklist must be marked before terminal.
 
+LangGraph END is wired automatically from YAML (`completion:`). This
+script shows the custom-runtime fallback (`wrap_final_message`).
+
 Run from the sdk directory::
 
     python examples/completion_contract_checklist.py

@@ -141,7 +141,10 @@ side effects before “success”; declared subtasks never resolved.
 
 **Guard:** `completion:` host `required` / `optional` checklist; unmarked
 required → refuse (`CompletionRefusedError`); unmarked optional → warn and
-allow. Entry points: `complete_run()`, LangGraph END, `wrap_final_message`.
+allow. Supported frameworks wire LangGraph END automatically when
+`integrations.langgraph.enabled` is set. Production verifies an
+explicitly selected adapter at startup. Manual fallback:
+`complete_run()`, `gate_graph_end`, `wrap_final_message`.
 
 ---
 
@@ -191,8 +194,9 @@ tool boundary; stuck planners with no wall-clock ceiling.
 
 **Guard:** `budget:` / `@budget_guard` — `max_duration`, `max_steps`,
 `max_tokens`, `max_usd` (any subset). `@budget_guard` on tools; wrap the model
-once with `instrument_llm` / `@budget_llm` (or manual `check("llm")`) so LLM
-turns cannot skip the gate; atomic `record_usage` for tokens/USD; soft warn
+once automatically on LangGraph/LangChain (or `instrument_llm` / `@budget_llm`
+/ manual `check("llm")` for custom providers) so LLM turns cannot skip the
+gate; atomic `record_usage` for tokens/USD; `missing_usage_policy`; soft warn
 then `LedgerHardBlockError`
 on the next step (never mid-flight kill). Operator
 `mycelium budget status|release`. Loop guard (AF-003) ≠ spend budget.
