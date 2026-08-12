@@ -991,12 +991,79 @@ def cmd_budget_release(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """Read-only production-safety verification (never executes tools/LLMs)."""
+    import sys
+
+    from mycelium.doctor import exit_code_for_report, run_doctor
+    from mycelium.doctor.render import write_report
+
+    report = run_doctor(
+        args.config,
+        connectivity=not args.no_connectivity,
+        timeout_seconds=float(args.timeout),
+        verbose=bool(args.verbose),
+    )
+    write_report(
+        report,
+        as_json=bool(args.json),
+        verbose=bool(args.verbose),
+        stream=sys.stdout,
+    )
+    return exit_code_for_report(report, strict=bool(args.strict))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="mycelium",
         description="Mycelium runtime: scaffold config and utilities",
     )
     sub = parser.add_subparsers(dest="command", required=True)
+
+    doctor_parser = sub.add_parser(
+        "doctor",
+        help="Verify production safety configuration and wiring (read-only)",
+        description=(
+            "Read-only verification that Mycelium protections are actually "
+            "configured and detectably wired — not merely installed. Never "
+            "executes application tools, never calls an LLM, never writes "
+            "ledger/outcome rows, and never repairs config. "
+            "CI gate: mycelium doctor --config mycelium.yaml --strict --json"
+        ),
+    )
+    doctor_parser.add_argument(
+        "-c",
+        "--config",
+        type=Path,
+        default=Path("mycelium.yaml"),
+        help="Config path (default: ./mycelium.yaml)",
+    )
+    doctor_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit stable machine-readable JSON for CI",
+    )
+    doctor_parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Treat warnings as failures (exit 1)",
+    )
+    doctor_parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Include check ids, evidence kinds, and details",
+    )
+    doctor_parser.add_argument(
+        "--no-connectivity",
+        action="store_true",
+        help="Skip safe backend connectivity probes",
+    )
+    doctor_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=2.0,
+        help="Connectivity probe timeout in seconds (default: 2)",
+    )
 
     init_parser = sub.add_parser(
         "init",
@@ -1506,6 +1573,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "outcomes":
         if args.outcomes_command == "dttr":
             return cmd_outcomes_dttr(args)
+    if args.command == "doctor":
+        return cmd_doctor(args)
     return 1
 
 

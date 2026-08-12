@@ -374,6 +374,13 @@ Still can go wrong — even with everything above configured correctly:
   `persistence: required` acknowledgement (AOF or equivalently durable Redis
   — Mycelium cannot verify the server). A backend outage blocks successful
   paths rather than silently dropping decision evidence.
+- **Installation is not protection.** A package import or an installed
+  LangGraph wheel does not prove adapters are selected or that durable
+  backends are wired. Use `mycelium doctor --config mycelium.yaml --strict`
+  to verify configuration and detectable wiring. Doctor is read-only: it
+  does not execute tools, call LLMs, or replace application integration /
+  fault-injection tests. Some infrastructure properties (Redis persistence,
+  host call-site identity) remain operator assertions or not verifiable.
 
 
 ---

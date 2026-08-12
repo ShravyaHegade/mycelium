@@ -80,6 +80,15 @@
 #   → completion: requires a verified terminal adapter at startup
 #   Weaker explicit warn/derived/memory-outcome settings are rejected.
 #   unclassified_policy: warn remains an accepted product choice.
+# Verify with: mycelium doctor --config mycelium.yaml --strict
+
+# ---------------------------------------------------------------------------
+# deployment  (optional hint for mycelium doctor; omit is backward-compatible)
+#   topology: single_node | multi_node
+#   multi_node fails file/sqlite for shared ActionLedger / outcome_emit.
+# ---------------------------------------------------------------------------
+# deployment:
+#   topology: single_node
 
 # ---------------------------------------------------------------------------
 # integrations (optional framework metadata; core remains framework-agnostic)

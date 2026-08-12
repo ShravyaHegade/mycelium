@@ -126,6 +126,19 @@ from mycelium.config import (
     load_config,
     load_config_from_string,
 )
+from mycelium.doctor import (
+    EVIDENCE_CONNECTIVITY,
+    EVIDENCE_NOT_VERIFIABLE,
+    EVIDENCE_OPERATOR,
+    EVIDENCE_RUNTIME,
+    EVIDENCE_STATIC,
+    DoctorCheck,
+    DoctorReport,
+    DoctorStatus,
+    exit_code_for_report,
+    run_doctor,
+    run_doctor_on_config,
+)
 from mycelium.history_guard import HistoryGuard, HistoryTruncatedError
 from mycelium.loop_guard import (
     DEFAULT_CONSECUTIVE_SOFT,
@@ -396,6 +409,17 @@ __all__ = [
     "ConfigError",
     "MyceliumConfig",
     "TransitionConfig",
+    "DoctorCheck",
+    "DoctorReport",
+    "DoctorStatus",
+    "EVIDENCE_CONNECTIVITY",
+    "EVIDENCE_NOT_VERIFIABLE",
+    "EVIDENCE_OPERATOR",
+    "EVIDENCE_RUNTIME",
+    "EVIDENCE_STATIC",
+    "exit_code_for_report",
+    "run_doctor",
+    "run_doctor_on_config",
     "SideEffectClass",
     "SideEffectBoundary",
     "Spendability",

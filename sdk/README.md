@@ -1473,6 +1473,9 @@ tools should still declare `side_effect_class`.
 ```yaml
 profile: production
 
+deployment:
+  topology: multi_node   # or single_node; omit → doctor warns
+
 integrations:
   langgraph:
     enabled: true
@@ -1519,6 +1522,28 @@ outcome_emit:
   # key_prefix: mycelium:outcomes
   # persistence: required
 ```
+
+### `mycelium doctor` (verify protection is real)
+
+Installing Mycelium does not prove a deployment is protected. `mycelium doctor`
+is a **read-only** verifier for configuration and detectable wiring:
+
+```console
+$ mycelium doctor --config mycelium.yaml
+$ mycelium doctor --config mycelium.yaml --strict --json   # CI gate
+```
+
+It checks profile defaults, tool classification, business request identity,
+durable ActionLedger / outcome backends, run-id guard policies, completion and
+budget adapter selection, and optional `deployment.topology`. It never executes
+application tools, never calls an LLM, never writes ledger/outcome rows, and
+never repairs config.
+
+Evidence labels distinguish what Mycelium can prove (`statically_verified`,
+`runtime_registration_verified`, `connectivity_verified`) from what remains an
+**operator assertion** (for example Redis AOF) or is **not verifiable** from
+config alone (call-site `request_id` / `run_id` binding). Doctor does not
+replace integration tests or fault injection.
 
 **Minimum integration (3 steps):**
 

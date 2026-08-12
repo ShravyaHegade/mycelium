@@ -7,6 +7,13 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
 
 ### Added
 
+- **`mycelium doctor`:** read-only production-safety verification
+  (`--config`, `--json`, `--strict`, `--verbose`, `--no-connectivity`).
+  Checks profile/tool classification, request identity, durable ledgers,
+  run-id guards, completion/budget adapter wiring, outcome emission, and
+  optional `deployment.topology`. Never executes tools or LLM calls.
+  Exit `0`/`1`/`2`; CI gate:
+  `mycelium doctor --config mycelium.yaml --strict --json`.
 - **Production request identity:** `action_ledger.request_identity_policy`
   (`derived` development default, `require_explicit` in
   `profile: production`). Consequential tools must pass a host-owned

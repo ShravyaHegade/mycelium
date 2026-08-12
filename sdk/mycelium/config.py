@@ -358,6 +358,7 @@ class MyceliumConfig:
     scope_guard: dict[str, Any] | None = None
     state_authority: dict[str, Any] | None = None
     completion: dict[str, Any] | None = None
+    deployment: dict[str, Any] | None = None
     profile: str = PROFILE_DEVELOPMENT
     _audit_emitter: AuditReceiptEmitter | None = None
     _outcome_emitter: OutcomeEmitter | None = None
@@ -2596,6 +2597,31 @@ def _parse_integrations(data: dict[str, Any]) -> dict[str, dict[str, Any]] | Non
     return {"langgraph": {"enabled": enabled}}
 
 
+_DEPLOYMENT_TOPOLOGIES = frozenset({"single_node", "multi_node"})
+
+
+def _parse_deployment(data: dict[str, Any]) -> dict[str, Any] | None:
+    """Optional deployment topology hint for ``mycelium doctor``."""
+    raw = data.get("deployment")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ConfigError("'deployment' must be a mapping")
+    unknown = set(raw) - {"topology"}
+    if unknown:
+        names = ", ".join(sorted(str(name) for name in unknown))
+        raise ConfigError(f"unsupported 'deployment' option(s): {names}")
+    if "topology" not in raw:
+        return {}
+    topology = raw["topology"]
+    if topology not in _DEPLOYMENT_TOPOLOGIES:
+        raise ConfigError(
+            "'deployment.topology' must be 'single_node' or 'multi_node', "
+            f"got {topology!r}"
+        )
+    return {"topology": str(topology)}
+
+
 def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
     if not isinstance(data, dict):
         raise ConfigError("config root must be a mapping")
@@ -2844,6 +2870,7 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
         raise ConfigError("'state_flush' must be a mapping")
 
     integrations = _parse_integrations(data)
+    deployment = _parse_deployment(data)
 
     cfg = MyceliumConfig(
         tools=tools,
@@ -2864,6 +2891,7 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
         scope_guard=scope_guard_raw,
         state_authority=state_authority_raw,
         completion=completion_raw,
+        deployment=deployment,
         profile=profile,
         _audit_auto=audit_auto,
     )
