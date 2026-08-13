@@ -1013,6 +1013,32 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return exit_code_for_report(report, strict=bool(args.strict))
 
 
+def cmd_verify(args: argparse.Namespace) -> int:
+    """Empirical verification using synthetic operations only."""
+    import sys
+
+    from mycelium.verify import exit_code_for_verify, run_verify
+    from mycelium.verify.render import write_report
+
+    selected = list(args.scenario or [])
+    if not selected:
+        print("error: --scenario is required (repeatable, or 'all')", file=sys.stderr)
+        return 2
+    report = run_verify(
+        args.config,
+        scenarios=selected,
+        timeout_seconds=float(args.timeout),
+        rounds=int(args.rounds),
+        workers=int(args.workers),
+        keep_artifacts=bool(args.keep_artifacts),
+        connectivity=not args.no_connectivity,
+    )
+    write_report(report, as_json=bool(args.json), stream=sys.stdout)
+    if args.json and report.isolation_detail and report.refused:
+        print(report.isolation_detail, file=sys.stderr)
+    return exit_code_for_verify(report, strict=bool(args.strict))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="mycelium",
@@ -1063,6 +1089,73 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=2.0,
         help="Connectivity probe timeout in seconds (default: 2)",
+    )
+
+    verify_parser = sub.add_parser(
+        "verify",
+        help="Empirically verify production guarantees with synthetic scenarios",
+        description=(
+            "Run Doctor, then exercise Mycelium's production guarantees against "
+            "the configured storage backend using synthetic operations only. "
+            "Never executes application tools, never calls an LLM, never contacts "
+            "a real business provider. "
+            "CI: mycelium verify --config mycelium.yaml --scenario all --strict --json"
+        ),
+    )
+    verify_parser.add_argument(
+        "-c",
+        "--config",
+        type=Path,
+        default=Path("mycelium.yaml"),
+        help="Config path (default: ./mycelium.yaml)",
+    )
+    verify_parser.add_argument(
+        "--scenario",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help=(
+            "Scenario to run (repeatable): redispatch, contention, "
+            "worker-crash, storage-outage, ambiguous-effect, reconcile, or all"
+        ),
+    )
+    verify_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit stable machine-readable JSON on stdout (diagnostics on stderr)",
+    )
+    verify_parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Treat warnings as failures (exit 1)",
+    )
+    verify_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=30.0,
+        help="Per-scenario and subprocess timeout in seconds (default: 30)",
+    )
+    verify_parser.add_argument(
+        "--rounds",
+        type=int,
+        default=5,
+        help="Contention rounds (default: 5)",
+    )
+    verify_parser.add_argument(
+        "--workers",
+        type=int,
+        default=2,
+        help="Contention workers, 2-8 (default: 2)",
+    )
+    verify_parser.add_argument(
+        "--keep-artifacts",
+        action="store_true",
+        help="Retain namespaced synthetic evidence instead of cleaning up",
+    )
+    verify_parser.add_argument(
+        "--no-connectivity",
+        action="store_true",
+        help="Skip Doctor's backend connectivity probes",
     )
 
     init_parser = sub.add_parser(
@@ -1575,6 +1668,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_outcomes_dttr(args)
     if args.command == "doctor":
         return cmd_doctor(args)
+    if args.command == "verify":
+        return cmd_verify(args)
     return 1
 
 

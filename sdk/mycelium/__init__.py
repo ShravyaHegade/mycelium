@@ -274,6 +274,13 @@ from mycelium.transition_resolution import (
     repair_transition_fields,
     transition_needs_repair,
 )
+from mycelium.verify import (
+    IsolationRefused,
+    VerificationEvidence,
+    VerificationReport,
+    VerificationStatus,
+    run_verify,
+)
 
 try:
     __version__ = _package_version("mycelium-runtime")
@@ -420,6 +427,11 @@ __all__ = [
     "exit_code_for_report",
     "run_doctor",
     "run_doctor_on_config",
+    "IsolationRefused",
+    "VerificationEvidence",
+    "VerificationReport",
+    "VerificationStatus",
+    "run_verify",
     "SideEffectClass",
     "SideEffectBoundary",
     "Spendability",

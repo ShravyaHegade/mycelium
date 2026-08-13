@@ -379,8 +379,14 @@ Still can go wrong — even with everything above configured correctly:
   backends are wired. Use `mycelium doctor --config mycelium.yaml --strict`
   to verify configuration and detectable wiring. Doctor is read-only: it
   does not execute tools, call LLMs, or replace application integration /
-  fault-injection tests. Some infrastructure properties (Redis persistence,
-  host call-site identity) remain operator assertions or not verifiable.
+  fault-injection tests. Use `mycelium verify --config mycelium.yaml
+  --scenario all --strict` to empirically exercise synthetic failure
+  scenarios (redispatch, contention, crash windows, storage outage,
+  ambiguous effects, reconcile) against an isolated namespace. Verify never
+  runs application tools, never calls an LLM, and never contacts a real
+  business provider. Some infrastructure properties (Redis persistence,
+  host call-site identity) remain operator assertions or not verifiable
+  and are not converted into “proven” by a passing Verify report.
 
 
 ---

@@ -6,7 +6,7 @@
 #   Required for transition guards:  transition, action_ledger (+ tools entries you ledger)
 #   Optional:  integrations, task_ledger, state_flush, audit_receipt, outcome_emit,
 #              loop_guard, completion, state_authority, registry, runner,
-#              history_guard, message_validator — delete unused sections
+#              history_guard, message_validator, deployment, verify — delete unused sections
 #
 # Next steps
 #   1. Allowlist first: rename tools: / tasks: stubs, then copy those exact
@@ -80,7 +80,9 @@
 #   → completion: requires a verified terminal adapter at startup
 #   Weaker explicit warn/derived/memory-outcome settings are rejected.
 #   unclassified_policy: warn remains an accepted product choice.
-# Verify with: mycelium doctor --config mycelium.yaml --strict
+# Verify with:
+#   mycelium doctor --config mycelium.yaml --strict
+#   mycelium verify --config mycelium.yaml --scenario all --strict
 
 # ---------------------------------------------------------------------------
 # deployment  (optional hint for mycelium doctor; omit is backward-compatible)
@@ -89,6 +91,18 @@
 # ---------------------------------------------------------------------------
 # deployment:
 #   topology: single_node
+
+# ---------------------------------------------------------------------------
+# verify  (optional isolation permission for mycelium verify)
+#   Doctor inspects configuration. Verify runs synthetic failure scenarios
+#   against an isolated namespace (mycelium:verify:<uuid>:). It never executes
+#   application tools, never calls an LLM, and never contacts a real provider.
+#   allow_temporary_schema: postgres only — create a namespaced table instead
+#   of inserting prefixed rows into the configured production table. Off by
+#   default. Cleanup never uses DROP/TRUNCATE/FLUSHDB.
+# ---------------------------------------------------------------------------
+# verify:
+#   allow_temporary_schema: false
 
 # ---------------------------------------------------------------------------
 # integrations (optional framework metadata; core remains framework-agnostic)
