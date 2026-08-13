@@ -6,7 +6,7 @@
 #   Required for transition guards:  transition, action_ledger (+ tools entries you ledger)
 #   Optional:  integrations, task_ledger, state_flush, audit_receipt, outcome_emit,
 #              loop_guard, completion, state_authority, registry, runner,
-#              history_guard, message_validator — delete unused sections
+#              history_guard, message_validator, deployment, verify — delete unused sections
 #
 # Next steps
 #   1. Allowlist first: rename tools: / tasks: stubs, then copy those exact

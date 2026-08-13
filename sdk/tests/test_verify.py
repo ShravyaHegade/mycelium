@@ -24,7 +24,6 @@ from mycelium.verify.isolation import (
 from mycelium.verify.render import render_human, render_json
 from mycelium.verify.types import VerificationEvidence
 
-
 _TIMEOUT_MARKER: Path | None = None
 
 

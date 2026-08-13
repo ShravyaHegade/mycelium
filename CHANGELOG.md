@@ -15,7 +15,8 @@ milestone.
 - **`mycelium verify`:** empirical verification of production guarantees
   against the configured storage backend (`--scenario redispatch|contention|
   worker-crash|storage-outage|ambiguous-effect|reconcile|all`, `--json`,
-  `--strict`, `--timeout`, `--rounds`, `--workers`, `--keep-artifacts`).
+  `--strict`, `--timeout`, `--rounds`, `--workers`, `--keep-artifacts`,
+  `--no-connectivity`).
   Runs the same checks as `mycelium doctor`, then exercises synthetic
   failure scenarios only — never application tools, LLMs, or real
   providers. Isolated `mycelium:verify:<uuid>:` namespace; cleanup deletes

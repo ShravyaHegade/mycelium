@@ -7,10 +7,10 @@ those exact keys/rows on cleanup.
 
 from __future__ import annotations
 
+import shutil
 import tempfile
 import time
 import uuid
-import shutil
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
