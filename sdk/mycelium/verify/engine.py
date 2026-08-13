@@ -88,6 +88,13 @@ def _run_scenario(fn: Any, ctx: ScenarioContext) -> tuple[str, Any, list[str]]:
                     break
         if payload is None:
             _stop_scenario(pid)
+            while parent_conn.poll():
+                try:
+                    kind, value = parent_conn.recv()
+                except EOFError:
+                    break
+                if kind == "track":
+                    tracked.append(value)
             return "timeout", None, tracked
         os.waitpid(pid, 0)
         result, value, child_tracked = payload

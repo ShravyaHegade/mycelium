@@ -36,6 +36,17 @@ def _hanging_scenario(ctx) -> VerificationEvidence:
     raise AssertionError("deadline was not enforced")
 
 
+def _late_tracking_scenario(ctx) -> VerificationEvidence:
+    deadline = time.monotonic() + ctx.timeout_seconds * 0.9
+    while time.monotonic() < deadline:
+        time.sleep(0.001)
+    ctx.isolation.track(
+        ctx.isolation.namespace.request_id("redispatch", "late-timeout")
+    )
+    time.sleep(60)
+    raise AssertionError("deadline was not enforced")
+
+
 @pytest.fixture(autouse=True)
 def _reset_adapters() -> None:
     import importlib
@@ -504,6 +515,31 @@ def test_scenario_timeout_terminates_process_group(tmp_path: Path, monkeypatch) 
         time.sleep(0.02)
     else:
         pytest.fail(f"verifier subprocess {pid} survived timeout")
+
+
+def test_timeout_drains_late_tracking_before_cleanup(tmp_path: Path, monkeypatch) -> None:
+    import mycelium.verify.registry as registry
+    from mycelium.verify.isolation import IsolationSession
+
+    monkeypatch.setitem(registry._REGISTRY, "redispatch", _late_tracking_scenario)
+    cleaned: list[str] = []
+    original_cleanup = IsolationSession.cleanup
+
+    def capture_cleanup(self, *, keep_artifacts: bool = False) -> None:
+        cleaned.extend(self.tracked_ids)
+        original_cleanup(self, keep_artifacts=keep_artifacts)
+
+    monkeypatch.setattr(IsolationSession, "cleanup", capture_cleanup)
+    path = _write(tmp_path, _sqlite_dev(tmp_path))
+    report = run_verify(
+        path,
+        scenarios=["redispatch"],
+        connectivity=False,
+        timeout_seconds=0.5,
+    )
+
+    assert report.scenarios[0].status == VerificationStatus.ERROR
+    assert any(request_id.endswith(":late-timeout") for request_id in cleaned)
 
 
 def test_isolation_gate_storage_type() -> None:
