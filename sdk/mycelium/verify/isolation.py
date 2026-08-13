@@ -241,7 +241,10 @@ class IsolationSession:
     def artifact_paths(self) -> list[str]:
         if self._artifact_tmp is None or not self._artifact_tmp.exists():
             return []
-        return [str(path) for path in sorted(self._artifact_tmp.rglob("*"))]
+        return [
+            str(self._artifact_tmp),
+            *(str(path) for path in sorted(self._artifact_tmp.rglob("*"))),
+        ]
 
     def cleanup(self, *, keep_artifacts: bool = False) -> None:
         if self._closed:
@@ -548,15 +551,18 @@ def establish_isolation(
         session = opener(ns, raw, root)
         session.prepare_artifacts()
         session.probe()
-    except IsolationRefused:
+    except IsolationRefused as exc:
+        artifacts = session.artifact_paths() if session is not None and keep_artifacts else []
         if session is not None:
             session.cleanup(keep_artifacts=keep_artifacts)
-        raise
+        raise IsolationRefused(str(exc), artifacts=artifacts) from exc
     except Exception as exc:
+        artifacts = session.artifact_paths() if session is not None and keep_artifacts else []
         if session is not None:
             session.cleanup(keep_artifacts=keep_artifacts)
         raise IsolationRefused(
-            f"could not establish isolated {storage_type} backend: {redact_secrets(str(exc))}"
+            f"could not establish isolated {storage_type} backend: {redact_secrets(str(exc))}",
+            artifacts=artifacts,
         ) from exc
     return session
 

@@ -42,6 +42,11 @@ def render_human(report: VerificationReport) -> str:
     if report.framework_error:
         lines.append(f"Framework error:    {report.framework_error}")
         lines.append("")
+    for artifact in report.artifacts:
+        if Path(artifact).exists():
+            lines.append(f"Retained artifact:  {artifact}")
+    if report.artifacts:
+        lines.append("")
     for item in report.scenarios:
         label = _SCENARIO_LABELS.get(item.scenario, item.scenario)
         pad = f"{label:<16}"

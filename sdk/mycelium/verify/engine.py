@@ -300,6 +300,7 @@ def run_verify(
     isolation_detail = ""
     framework_error = None
     cleanup_error: str | None = None
+    refusal_artifacts: list[str] = []
     try:
         session = establish_isolation(config, keep_artifacts=keep_artifacts)
         isolation_status = VerificationStatus.PASS
@@ -418,6 +419,7 @@ def run_verify(
         refused = True
         isolation_status = VerificationStatus.FAIL
         isolation_detail = redact_secrets(str(exc))
+        refusal_artifacts = list(exc.artifacts)
     except Exception as exc:  # pragma: no cover - unexpected framework error
         framework_error = redact_secrets(str(exc))
     finally:
@@ -468,6 +470,7 @@ def run_verify(
         doctor=doctor_payload,
         refused=refused,
         framework_error=framework_error,
+        artifacts=refusal_artifacts,
     )
     report.overall_status = _overall(report)
     return report

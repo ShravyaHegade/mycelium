@@ -20,6 +20,10 @@ class VerificationStatus(str, Enum):
 class IsolationRefused(LedgerError):
     """Safe isolation could not be proven; verification must not proceed."""
 
+    def __init__(self, message: str, *, artifacts: list[str] | None = None) -> None:
+        super().__init__(message)
+        self.artifacts = list(artifacts or [])
+
 
 @dataclass
 class VerificationEvidence:
@@ -67,6 +71,7 @@ class VerificationReport:
     doctor: dict[str, Any] | None = None
     refused: bool = False
     framework_error: str | None = None
+    artifacts: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -90,6 +95,7 @@ class VerificationReport:
             "doctor": self.doctor,
             "refused": self.refused,
             "framework_error": self.framework_error,
+            "artifacts": self.artifacts,
         }
 
 

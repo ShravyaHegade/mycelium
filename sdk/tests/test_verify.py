@@ -572,6 +572,43 @@ def test_probe_failure_removes_partial_artifacts(tmp_path: Path) -> None:
     assert not artifact_root.exists()
 
 
+def test_probe_failure_reports_retained_artifacts(tmp_path: Path, monkeypatch) -> None:
+    import mycelium.verify.isolation as isolation
+
+    artifact_root = tmp_path / "retained-probe-artifacts"
+
+    def opener(namespace, raw, workdir):
+        artifact_root.mkdir()
+        (artifact_root / "probe.txt").write_text("probe evidence", encoding="utf-8")
+        return IsolationSession(
+            namespace=namespace,
+            backend="probe-retained",
+            topology_label="test",
+            restart_capable=False,
+            multiprocess_capable=False,
+            persistence_asserted=False,
+            _artifact_tmp=artifact_root,
+            _factory=lambda: (_ for _ in ()).throw(ConnectionError("probe failed")),
+        )
+
+    monkeypatch.setitem(isolation._ADAPTERS, "sqlite", opener)
+    path = _write(tmp_path, _sqlite_dev(tmp_path))
+    report = run_verify(
+        path,
+        scenarios=["redispatch"],
+        connectivity=False,
+        keep_artifacts=True,
+    )
+
+    assert report.refused is True
+    assert report.artifacts == [str(artifact_root), str(artifact_root / "probe.txt")]
+    assert all(Path(artifact).exists() for artifact in report.artifacts)
+    payload = json.loads(render_json(report))
+    human = render_human(report)
+    assert payload["artifacts"] == report.artifacts
+    assert all(artifact in human for artifact in report.artifacts)
+
+
 def test_timeout_reports_retained_artifacts(tmp_path: Path, monkeypatch) -> None:
     import mycelium.verify.registry as registry
 
