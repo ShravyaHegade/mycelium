@@ -3,7 +3,12 @@
 Release policy: **batch; calm over velocity.** Prefer one coherent cut over many
 small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEASE.md).
 
-## Unreleased
+## 1.32.0 (2026-08-13)
+
+MINOR: production verification batch. Read-only readiness diagnosis, synthetic
+failure-scenario proofs, strict production identity and adapter wiring, and
+distributed durable outcome evidence ship together as one deployment-trust
+milestone.
 
 ### Added
 
