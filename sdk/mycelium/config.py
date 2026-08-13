@@ -359,6 +359,7 @@ class MyceliumConfig:
     state_authority: dict[str, Any] | None = None
     completion: dict[str, Any] | None = None
     deployment: dict[str, Any] | None = None
+    verify: dict[str, Any] | None = None
     profile: str = PROFILE_DEVELOPMENT
     _audit_emitter: AuditReceiptEmitter | None = None
     _outcome_emitter: OutcomeEmitter | None = None
@@ -2622,6 +2623,23 @@ def _parse_deployment(data: dict[str, Any]) -> dict[str, Any] | None:
     return {"topology": str(topology)}
 
 
+def _parse_verify(data: dict[str, Any]) -> dict[str, Any] | None:
+    """Optional isolation settings for ``mycelium verify``."""
+    raw = data.get("verify")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ConfigError("'verify' must be a mapping")
+    unknown = set(raw) - {"allow_temporary_schema"}
+    if unknown:
+        names = ", ".join(sorted(str(name) for name in unknown))
+        raise ConfigError(f"unsupported 'verify' option(s): {names}")
+    allow = raw.get("allow_temporary_schema", False)
+    if not isinstance(allow, bool):
+        raise ConfigError("'verify.allow_temporary_schema' must be a boolean")
+    return {"allow_temporary_schema": allow}
+
+
 def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
     if not isinstance(data, dict):
         raise ConfigError("config root must be a mapping")
@@ -2871,6 +2889,7 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
 
     integrations = _parse_integrations(data)
     deployment = _parse_deployment(data)
+    verify = _parse_verify(data)
 
     cfg = MyceliumConfig(
         tools=tools,
@@ -2892,6 +2911,7 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
         state_authority=state_authority_raw,
         completion=completion_raw,
         deployment=deployment,
+        verify=verify,
         profile=profile,
         _audit_auto=audit_auto,
     )
