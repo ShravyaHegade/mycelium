@@ -450,10 +450,17 @@ def join_workers(procs: list[mp.Process], timeout: float) -> None:
 
 def terminate_owned(procs: list[mp.Process]) -> None:
     for proc in procs:
-        if proc.is_alive():
-            proc.kill()
+        try:
+            if proc.is_alive():
+                proc.kill()
+        except ValueError:
+            continue
     for proc in procs:
-        proc.join(timeout=2)
+        try:
+            proc.join(timeout=2)
+            proc.close()
+        except ValueError:
+            continue
 
 
 __all__ = [

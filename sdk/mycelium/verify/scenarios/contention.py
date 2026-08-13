@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import tempfile
 import time
 from pathlib import Path
 
@@ -52,7 +51,7 @@ def run_contention(ctx: ScenarioContext) -> VerificationEvidence:
 
     workers = max(2, min(int(ctx.workers), 8))
     rounds = max(1, min(int(ctx.rounds), 20))
-    work = Path(tempfile.mkdtemp(prefix="mycelium-verify-contention-"))
+    work = iso.artifact_dir("contention-")
     max_exec = 0
     round_fail = False
     fail_reason = ""

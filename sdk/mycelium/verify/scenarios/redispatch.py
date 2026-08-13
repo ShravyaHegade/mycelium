@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import tempfile
 import time
 
 from mycelium.action_ledger import LedgerHardBlockError
@@ -17,17 +16,16 @@ def run_redispatch(ctx: ScenarioContext) -> VerificationEvidence:
     started = time.time()
     iso = ctx.isolation
     request_id = iso.track(iso.namespace.request_id("redispatch", "stable"))
-    tmp = tempfile.NamedTemporaryFile(prefix="mycelium-verify-exec-", delete=False)
-    tmp.close()
+    artifact = iso.artifact_file("redispatch-")
     storage = iso.open_storage()
     with execution_scope(TransitionScope(thread_id="verify", run_id="verify")):
-        tool = make_tool(storage, tmp.name)
+        tool = make_tool(storage, artifact)
         first = tool(1, request_id=request_id)
         second = tool(1, request_id=request_id)
 
     restarted = iso.open_fresh_client()
     with execution_scope(TransitionScope(thread_id="verify", run_id="verify")):
-        tool2 = make_tool(restarted, tmp.name)
+        tool2 = make_tool(restarted, artifact)
         third = tool2(1, request_id=request_id)
         drift_blocked = False
         try:
@@ -37,7 +35,7 @@ def run_redispatch(ctx: ScenarioContext) -> VerificationEvidence:
         except Exception as exc:  # noqa: BLE001
             drift_blocked = "drift" in str(exc).lower() or "differ" in str(exc).lower()
 
-    executions = count_executions(tmp.name)
+    executions = count_executions(artifact)
     limitations: list[str] = []
     observed = (
         f"body_executions={executions}; first={first!r}; "
@@ -77,7 +75,7 @@ def run_redispatch(ctx: ScenarioContext) -> VerificationEvidence:
             "identity drift fail-closed"
         ),
         observed_behavior=observed,
-        artifacts=[tmp.name],
+        artifacts=[artifact],
         limitations=limitations,
         status=status,
         summary=summary,

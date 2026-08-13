@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import tempfile
 import time
 
 from mycelium.action_ledger import LedgerStorageUnavailableError
@@ -28,8 +27,7 @@ class _SelectiveBoomEmitter:
 def run_storage_outage(ctx: ScenarioContext) -> VerificationEvidence:
     started = time.time()
     iso = ctx.isolation
-    tmp = tempfile.NamedTemporaryFile(prefix="mycelium-verify-outage-", delete=False)
-    tmp.close()
+    artifact = iso.artifact_file("outage-")
     inner = iso.open_raw_inner()
     expected_type = type(inner).__name__
     fault = FaultInjectingStorage(inner)
@@ -40,11 +38,11 @@ def run_storage_outage(ctx: ScenarioContext) -> VerificationEvidence:
     def _run(request_suffix: str, **tool_kwargs):
         rid = iso.track(iso.namespace.request_id("outage", request_suffix))
         with execution_scope(TransitionScope(thread_id="verify", run_id="verify")):
-            tool = make_tool(storage, tmp.name, **tool_kwargs)
+            tool = make_tool(storage, artifact, **tool_kwargs)
             return rid, tool(1, request_id=rid)
 
     # 1. Backend unavailable before claim.
-    before = count_executions(tmp.name)
+    before = count_executions(artifact)
     fault.fail_get = True
     fault.fail_claim = True
     try:
@@ -57,7 +55,7 @@ def run_storage_outage(ctx: ScenarioContext) -> VerificationEvidence:
             decisions.append(f"pre-claim:{type(exc).__name__}")
         else:
             failures.append(f"pre-claim hid outage as {type(exc).__name__}: {exc}")
-    if count_executions(tmp.name) != before:
+    if count_executions(artifact) != before:
         failures.append("synthetic tool ran although the claim could not be recorded")
     if fault.inner_type != expected_type:
         failures.append(f"backend fallback detected ({expected_type} -> {fault.inner_type})")
@@ -65,7 +63,7 @@ def run_storage_outage(ctx: ScenarioContext) -> VerificationEvidence:
     fault.fail_claim = False
 
     # 2. Failure while claiming.
-    before = count_executions(tmp.name)
+    before = count_executions(artifact)
     fault.fail_claim = True
     try:
         _run("during-claim")
@@ -75,7 +73,7 @@ def run_storage_outage(ctx: ScenarioContext) -> VerificationEvidence:
             decisions.append("during-claim:unavailable")
         else:
             failures.append(f"during-claim: {type(exc).__name__}: {exc}")
-    if count_executions(tmp.name) != before:
+    if count_executions(artifact) != before:
         failures.append("body ran during claim outage")
     fault.fail_claim = False
 
@@ -97,7 +95,7 @@ def run_storage_outage(ctx: ScenarioContext) -> VerificationEvidence:
     fault._set_count = 0
     fault.fail_set = True
     with execution_scope(TransitionScope(thread_id="verify", run_id="verify")):
-        tool = make_tool(storage, tmp.name, provider=SyntheticProvider())
+        tool = make_tool(storage, artifact, provider=SyntheticProvider())
         _expect_outage("body-start", lambda: tool(1, request_id=rid, op_id="body-start"))
     fault.fail_set = False
 
@@ -106,7 +104,7 @@ def run_storage_outage(ctx: ScenarioContext) -> VerificationEvidence:
     fault._set_count = 0
     fault.fail_nth_set = 2
     with execution_scope(TransitionScope(thread_id="verify", run_id="verify")):
-        tool = make_tool(storage, tmp.name, provider=SyntheticProvider())
+        tool = make_tool(storage, artifact, provider=SyntheticProvider())
         _expect_outage("boundary-write", lambda: tool(1, request_id=rid, op_id="boundary"))
     fault.fail_nth_set = None
     fault._set_count = 0
@@ -114,7 +112,7 @@ def run_storage_outage(ctx: ScenarioContext) -> VerificationEvidence:
     # 5. Failure while completing. Silent success is a false PASS.
     rid = iso.track(iso.namespace.request_id("outage", "complete"))
     with execution_scope(TransitionScope(thread_id="verify", run_id="verify")):
-        tool = make_tool(storage, tmp.name)
+        tool = make_tool(storage, artifact)
         fault.fail_transition = True
         try:
             _expect_outage("complete", lambda: tool(1, request_id=rid))
@@ -124,11 +122,11 @@ def run_storage_outage(ctx: ScenarioContext) -> VerificationEvidence:
     # 6. Recovery + redispatch must not duplicate if a successful claim exists.
     recover_id = iso.track(iso.namespace.request_id("outage", "recover"))
     with execution_scope(TransitionScope(thread_id="verify", run_id="verify")):
-        tool = make_tool(storage, tmp.name)
+        tool = make_tool(storage, artifact)
         tool(1, request_id=recover_id)
-        before = count_executions(tmp.name)
+        before = count_executions(artifact)
         tool(1, request_id=recover_id)
-        after = count_executions(tmp.name)
+        after = count_executions(artifact)
     if after != before:
         failures.append("recovery redispatch executed the body again")
     else:
@@ -140,7 +138,7 @@ def run_storage_outage(ctx: ScenarioContext) -> VerificationEvidence:
     with execution_scope(TransitionScope(thread_id="verify", run_id="verify")):
         tool = make_tool(
             storage,
-            tmp.name,
+            artifact,
             provider=SyntheticProvider(),
             fail_after_effect=True,
             outcome_emitter=emitter,
@@ -159,7 +157,7 @@ def run_storage_outage(ctx: ScenarioContext) -> VerificationEvidence:
             else:
                 decisions.append(f"emit:{type(exc).__name__}")
 
-    executions = count_executions(tmp.name)
+    executions = count_executions(artifact)
     ok = not failures
     limitations = ["fault-injecting wrapper; not a live network partition"]
     if iso.backend in {"file", "sqlite", "memory"}:
@@ -182,7 +180,7 @@ def run_storage_outage(ctx: ScenarioContext) -> VerificationEvidence:
             "cannot hide a tool exception"
         ),
         observed_behavior="; ".join(failures or decisions),
-        artifacts=[tmp.name],
+        artifacts=[artifact],
         limitations=limitations,
         status=VerificationStatus.PASS if ok else VerificationStatus.FAIL,
         summary="failed closed; no fallback" if ok else "; ".join(failures)[:200],

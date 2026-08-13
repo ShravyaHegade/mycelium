@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import tempfile
 import time
 from pathlib import Path
 
@@ -55,7 +54,7 @@ def run_worker_crash(ctx: ScenarioContext) -> VerificationEvidence:
             remediation="Use file/sqlite/postgres/redis.",
         )
 
-    work = Path(tempfile.mkdtemp(prefix="mycelium-verify-crash-"))
+    work = iso.artifact_dir("worker-crash-")
     lease_ttl = 1.0
     decisions: list[str] = []
     failures: list[str] = []

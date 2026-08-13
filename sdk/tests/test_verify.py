@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import multiprocessing as mp
+import os
+import time
 from pathlib import Path
 
 import pytest
@@ -17,6 +20,20 @@ from mycelium.verify.isolation import (
     establish_isolation,
 )
 from mycelium.verify.render import render_human, render_json
+from mycelium.verify.types import VerificationEvidence
+
+
+_TIMEOUT_MARKER: Path | None = None
+
+
+def _hanging_scenario(ctx) -> VerificationEvidence:
+    proc = mp.get_context("fork").Process(target=time.sleep, args=(60,))
+    proc.start()
+    ctx.owned_procs.append(proc)
+    assert _TIMEOUT_MARKER is not None
+    _TIMEOUT_MARKER.write_text(str(proc.pid), encoding="utf-8")
+    time.sleep(60)
+    raise AssertionError("deadline was not enforced")
 
 
 @pytest.fixture(autouse=True)
@@ -214,7 +231,7 @@ def test_ambiguous_effect_and_reconcile(tmp_path: Path) -> None:
     )
     statuses = {item.scenario: item.status for item in report.scenarios}
     assert statuses["ambiguous-effect"] == VerificationStatus.PASS
-    assert statuses["reconcile"] == VerificationStatus.PASS
+    assert statuses["reconcile"] == VerificationStatus.PASS, report.scenarios[1].observed_behavior
 
 
 def test_memory_skips_multiprocess_and_warns_redispatch(tmp_path: Path) -> None:
@@ -452,9 +469,41 @@ def test_keep_artifacts_and_cleanup(tmp_path: Path) -> None:
         keep_artifacts=True,
     )
     assert report.scenarios[0].artifacts
-    # Default cleanup must not raise even if artifacts were already removed.
+    assert all(Path(item).exists() for item in report.scenarios[0].artifacts)
     report2 = run_verify(path, scenarios=["redispatch"], connectivity=False)
     assert report2.scenarios[0].status == VerificationStatus.PASS
+    assert all(not Path(item).exists() for item in report2.scenarios[0].artifacts)
+
+
+def test_scenario_timeout_terminates_process_group(tmp_path: Path, monkeypatch) -> None:
+    import mycelium.verify.registry as registry
+
+    global _TIMEOUT_MARKER
+    _TIMEOUT_MARKER = tmp_path / "worker.pid"
+    monkeypatch.setitem(registry._REGISTRY, "redispatch", _hanging_scenario)
+    path = _write(tmp_path, _sqlite_dev(tmp_path))
+
+    started = time.monotonic()
+    report = run_verify(
+        path,
+        scenarios=["redispatch"],
+        connectivity=False,
+        timeout_seconds=0.25,
+    )
+
+    assert time.monotonic() - started < 3
+    assert report.scenarios[0].status == VerificationStatus.ERROR
+    assert exit_code_for_verify(report) == 1
+    pid = int(_TIMEOUT_MARKER.read_text(encoding="utf-8"))
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.02)
+    else:
+        pytest.fail(f"verifier subprocess {pid} survived timeout")
 
 
 def test_isolation_gate_storage_type() -> None:

@@ -10,6 +10,7 @@ from __future__ import annotations
 import tempfile
 import time
 import uuid
+import shutil
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -191,7 +192,9 @@ class IsolationSession:
         repr=False, default=lambda: InMemoryLedgerStorage()
     )
     _cleanup: Callable[[list[str]], None] = field(repr=False, default=lambda ids: None)
-    _tmp: tempfile.TemporaryDirectory[str] | None = None
+    _tmp: Path | None = None
+    _artifact_tmp: Path | None = None
+    _track_callback: Callable[[str], None] | None = field(repr=False, default=None)
     _closed: bool = False
 
     def open_raw_inner(self) -> LedgerStorage:
@@ -213,7 +216,27 @@ class IsolationSession:
             raise IsolationRefused("synthetic request_id escaped verification namespace")
         if request_id not in self.tracked_ids:
             self.tracked_ids.append(request_id)
+            if self._track_callback is not None:
+                self._track_callback(request_id)
         return request_id
+
+    def prepare_artifacts(self) -> None:
+        if self._artifact_tmp is None:
+            self._artifact_tmp = Path(tempfile.mkdtemp(prefix="mycelium-verify-artifacts-"))
+
+    def artifact_file(self, prefix: str) -> str:
+        import os
+
+        self.prepare_artifacts()
+        assert self._artifact_tmp is not None
+        fd, path = tempfile.mkstemp(prefix=prefix, dir=self._artifact_tmp)
+        os.close(fd)
+        return path
+
+    def artifact_dir(self, prefix: str) -> Path:
+        self.prepare_artifacts()
+        assert self._artifact_tmp is not None
+        return Path(tempfile.mkdtemp(prefix=prefix, dir=self._artifact_tmp))
 
     def cleanup(self, *, keep_artifacts: bool = False) -> None:
         if self._closed:
@@ -226,7 +249,12 @@ class IsolationSession:
                 errors.append(exc)
             if self._tmp is not None:
                 try:
-                    self._tmp.cleanup()
+                    shutil.rmtree(self._tmp)
+                except Exception as exc:
+                    errors.append(exc)
+            if self._artifact_tmp is not None:
+                try:
+                    shutil.rmtree(self._artifact_tmp)
                 except Exception as exc:
                     errors.append(exc)
         self._closed = True
@@ -270,8 +298,8 @@ def _file_session(
 ) -> IsolationSession:
     from mycelium.action_ledger import FileLedgerStorage
 
-    tmp = tempfile.TemporaryDirectory(prefix="mycelium-verify-")
-    path = Path(tmp.name) / "ledger.json"
+    tmp = Path(tempfile.mkdtemp(prefix="mycelium-verify-"))
+    path = tmp / "ledger.json"
     return IsolationSession(
         namespace=ns,
         backend="file",
@@ -292,8 +320,8 @@ def _sqlite_session(
 ) -> IsolationSession:
     from mycelium.storage.sqlite_ledger import SqliteLedgerStorage
 
-    tmp = tempfile.TemporaryDirectory(prefix="mycelium-verify-")
-    path = Path(tmp.name) / "ledger.db"
+    tmp = Path(tempfile.mkdtemp(prefix="mycelium-verify-"))
+    path = tmp / "ledger.db"
     table = "mycelium_verify_ledger"
     return IsolationSession(
         namespace=ns,
@@ -511,6 +539,7 @@ def establish_isolation(
     root = workdir if workdir is not None else Path(".")
     try:
         session = opener(ns, raw, root)
+        session.prepare_artifacts()
         session.probe()
     except IsolationRefused:
         raise

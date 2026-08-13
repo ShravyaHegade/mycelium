@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import multiprocessing as mp
+import os
+import signal
 import time
 from pathlib import Path
 from typing import Any
@@ -21,6 +24,76 @@ from mycelium.verify.types import VerificationEvidence, VerificationReport, Veri
 from mycelium.verify.workers import terminate_owned
 
 ensure_builtin_scenarios_registered()
+
+
+def _scenario_child(fn: Any, ctx: ScenarioContext, conn: Any) -> None:
+    os.setsid()
+    ctx.isolation._track_callback = lambda request_id: conn.send(("track", request_id))
+    try:
+        try:
+            result = ("ok", fn(ctx), list(ctx.isolation.tracked_ids))
+        except IsolationRefused as exc:
+            result = ("refused", redact_secrets(str(exc)), list(ctx.isolation.tracked_ids))
+        except Exception as exc:  # noqa: BLE001
+            result = (
+                "error",
+                (type(exc).__name__, redact_secrets(str(exc))),
+                list(ctx.isolation.tracked_ids),
+            )
+        conn.send(("result", result))
+    finally:
+        terminate_owned(ctx.owned_procs)
+        conn.close()
+
+
+def _stop_scenario(pid: int) -> None:
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    deadline = time.monotonic() + 1
+    while time.monotonic() < deadline:
+        waited, _ = os.waitpid(pid, os.WNOHANG)
+        if waited:
+            return
+        time.sleep(0.01)
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    os.waitpid(pid, 0)
+
+
+def _run_scenario(fn: Any, ctx: ScenarioContext) -> tuple[str, Any, list[str]]:
+    parent_conn, child_conn = mp.Pipe(duplex=False)
+    pid = os.fork()
+    if pid == 0:
+        parent_conn.close()
+        try:
+            _scenario_child(fn, ctx, child_conn)
+        finally:
+            os._exit(0)
+    child_conn.close()
+    tracked: list[str] = []
+    payload = None
+    deadline = time.monotonic() + max(0.0, ctx.timeout_seconds)
+    try:
+        while time.monotonic() < deadline:
+            if parent_conn.poll(min(0.05, max(0.0, deadline - time.monotonic()))):
+                kind, value = parent_conn.recv()
+                if kind == "track":
+                    tracked.append(value)
+                else:
+                    payload = value
+                    break
+        if payload is None:
+            _stop_scenario(pid)
+            return "timeout", None, tracked
+        os.waitpid(pid, 0)
+        result, value, child_tracked = payload
+        return result, value, list(dict.fromkeys([*tracked, *child_tracked]))
+    finally:
+        parent_conn.close()
 
 
 def _tally(
@@ -265,13 +338,14 @@ def run_verify(
                     )
                 )
                 continue
-            try:
-                item = fn(ctx)
-            except IsolationRefused as exc:
+            result, value, tracked_ids = _run_scenario(fn, ctx)
+            for request_id in tracked_ids:
+                session.track(request_id)
+            if result == "refused":
                 refused = True
                 stop = True
                 isolation_status = VerificationStatus.FAIL
-                isolation_detail = redact_secrets(str(exc))
+                isolation_detail = value
                 evidence.append(
                     VerificationEvidence(
                         scenario=name,
@@ -279,28 +353,42 @@ def run_verify(
                         namespace=session.namespace.prefix,
                         status=VerificationStatus.ERROR,
                         summary="isolation refused during scenario",
-                        observed_behavior=redact_secrets(str(exc)),
+                        observed_behavior=value,
                         remediation="Fix namespace isolation before re-running.",
                     )
                 )
                 continue
-            except Exception as exc:  # noqa: BLE001
+            if result == "timeout":
                 evidence.append(
                     VerificationEvidence(
                         scenario=name,
                         backend=backend,
                         namespace=session.namespace.prefix,
                         status=VerificationStatus.ERROR,
-                        summary=f"scenario raised {type(exc).__name__}",
-                        observed_behavior=redact_secrets(str(exc)),
+                        summary=f"scenario exceeded {timeout_seconds:g}s deadline",
+                        observed_behavior=(
+                            "scenario interrupted and verifier-owned subprocesses terminated "
+                            "at wall-clock deadline"
+                        ),
+                        remediation="Increase --timeout or investigate the blocking operation.",
+                    )
+                )
+                continue
+            if result == "error":
+                error_type, message = value
+                evidence.append(
+                    VerificationEvidence(
+                        scenario=name,
+                        backend=backend,
+                        namespace=session.namespace.prefix,
+                        status=VerificationStatus.ERROR,
+                        summary=f"scenario raised {error_type}",
+                        observed_behavior=message,
                         remediation="See scenario evidence; this is a verifier error.",
                     )
                 )
                 continue
-            finally:
-                terminate_owned(ctx.owned_procs)
-                ctx.owned_procs.clear()
-            evidence.append(item)
+            evidence.append(value)
     except IsolationRefused as exc:
         refused = True
         isolation_status = VerificationStatus.FAIL

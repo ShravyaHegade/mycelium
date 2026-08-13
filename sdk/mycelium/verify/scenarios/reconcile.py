@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import tempfile
 import time
 from pathlib import Path
 
@@ -29,8 +28,7 @@ from mycelium.verify.workers import (
 def run_reconcile(ctx: ScenarioContext) -> VerificationEvidence:
     started = time.time()
     iso = ctx.isolation
-    tmp = tempfile.NamedTemporaryFile(prefix="mycelium-verify-recon-", delete=False)
-    tmp.close()
+    artifact = iso.artifact_file("reconcile-")
     provider = SyntheticProvider()
     decisions: list[str] = []
     failures: list[str] = []
@@ -40,7 +38,7 @@ def run_reconcile(ctx: ScenarioContext) -> VerificationEvidence:
         with execution_scope(TransitionScope(thread_id="verify", run_id="verify")):
             tool = make_tool(
                 iso.open_storage(),
-                tmp.name,
+                artifact,
                 provider=provider,
                 fail_after_effect=True,
                 **tool_kwargs,
@@ -59,7 +57,7 @@ def run_reconcile(ctx: ScenarioContext) -> VerificationEvidence:
     mutating = SyntheticReconciler(mutating=True)
     blocked = False
     with execution_scope(TransitionScope(thread_id="verify", run_id="verify")):
-        tool = make_tool(iso.open_fresh_client(), tmp.name, provider=provider, reconciler=mutating)
+        tool = make_tool(iso.open_fresh_client(), artifact, provider=provider, reconciler=mutating)
         try:
             tool(1, request_id=rid, op_id="readonly")
         except LedgerHardBlockError:
@@ -74,18 +72,18 @@ def run_reconcile(ctx: ScenarioContext) -> VerificationEvidence:
     # Idempotent COMPLETED.
     rid = _fail_after("completed")
     completed = SyntheticReconciler(status=ReconcileStatus.COMPLETED, result={"reconciled": True})
-    before = count_executions(tmp.name)
+    before = count_executions(artifact)
     results = []
     for _ in range(2):
         with execution_scope(TransitionScope(thread_id="verify", run_id="verify")):
             tool = make_tool(
                 iso.open_fresh_client(),
-                tmp.name,
+                artifact,
                 provider=provider,
                 reconciler=completed,
             )
             results.append(tool(1, request_id=rid, op_id="completed"))
-    if results[0] != results[1] or count_executions(tmp.name) != before:
+    if results[0] != results[1] or count_executions(artifact) != before:
         failures.append("COMPLETED reconcile was not idempotent")
     else:
         decisions.append("COMPLETED:idempotent")
@@ -93,18 +91,18 @@ def run_reconcile(ctx: ScenarioContext) -> VerificationEvidence:
     # NOT_EXECUTED authorizes at most one re-execution.
     rid = _fail_after("not-exec")
     not_exec = SyntheticReconciler(status=ReconcileStatus.NOT_EXECUTED)
-    before = count_executions(tmp.name)
+    before = count_executions(artifact)
     with execution_scope(TransitionScope(thread_id="verify", run_id="verify")):
         tool = make_tool(
             iso.open_fresh_client(),
-            tmp.name,
+            artifact,
             provider=provider,
             reconciler=not_exec,
             fail_after_effect=False,
         )
         tool(1, request_id=rid, op_id="not-exec")
         tool(1, request_id=rid, op_id="not-exec")
-    if count_executions(tmp.name) != before + 1:
+    if count_executions(artifact) != before + 1:
         failures.append("NOT_EXECUTED authorized more than one re-execution")
     else:
         decisions.append("NOT_EXECUTED:at most one re-exec")
@@ -116,17 +114,17 @@ def run_reconcile(ctx: ScenarioContext) -> VerificationEvidence:
         ("timeout", SyntheticReconciler(raise_error=True)),
     ):
         rid = _fail_after(label)
-        before = count_executions(tmp.name)
+        before = count_executions(artifact)
         blocked = False
         with execution_scope(TransitionScope(thread_id="verify", run_id="verify")):
-            tool = make_tool(iso.open_fresh_client(), tmp.name, provider=provider, reconciler=recon)
+            tool = make_tool(iso.open_fresh_client(), artifact, provider=provider, reconciler=recon)
             try:
                 tool(1, request_id=rid, op_id=label)
             except LedgerHardBlockError:
                 blocked = True
             except Exception as exc:  # noqa: BLE001
                 blocked = "block" in str(exc).lower()
-        if not blocked or count_executions(tmp.name) != before:
+        if not blocked or count_executions(artifact) != before:
             failures.append(f"{label}: did not hard-block")
         else:
             decisions.append(f"{label}:HARD_BLOCK")
@@ -137,7 +135,7 @@ def run_reconcile(ctx: ScenarioContext) -> VerificationEvidence:
     with execution_scope(TransitionScope(thread_id="verify", run_id="verify")):
         tool = make_tool(
             iso.open_storage(),
-            tmp.name,
+            artifact,
             provider=provider,
             keyed=True,
             key_ttl=3600.0,
@@ -150,7 +148,7 @@ def run_reconcile(ctx: ScenarioContext) -> VerificationEvidence:
     with execution_scope(TransitionScope(thread_id="verify", run_id="verify")):
         tool = make_tool(
             iso.open_fresh_client(),
-            tmp.name,
+            artifact,
             provider=provider,
             keyed=True,
             key_ttl=3600.0,
@@ -197,7 +195,7 @@ def run_reconcile(ctx: ScenarioContext) -> VerificationEvidence:
     with execution_scope(TransitionScope(thread_id="verify", run_id="verify")):
         tool = make_tool(
             iso.open_storage(),
-            tmp.name,
+            artifact,
             provider=provider,
             keyed=True,
             key_ttl=0.01,
@@ -212,7 +210,7 @@ def run_reconcile(ctx: ScenarioContext) -> VerificationEvidence:
     with execution_scope(TransitionScope(thread_id="verify", run_id="verify")):
         tool = make_tool(
             iso.open_fresh_client(),
-            tmp.name,
+            artifact,
             provider=provider,
             keyed=True,
             key_ttl=0.01,
@@ -231,7 +229,7 @@ def run_reconcile(ctx: ScenarioContext) -> VerificationEvidence:
 
     # Concurrent reconcilers cannot authorize multiple executions.
     if iso.multiprocess_capable and iso.worker_payload.get("backend") != "memory":
-        work = Path(tempfile.mkdtemp(prefix="mycelium-verify-recon-mp-"))
+        work = iso.artifact_dir("reconcile-mp-")
         rid = _fail_after("concurrent")
         exec_file = str(work / "exec.txt")
         ready_file = str(work / "ready.txt")
@@ -284,7 +282,7 @@ def run_reconcile(ctx: ScenarioContext) -> VerificationEvidence:
         backend=iso.backend,
         namespace=iso.namespace.prefix,
         attempts=len(decisions) + len(failures),
-        body_executions=count_executions(tmp.name),
+        body_executions=count_executions(artifact),
         ledger_decisions=decisions,
         terminal_outcome="CONSERVATIVE",
         duration=time.time() - started,
@@ -294,7 +292,7 @@ def run_reconcile(ctx: ScenarioContext) -> VerificationEvidence:
             "concurrent reconcilers cannot double-execute"
         ),
         observed_behavior="; ".join(failures or decisions),
-        artifacts=[tmp.name],
+        artifacts=[artifact],
         limitations=["synthetic reconciler; does not prove a real provider"],
         status=VerificationStatus.PASS if ok else VerificationStatus.FAIL,
         summary="conservative and idempotent" if ok else "; ".join(failures)[:200],
