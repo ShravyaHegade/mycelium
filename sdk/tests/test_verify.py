@@ -16,8 +16,10 @@ from mycelium.completion_contract import reset_completion_terminal_state
 from mycelium.verify.engine import exit_code_for_verify
 from mycelium.verify.isolation import (
     IsolationGateStorage,
+    IsolationSession,
     VerificationNamespace,
     establish_isolation,
+    register_isolation_adapter,
 )
 from mycelium.verify.render import render_human, render_json
 from mycelium.verify.types import VerificationEvidence
@@ -42,6 +44,9 @@ def _late_tracking_scenario(ctx) -> VerificationEvidence:
         time.sleep(0.001)
     ctx.isolation.track(
         ctx.isolation.namespace.request_id("redispatch", "late-timeout")
+    )
+    Path(ctx.isolation.artifact_file("late-timeout-")).write_text(
+        "retained timeout evidence", encoding="utf-8"
     )
     time.sleep(60)
     raise AssertionError("deadline was not enforced")
@@ -540,6 +545,53 @@ def test_timeout_drains_late_tracking_before_cleanup(tmp_path: Path, monkeypatch
 
     assert report.scenarios[0].status == VerificationStatus.ERROR
     assert any(request_id.endswith(":late-timeout") for request_id in cleaned)
+
+
+def test_probe_failure_removes_partial_artifacts(tmp_path: Path) -> None:
+    artifact_root = tmp_path / "probe-artifacts"
+
+    def opener(namespace, raw, workdir):
+        artifact_root.mkdir()
+        return IsolationSession(
+            namespace=namespace,
+            backend="probe-failure",
+            topology_label="test",
+            restart_capable=False,
+            multiprocess_capable=False,
+            persistence_asserted=False,
+            _artifact_tmp=artifact_root,
+            _factory=lambda: (_ for _ in ()).throw(ConnectionError("probe failed")),
+        )
+
+    register_isolation_adapter("probe-failure", opener)
+    config = load_config_from_string(
+        "action_ledger:\n  storage: probe-failure\n",
+    )
+    with pytest.raises(IsolationRefused):
+        establish_isolation(config)
+    assert not artifact_root.exists()
+
+
+def test_timeout_reports_retained_artifacts(tmp_path: Path, monkeypatch) -> None:
+    import mycelium.verify.registry as registry
+
+    monkeypatch.setitem(registry._REGISTRY, "redispatch", _late_tracking_scenario)
+    path = _write(tmp_path, _sqlite_dev(tmp_path))
+    report = run_verify(
+        path,
+        scenarios=["redispatch"],
+        connectivity=False,
+        timeout_seconds=0.5,
+        keep_artifacts=True,
+    )
+
+    artifacts = report.scenarios[0].artifacts
+    assert artifacts
+    assert all(Path(artifact).exists() for artifact in artifacts)
+    human = render_human(report)
+    payload = json.loads(render_json(report))
+    assert all(artifact in human for artifact in artifacts)
+    assert payload["scenarios"][0]["artifacts"] == artifacts
 
 
 def test_isolation_gate_storage_type() -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 from typing import TextIO
 
 from mycelium.verify.types import VerificationReport, VerificationStatus
@@ -52,6 +53,9 @@ def render_human(report: VerificationReport) -> str:
             elif extra:
                 detail = extra if isinstance(extra, str) else "; ".join(extra)
                 line += f"\n         → {detail}"
+        retained = [artifact for artifact in item.artifacts if Path(artifact).exists()]
+        for artifact in retained:
+            line += f"\n         artifact: {artifact}"
         lines.append(line)
     if not report.scenarios and report.refused:
         lines.append("[ERROR] Isolation         verification refused")

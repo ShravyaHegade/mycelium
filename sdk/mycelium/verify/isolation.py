@@ -238,6 +238,11 @@ class IsolationSession:
         assert self._artifact_tmp is not None
         return Path(tempfile.mkdtemp(prefix=prefix, dir=self._artifact_tmp))
 
+    def artifact_paths(self) -> list[str]:
+        if self._artifact_tmp is None or not self._artifact_tmp.exists():
+            return []
+        return [str(path) for path in sorted(self._artifact_tmp.rglob("*"))]
+
     def cleanup(self, *, keep_artifacts: bool = False) -> None:
         if self._closed:
             return
@@ -517,6 +522,7 @@ def establish_isolation(
     config: MyceliumConfig,
     *,
     workdir: Path | None = None,
+    keep_artifacts: bool = False,
 ) -> IsolationSession:
     raw = _ledger_raw(config)
     storage_type = str(raw.get("storage", "memory"))
@@ -537,13 +543,18 @@ def establish_isolation(
             "isolation adapter or use memory|file|sqlite|postgres|redis"
         )
     root = workdir if workdir is not None else Path(".")
+    session: IsolationSession | None = None
     try:
         session = opener(ns, raw, root)
         session.prepare_artifacts()
         session.probe()
     except IsolationRefused:
+        if session is not None:
+            session.cleanup(keep_artifacts=keep_artifacts)
         raise
     except Exception as exc:
+        if session is not None:
+            session.cleanup(keep_artifacts=keep_artifacts)
         raise IsolationRefused(
             f"could not establish isolated {storage_type} backend: {redact_secrets(str(exc))}"
         ) from exc

@@ -301,7 +301,7 @@ def run_verify(
     framework_error = None
     cleanup_error: str | None = None
     try:
-        session = establish_isolation(config)
+        session = establish_isolation(config, keep_artifacts=keep_artifacts)
         isolation_status = VerificationStatus.PASS
         isolation_detail = f"namespace={session.namespace.prefix} topology={session.topology_label}"
         if session.backend in {"file", "sqlite"}:
@@ -345,7 +345,20 @@ def run_verify(
                     )
                 )
                 continue
+            artifacts_before = set(session.artifact_paths())
             result, value, tracked_ids = _run_scenario(fn, ctx)
+            retained_artifacts = (
+                sorted(
+                    (set(session.artifact_paths()) - artifacts_before)
+                    | {
+                        artifact
+                        for artifact in session.artifacts
+                        if Path(artifact).exists()
+                    }
+                )
+                if keep_artifacts
+                else []
+            )
             for request_id in tracked_ids:
                 session.track(request_id)
             if result == "refused":
@@ -361,6 +374,7 @@ def run_verify(
                         status=VerificationStatus.ERROR,
                         summary="isolation refused during scenario",
                         observed_behavior=value,
+                        artifacts=retained_artifacts,
                         remediation="Fix namespace isolation before re-running.",
                     )
                 )
@@ -377,6 +391,7 @@ def run_verify(
                             "scenario interrupted and verifier-owned subprocesses terminated "
                             "at wall-clock deadline"
                         ),
+                        artifacts=retained_artifacts,
                         remediation="Increase --timeout or investigate the blocking operation.",
                     )
                 )
@@ -391,10 +406,13 @@ def run_verify(
                         status=VerificationStatus.ERROR,
                         summary=f"scenario raised {error_type}",
                         observed_behavior=message,
+                        artifacts=retained_artifacts,
                         remediation="See scenario evidence; this is a verifier error.",
                     )
                 )
                 continue
+            if keep_artifacts:
+                value.artifacts = sorted(set(value.artifacts) | set(retained_artifacts))
             evidence.append(value)
     except IsolationRefused as exc:
         refused = True
