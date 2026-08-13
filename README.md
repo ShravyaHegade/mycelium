@@ -168,6 +168,7 @@ or `'mycelium-runtime[postgres]'`. See the
 - **Try in 5 minutes:** https://mycelium-labs.github.io/try.html
 - **Sandbox demo:** [mycelium-labs/mycelium-labs.github.io/sandbox](https://github.com/mycelium-labs/mycelium-labs.github.io/tree/main/sandbox)
 - **Full API reference:** [sdk/README.md](sdk/README.md)
+- **Doctor vs Verify:** `mycelium doctor` inspects configuration; `mycelium verify` runs synthetic failure scenarios. Neither proves a real provider is correct.
 - **Release policy & checklist:** [sdk/docs/RELEASE.md](sdk/docs/RELEASE.md) (batch; calm over velocity)
 - **PyPI:** https://pypi.org/project/mycelium-runtime/
 

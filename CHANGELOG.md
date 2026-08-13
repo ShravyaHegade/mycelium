@@ -7,6 +7,15 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
 
 ### Added
 
+- **`mycelium verify`:** empirical verification of production guarantees
+  against the configured storage backend (`--scenario redispatch|contention|
+  worker-crash|storage-outage|ambiguous-effect|reconcile|all`, `--json`,
+  `--strict`, `--timeout`, `--rounds`, `--workers`, `--keep-artifacts`).
+  Runs the same checks as `mycelium doctor`, then exercises synthetic
+  failure scenarios only — never application tools, LLMs, or real
+  providers. Isolated `mycelium:verify:<uuid>:` namespace; cleanup deletes
+  only verifier-owned rows/keys. Exit `0`/`1`/`2`/`3`. Passing Verify is
+  strong deployment evidence, not proof of every external system.
 - **`mycelium doctor`:** read-only production-safety verification
   (`--config`, `--json`, `--strict`, `--verbose`, `--no-connectivity`).
   Checks profile/tool classification, request identity, durable ledgers,

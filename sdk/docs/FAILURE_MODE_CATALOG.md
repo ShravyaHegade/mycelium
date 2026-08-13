@@ -58,7 +58,10 @@ at-most-once. Provider adapters (e.g. Gmail sent-log) are demos of the
 
 **Guards:** transition envelope · `ActionLedger` / `TaskLedger` · reconcile ·
 `StateFlush` · audit receipts · default-on `on_args_drift` (identity-conflict;
-default `soft`).
+default `soft`). `mycelium doctor` inspects configuration and detectable
+wiring. `mycelium verify` empirically exercises synthetic failure scenarios
+against the configured backend (never application tools, LLMs, or real
+providers). Passing Verify does not prove a real business provider is correct.
 See the [SDK README](../README.md) and
 [failure & threat model](FAILURE_AND_THREAT_MODEL.md).
 

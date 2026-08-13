@@ -1545,6 +1545,31 @@ Evidence labels distinguish what Mycelium can prove (`statically_verified`,
 config alone (call-site `request_id` / `run_id` binding). Doctor does not
 replace integration tests or fault injection.
 
+### `mycelium verify` (exercise the guarantees)
+
+Doctor inspects configuration. `mycelium verify` empirically tests Mycelium’s
+production guarantees against the configured storage backend using **synthetic
+operations only**:
+
+```console
+$ mycelium verify --config mycelium.yaml --scenario redispatch
+$ mycelium verify --config mycelium.yaml --scenario all --strict --json
+```
+
+Scenarios: `redispatch`, `contention`, `storage-outage`, `worker-crash`,
+`ambiguous-effect`, `reconcile`, or `all` (that order). Verify never executes
+application tools, never calls an LLM, never contacts a real business provider,
+and never inspects or alters existing production transitions. Test data uses a
+unique `mycelium:verify:<uuid>:` namespace and is deleted unless
+`--keep-artifacts` is set.
+
+Passing Verify is strong deployment evidence, not proof of every external
+system. Redis persistence remains operator-asserted. Host business-identity
+authority remains an application responsibility. `empirically_verified` is true
+only when every selected scenario passed; Doctor `operator_asserted` /
+`not_verifiable` evidence is never promoted to “proven.” File and SQLite are
+labeled single-node; PostgreSQL is the recommended distributed backend.
+
 **Minimum integration (3 steps):**
 
 ```yaml
