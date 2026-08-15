@@ -1201,6 +1201,132 @@ def test_recapture_replaces_older_scoped_observation_across_metadata() -> None:
     assert decision.decision == "allowed"
 
 
+def test_sync_final_boundary_revalidates_distinct_same_fact_requirements() -> None:
+    storage = InMemoryLedgerStorage()
+    state = {"second_current": True}
+    calls = {"first": 0, "second": 0}
+    provider_calls: list[str] = []
+    request_ids: list[str] = []
+
+    def first_requirement(**_kwargs: Any) -> ValidatorResult:
+        calls["first"] += 1
+        return ValidatorResult(current=True, value=True)
+
+    def second_requirement(**_kwargs: Any) -> ValidatorResult:
+        calls["second"] += 1
+        return ValidatorResult(current=state["second_current"], value=True)
+
+    register_use_time_validator("first_requirement", first_requirement)
+    register_use_time_validator("second_requirement", second_requirement)
+    policy = UseTimeCurrencyPolicy(
+        policy_version="test",
+        tools={
+            "apply_payment": UseTimeToolPolicy(
+                facts=tuple(
+                    UseTimeFactSpec(
+                        name="payment.current",
+                        subject_type="payment",
+                        id_from="payment_id",
+                        validator=validator,
+                        require={"value": True},
+                    )
+                    for validator in ("first_requirement", "second_requirement")
+                )
+            )
+        },
+    )
+
+    @ledger_sync(storage=storage, transition_binding=_binding())
+    def apply_payment(payment_id: str) -> None:
+        active = get_active_transition()
+        assert active is not None
+        request_ids.append(active.request_id)
+        state["second_current"] = False
+        with side_effect():
+            provider_calls.append(payment_id)
+
+    wrapped = apply_use_time_currency(
+        apply_payment, policy, tool_name="apply_payment"
+    )
+    use_time_facts.capture(
+        name="payment.current",
+        subject_type="payment",
+        subject_id="pay-1",
+        value=True,
+        require_value=True,
+    )
+    with pytest.raises(UseTimeCurrencyError):
+        wrapped("pay-1", request_id="multiple-sync")
+    assert calls == {"first": 2, "second": 2}
+    assert provider_calls == []
+    assert storage.get(request_ids[0]).side_effect_boundary == SideEffectBoundary.NOT_CROSSED.value
+
+
+def test_async_final_boundary_revalidates_distinct_same_fact_requirements() -> None:
+    storage = InMemoryLedgerStorage()
+    state = {"second_current": True}
+    calls = {"first": 0, "second": 0}
+    provider_calls: list[str] = []
+    request_ids: list[str] = []
+
+    async def first_requirement(**_kwargs: Any) -> ValidatorResult:
+        calls["first"] += 1
+        return ValidatorResult(current=True, value=True)
+
+    async def second_requirement(**_kwargs: Any) -> ValidatorResult:
+        calls["second"] += 1
+        return ValidatorResult(current=state["second_current"], value=True)
+
+    register_use_time_validator("first_requirement", first_requirement)
+    register_use_time_validator("second_requirement", second_requirement)
+    policy = UseTimeCurrencyPolicy(
+        policy_version="test",
+        tools={
+            "apply_payment": UseTimeToolPolicy(
+                facts=tuple(
+                    UseTimeFactSpec(
+                        name="payment.current",
+                        subject_type="payment",
+                        id_from="payment_id",
+                        validator=validator,
+                        require={"value": True},
+                    )
+                    for validator in ("first_requirement", "second_requirement")
+                )
+            )
+        },
+    )
+
+    @ledger(storage=storage, transition_binding=_binding())
+    async def apply_payment(payment_id: str) -> None:
+        active = get_active_transition()
+        assert active is not None
+        request_ids.append(active.request_id)
+        state["second_current"] = False
+        async with side_effect_async():
+            provider_calls.append(payment_id)
+
+    wrapped = apply_use_time_currency(
+        apply_payment, policy, tool_name="apply_payment"
+    )
+    use_time_facts.capture(
+        name="payment.current",
+        subject_type="payment",
+        subject_id="pay-1",
+        value=True,
+        require_value=True,
+    )
+
+    async def run() -> None:
+        with pytest.raises(UseTimeCurrencyError):
+            await wrapped("pay-1", request_id="multiple-async")
+
+    asyncio.run(run())
+    assert calls == {"first": 2, "second": 2}
+    assert provider_calls == []
+    assert storage.get(request_ids[0]).side_effect_boundary == SideEffectBoundary.NOT_CROSSED.value
+
+
 def test_fingerprint_excludes_raw_values() -> None:
     use_time_facts.capture(
         name="payment.refundable",

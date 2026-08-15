@@ -467,6 +467,24 @@ def _fact_identity(fact: UseTimeFact) -> tuple[str | None, ...]:
     )
 
 
+def _pending_fact_identity(fact: UseTimeFact) -> tuple[Any, ...]:
+    return (
+        *_fact_identity(fact),
+        fact.tool,
+        fact.validator,
+        fact.value_digest,
+        fact.require_value_digest,
+        fact.compare_to_arg,
+        fact.revision,
+        fact.max_age_seconds,
+        fact.provider_precondition,
+        fact.policy_version,
+        fact.request_id,
+        fact.run_id,
+        fact.thread_id,
+    )
+
+
 def _append_decision(decision: UseTimeValidation) -> UseTimeValidation:
     current = _decision_var.get()
     _decision_var.set((*current, decision))
@@ -1120,7 +1138,7 @@ def register_fact_for_use(fact: UseTimeFact) -> UseTimeFact:
     kept = tuple(
         item
         for item in current
-        if _fact_identity(item) != _fact_identity(fact)
+        if _pending_fact_identity(item) != _pending_fact_identity(fact)
     )
     _pending_var.set((*kept, fact))
     return fact
