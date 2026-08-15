@@ -15,7 +15,7 @@ import hashlib
 from collections.abc import Callable, Mapping
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from typing import Any
 
@@ -200,7 +200,7 @@ def ensure_aware_utc(value: datetime, *, field: str) -> datetime:
         raise ValueError(
             f"{field} must be timezone-aware UTC (naive timestamps are rejected)"
         )
-    return value.astimezone(UTC)
+    return value.astimezone(timezone.utc)
 
 
 def as_utc_datetime(value: Any, *, field: str = "expires_at") -> datetime:
@@ -218,7 +218,7 @@ def as_utc_datetime(value: Any, *, field: str = "expires_at") -> datetime:
             raise ValueError(f"{field} is not a valid timestamp") from exc
         if ts != ts or ts in (float("inf"), float("-inf")):  # noqa: PLR0124
             raise ValueError(f"{field} is not a finite timestamp")
-        return datetime.fromtimestamp(ts, tz=UTC)
+        return datetime.fromtimestamp(ts, tz=timezone.utc)
     raise ValueError(f"{field} must be an aware datetime or UTC epoch seconds")
 
 
@@ -226,8 +226,8 @@ def utc_now() -> datetime:
     """Host/infrastructure clock. Never accepts model-provided time."""
     clock = _clock_var.get()
     if clock is not None:
-        return datetime.fromtimestamp(float(clock()), tz=UTC)
-    return datetime.now(UTC)
+        return datetime.fromtimestamp(float(clock()), tz=timezone.utc)
+    return datetime.now(timezone.utc)
 
 
 def set_authority_clock(

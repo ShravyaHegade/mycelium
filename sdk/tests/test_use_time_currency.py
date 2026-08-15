@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import pytest
@@ -181,7 +181,7 @@ def test_max_age_boundary_stale() -> None:
         revision="1",
         max_age_seconds=30,
         require_value=True,
-        observed_at=datetime.fromtimestamp(1_000.0, tz=UTC),
+        observed_at=datetime.fromtimestamp(1_000.0, tz=timezone.utc),
     )
     authorize_use_time_facts(
         "refund_payment",
@@ -214,7 +214,7 @@ def test_max_age_just_under_allows() -> None:
         revision="1",
         max_age_seconds=30,
         require_value=True,
-        observed_at=datetime.fromtimestamp(1_000.0, tz=UTC),
+        observed_at=datetime.fromtimestamp(1_000.0, tz=timezone.utc),
     )
     authorize_use_time_facts(
         "refund_payment",
@@ -743,7 +743,7 @@ def test_async_boundary_denies_expired_authority_with_async_validator() -> None:
         BoundAuthority(
             authority_id="auth-1",
             authority_kind="destructive_grant",
-            expires_at=datetime.fromtimestamp(1_010.0, tz=UTC),
+            expires_at=datetime.fromtimestamp(1_010.0, tz=timezone.utc),
             tool="refund_payment",
         )
     )
@@ -1090,7 +1090,7 @@ def test_scoped_pending_facts_are_all_revalidated() -> None:
         return ValidatorResult(current=fact.tenant != "tenant-stale")
 
     register_use_time_validator("scoped_state", scoped_state)
-    observed = datetime.now(UTC)
+    observed = datetime.now(timezone.utc)
     register_fact_for_use(
         UseTimeFact(
             name="resource.current",

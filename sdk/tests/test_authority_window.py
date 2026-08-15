@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -106,7 +106,7 @@ def _bound(*, expires_at: datetime, tool: str = "refund_payment") -> BoundAuthor
 def test_valid_before_expiry_allows() -> None:
     clock = {"now": 1_000.0}
     set_authority_clock(lambda: clock["now"])
-    auth = _bound(expires_at=datetime.fromtimestamp(1_100.0, tz=UTC))
+    auth = _bound(expires_at=datetime.fromtimestamp(1_100.0, tz=timezone.utc))
     decision = validate_authority(auth, phase=AuthorityValidationPhase.AUTHORIZE)
     assert decision.decision == "allowed"
     register_authority_for_use(auth)
@@ -118,7 +118,7 @@ def test_valid_before_expiry_allows() -> None:
 def test_exact_boundary_expires() -> None:
     clock = {"now": 1_000.0}
     set_authority_clock(lambda: clock["now"])
-    auth = _bound(expires_at=datetime.fromtimestamp(1_000.0, tz=UTC))
+    auth = _bound(expires_at=datetime.fromtimestamp(1_000.0, tz=timezone.utc))
     with pytest.raises(AuthorityExpiredError):
         validate_authority(auth, phase=AuthorityValidationPhase.USE)
 
@@ -136,7 +136,7 @@ def test_naive_timestamp_rejected() -> None:
 def test_injected_clock_and_delay_between_phases() -> None:
     clock = {"now": 1_000.0}
     set_authority_clock(lambda: clock["now"])
-    auth = _bound(expires_at=datetime.fromtimestamp(1_050.0, tz=UTC))
+    auth = _bound(expires_at=datetime.fromtimestamp(1_050.0, tz=timezone.utc))
     validate_authority(auth, phase=AuthorityValidationPhase.AUTHORIZE)
     register_authority_for_use(auth)
     clock["now"] = 1_060.0
@@ -155,7 +155,7 @@ def test_skew_narrows_never_extends() -> None:
             clock_skew_tolerance_seconds=10,
         )
     )
-    auth = _bound(expires_at=datetime.fromtimestamp(1_005.0, tz=UTC))
+    auth = _bound(expires_at=datetime.fromtimestamp(1_005.0, tz=timezone.utc))
     with pytest.raises(AuthorityExpiredError):
         validate_authority_at_use(auth)
 
@@ -511,7 +511,7 @@ tools:
 def test_as_utc_datetime_epoch() -> None:
     value = as_utc_datetime(1_700_000_000.0)
     assert value.tzinfo is not None
-    assert value == datetime.fromtimestamp(1_700_000_000.0, tz=UTC)
+    assert value == datetime.fromtimestamp(1_700_000_000.0, tz=timezone.utc)
 
 
 def test_mark_maybe_crossed_checks_expiry() -> None:
@@ -519,7 +519,7 @@ def test_mark_maybe_crossed_checks_expiry() -> None:
 
     clock = {"now": 1_000.0}
     set_authority_clock(lambda: clock["now"])
-    auth = _bound(expires_at=datetime.fromtimestamp(1_010.0, tz=UTC))
+    auth = _bound(expires_at=datetime.fromtimestamp(1_010.0, tz=timezone.utc))
     register_authority_for_use(auth)
     clock["now"] = 1_020.0
     with pytest.raises(AuthorityExpiredError):
@@ -543,7 +543,7 @@ def test_policy_version_mismatch_at_use() -> None:
     auth = BoundAuthority(
         authority_id="a",
         authority_kind="destructive_grant",
-        expires_at=datetime.now(UTC) + timedelta(seconds=60),
+        expires_at=datetime.now(timezone.utc) + timedelta(seconds=60),
         tool="refund_payment",
         policy_version="v1",
     )

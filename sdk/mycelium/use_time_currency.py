@@ -17,7 +17,7 @@ import inspect
 from collections.abc import Awaitable, Callable, Mapping
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any, ParamSpec, TypeVar
 
 from mycelium.authority_window import (
@@ -313,7 +313,7 @@ def use_time_now() -> datetime:
     """Host/infrastructure UTC clock. Never accepts model-provided time."""
     clock = _clock_var.get()
     if clock is not None:
-        return datetime.fromtimestamp(float(clock()), tz=UTC)
+        return datetime.fromtimestamp(float(clock()), tz=timezone.utc)
     # Share authority clock when installed so tests inject once.
     return utc_now()
 
