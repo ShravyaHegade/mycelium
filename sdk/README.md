@@ -234,8 +234,15 @@ internally; no Pydantic imports in your code.
 - `@bounded` / `bounded_sync`: validate tool args against your field spec **before** the function runs
 - `output_schema`: validate the return value **after** the function runs; bad results are not propagated
 - `allowed_paths` / `entity_pattern`: user-defined scope gates (paths under
-  allowlisted roots after `..` / `.` normalization, entity ID format)
+  allowlisted roots after canonical path and symlink resolution, entity ID
+  format). Missing descendants are supported. Resolution errors fail closed.
 - On failure, raises `ToolBoundaryError` with `llm_message` for the agent loop; does not retry by itself
+
+`allowed_paths` validates the resolved path immediately before dispatch, but
+it is not a filesystem sandbox. Another process that can replace path
+components after validation can create a time-of-check/time-of-use race. Use
+OS sandboxing or descriptor-relative operations inside the tool when the
+filesystem is writable by an adversary.
 
 ## ToolRegistry
 

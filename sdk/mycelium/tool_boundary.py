@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import functools
 import inspect
-import os
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from pathlib import PurePath
+from pathlib import Path
 from typing import Any, ParamSpec, TypeVar
 
 from pydantic import BaseModel, ValidationError
@@ -261,21 +260,40 @@ def _validate_input(tool_name: str, schema: type[BaseModel], raw: dict[str, Any]
 
 
 def _path_is_under_allowed(path: str, allowed_paths: tuple[str, ...]) -> bool:
-    """True if normalized ``path`` equals or is under one of ``allowed_paths``.
+    """True if resolved ``path`` equals or is under an allowed root.
 
-    Collapses ``.`` / ``..`` so string-prefix tricks like
-    ``/workspace/src/../../etc/passwd`` cannot bypass the gate. Lexical only
-    (no symlink resolution) — tool args are strings, not opened paths.
+    Strict resolution detects symlink loops on every supported Python version.
+    A missing component alone falls back to non-strict resolution, preserving
+    missing descendants while still following symlinks in the existing path.
+    Other resolution errors fail closed.
+
+    This is pre-dispatch validation. A hostile process that can mutate the
+    filesystem between validation and tool execution can still create a
+    time-of-check/time-of-use race; callers needing that guarantee must use a
+    sandbox or descriptor-relative file operations in the tool itself.
     """
-    candidate = PurePath(os.path.normpath(path))
+    try:
+        candidate = _resolve_allow_missing(path)
+    except (OSError, RuntimeError, ValueError):
+        return False
+
     for prefix in allowed_paths:
-        root = PurePath(os.path.normpath(prefix))
         try:
+            root = _resolve_allow_missing(prefix)
             candidate.relative_to(root)
-        except ValueError:
+        except (OSError, RuntimeError, ValueError):
             continue
         return True
     return False
+
+
+def _resolve_allow_missing(path: str) -> Path:
+    """Resolve ``path`` while allowing missing components but rejecting loops."""
+    candidate = Path(path)
+    try:
+        return candidate.resolve(strict=True)
+    except FileNotFoundError:
+        return candidate.resolve(strict=False)
 
 
 def _validate_scope(tool_name: str, raw: dict[str, Any], config: BoundedConfig) -> None:

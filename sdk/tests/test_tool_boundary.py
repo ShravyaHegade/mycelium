@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from mycelium import ToolBoundaryError, bounded, bounded_sync
@@ -169,6 +171,160 @@ async def test_scope_gate_blocks_sibling_prefix_bypass() -> None:
 
     await delete_file(path="/workspace/ok.txt")
     assert calls == 1
+
+
+async def test_scope_gate_blocks_directory_symlink_escape(tmp_path: Path) -> None:
+    allowed = tmp_path / "allowed"
+    outside = tmp_path / "outside"
+    allowed.mkdir()
+    outside.mkdir()
+    target = outside / "target.txt"
+    target.write_text("keep")
+    (allowed / "escape").symlink_to(outside, target_is_directory=True)
+    calls = 0
+
+    @bounded(schema=DELETE_FILE_SCHEMA, allowed_paths=[str(allowed)])
+    async def delete_file(path: str) -> dict[str, str]:
+        nonlocal calls
+        calls += 1
+        Path(path).unlink()
+        return {"deleted": path}
+
+    with pytest.raises(ToolBoundaryError) as exc:
+        await delete_file(path=str(allowed / "escape" / "target.txt"))
+
+    assert exc.value.violation == "scope_path"
+    assert calls == 0
+    assert target.read_text() == "keep"
+
+
+async def test_scope_gate_blocks_missing_target_through_symlink_escape(
+    tmp_path: Path,
+) -> None:
+    allowed = tmp_path / "allowed"
+    outside = tmp_path / "outside"
+    allowed.mkdir()
+    outside.mkdir()
+    (allowed / "escape").symlink_to(outside, target_is_directory=True)
+    calls = 0
+
+    @bounded(schema=DELETE_FILE_SCHEMA, allowed_paths=[str(allowed)])
+    async def create_file(path: str) -> dict[str, str]:
+        nonlocal calls
+        calls += 1
+        Path(path).write_text("created")
+        return {"created": path}
+
+    target = outside / "new.txt"
+    with pytest.raises(ToolBoundaryError) as exc:
+        await create_file(path=str(allowed / "escape" / "new.txt"))
+
+    assert exc.value.violation == "scope_path"
+    assert calls == 0
+    assert not target.exists()
+
+
+def test_scope_gate_blocks_file_symlink_escape(tmp_path: Path) -> None:
+    allowed = tmp_path / "allowed"
+    outside = tmp_path / "outside"
+    allowed.mkdir()
+    outside.mkdir()
+    target = outside / "target.txt"
+    target.write_text("private")
+    link = allowed / "target.txt"
+    link.symlink_to(target)
+    calls = 0
+
+    @bounded_sync(schema=DELETE_FILE_SCHEMA, allowed_paths=[str(allowed)])
+    def read_file(path: str) -> str:
+        nonlocal calls
+        calls += 1
+        return Path(path).read_text()
+
+    with pytest.raises(ToolBoundaryError) as exc:
+        read_file(path=str(link))
+
+    assert exc.value.violation == "scope_path"
+    assert calls == 0
+
+
+async def test_scope_gate_allows_symlink_resolving_inside_root(tmp_path: Path) -> None:
+    allowed = tmp_path / "allowed"
+    nested = allowed / "nested"
+    nested.mkdir(parents=True)
+    target = nested / "target.txt"
+    target.write_text("safe")
+    (allowed / "alias").symlink_to(nested, target_is_directory=True)
+
+    @bounded(schema=DELETE_FILE_SCHEMA, allowed_paths=[str(allowed)])
+    async def read_file(path: str) -> str:
+        return Path(path).read_text()
+
+    assert await read_file(path=str(allowed / "alias" / "target.txt")) == "safe"
+
+
+async def test_scope_gate_allows_missing_descendant_inside_root(tmp_path: Path) -> None:
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    candidate = allowed / "missing" / "new.txt"
+
+    @bounded(schema=DELETE_FILE_SCHEMA, allowed_paths=[str(allowed)])
+    async def prepare_file(path: str) -> dict[str, str]:
+        return {"path": path}
+
+    assert await prepare_file(path=str(candidate)) == {"path": str(candidate)}
+
+
+async def test_scope_gate_allows_relative_root_and_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    allowed = Path("allowed")
+    allowed.mkdir()
+    target = allowed / "target.txt"
+    target.write_text("safe")
+
+    @bounded(schema=DELETE_FILE_SCHEMA, allowed_paths=[str(allowed)])
+    async def read_file(path: str) -> str:
+        return Path(path).read_text()
+
+    assert await read_file(path=str(target)) == "safe"
+
+
+async def test_scope_gate_allows_allowed_root_that_is_a_symlink(tmp_path: Path) -> None:
+    storage = tmp_path / "storage"
+    storage.mkdir()
+    target = storage / "target.txt"
+    target.write_text("safe")
+    allowed = tmp_path / "allowed"
+    allowed.symlink_to(storage, target_is_directory=True)
+
+    @bounded(schema=DELETE_FILE_SCHEMA, allowed_paths=[str(allowed)])
+    async def read_file(path: str) -> str:
+        return Path(path).read_text()
+
+    assert await read_file(path=str(allowed / "target.txt")) == "safe"
+
+
+async def test_scope_gate_fails_closed_on_symlink_loop(tmp_path: Path) -> None:
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    (allowed / "loop-a").symlink_to(allowed / "loop-b")
+    (allowed / "loop-b").symlink_to(allowed / "loop-a")
+    calls = 0
+
+    @bounded(schema=DELETE_FILE_SCHEMA, allowed_paths=[str(allowed)])
+    async def read_file(path: str) -> str:
+        nonlocal calls
+        calls += 1
+        return Path(path).read_text()
+
+    with pytest.raises(ToolBoundaryError) as exc:
+        await read_file(path=str(allowed / "loop-a" / "target.txt"))
+
+    assert exc.value.violation == "scope_path"
+    assert calls == 0
 
 
 async def test_entity_pattern_scope_gate() -> None:

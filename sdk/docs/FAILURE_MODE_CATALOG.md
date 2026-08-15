@@ -100,6 +100,12 @@ LLM.
 **Guards:** `@bounded` / `bounded_sync` (input/output/entity/path) ·
 `ToolRegistry` · `ToolRunner`.
 
+**Filesystem boundary:** `allowed_paths` resolves existing symlinks and fails
+closed on resolution errors before dispatch. It is not a sandbox and cannot
+prevent a concurrent writer from replacing path components after validation.
+Use OS isolation or descriptor-relative file operations for hostile shared
+filesystems.
+
 ---
 
 ## AF-005 Goal misalignment
