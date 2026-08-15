@@ -878,7 +878,7 @@ async def _invoke_validator_async(
                     result = await asyncio.wait_for(result, timeout=timeout)
                 else:
                     result = await result
-    except TimeoutError:
+    except (TimeoutError, asyncio.TimeoutError):
         _raise_currency(
             tool=fact.tool,
             fact_name=fact.name,

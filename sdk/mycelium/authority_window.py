@@ -16,9 +16,9 @@ from collections.abc import Callable, Mapping
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from mycelium._compat import StrEnum
 from typing import Any
 
+from mycelium._compat import StrEnum
 from mycelium.tool_boundary import ToolBoundaryError
 
 USE_TIME_CHECK_REQUIRED = "required"
