@@ -3472,6 +3472,19 @@ def _canonical_call_mapping(
     return mapping
 
 
+def _use_boundary_call_mapping(
+    func: Callable[..., Any],
+    args: tuple[Any, ...],
+    clean_kwargs: Mapping[str, Any],
+    dispatch_kwargs: Mapping[str, Any],
+) -> dict[str, Any]:
+    mapping = _canonical_call_mapping(func, args, clean_kwargs)
+    request_id = dispatch_kwargs.get("request_id")
+    if isinstance(request_id, str) and request_id.strip():
+        mapping["request_id"] = request_id
+    return mapping
+
+
 def _claim_kwargs(kwargs: dict[str, Any], clean_kwargs: dict[str, Any]) -> dict[str, Any]:
     """Kwargs for claim: tool args plus optional bookkeeping pass-through.
 
@@ -3727,7 +3740,7 @@ def _run_ledgered(
         owner=owner,
     )
 
-    call_mapping = _canonical_call_mapping(func, args, clean_kwargs)
+    call_mapping = _use_boundary_call_mapping(func, args, clean_kwargs, kwargs)
     token = _active_transition_var.set(
         _ActiveTransition(
             ledger,
@@ -4037,7 +4050,7 @@ async def _run_ledgered_async(
         owner=owner,
     )
 
-    call_mapping = _canonical_call_mapping(func, args, clean_kwargs)
+    call_mapping = _use_boundary_call_mapping(func, args, clean_kwargs, kwargs)
     token = _active_transition_var.set(
         _ActiveTransition(
             ledger,

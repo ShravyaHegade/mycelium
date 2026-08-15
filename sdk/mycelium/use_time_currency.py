@@ -125,6 +125,9 @@ class UseTimeFact:
     provider_precondition: str | None = None
     require_value_digest: str | None = None
     compare_to_arg: str | None = None
+    bind_request_id: bool = False
+    bind_run_id: bool = False
+    bind_thread_id: bool = False
 
     def __post_init__(self) -> None:
         ensure_aware_utc(self.observed_at, field="observed_at")
@@ -482,6 +485,9 @@ def _pending_fact_identity(fact: UseTimeFact) -> tuple[Any, ...]:
         fact.request_id,
         fact.run_id,
         fact.thread_id,
+        fact.bind_request_id,
+        fact.bind_run_id,
+        fact.bind_thread_id,
     )
 
 
@@ -569,6 +575,38 @@ def _enforce_context_bindings(
                 run_id=run_id,
                 tenant=match.tenant,
                 account=match.account,
+            )
+
+
+def _enforce_context_bindings_at_use(
+    fact: UseTimeFact, kwargs: Mapping[str, Any]
+) -> None:
+    request_id, run_id, thread_id = _call_ids(kwargs)
+    for enabled, captured, current in (
+        (fact.bind_request_id, fact.request_id, request_id),
+        (fact.bind_run_id, fact.run_id, run_id),
+        (fact.bind_thread_id, fact.thread_id, thread_id),
+    ):
+        if not enabled:
+            continue
+        reason = (
+            REASON_MISSING
+            if captured is None or current is None
+            else REASON_SUBJECT_MISMATCH
+        )
+        if captured is None or current is None or str(captured) != str(current):
+            _raise_currency(
+                tool=fact.tool,
+                fact_name=fact.name,
+                reason=reason,
+                phase=PHASE_USE,
+                subject_ref=fact.subject_ref,
+                decide_revision=fact.revision,
+                policy_version=fact.policy_version,
+                request_id=request_id,
+                run_id=run_id,
+                tenant=fact.tenant,
+                account=fact.account,
             )
 
 
@@ -940,6 +978,9 @@ def _evaluate_use_result(
         provider_precondition=fact.provider_precondition,
         require_value_digest=fact.require_value_digest,
         compare_to_arg=fact.compare_to_arg,
+        bind_request_id=fact.bind_request_id,
+        bind_run_id=fact.bind_run_id,
+        bind_thread_id=fact.bind_thread_id,
     )
     _check_age(age_basis, now=now, phase=phase)
 
@@ -1381,6 +1422,9 @@ def authorize_use_time_facts(
                 provider_precondition=spec.provider_precondition or match.provider_precondition,
                 require_value_digest=require_digest or match.require_value_digest,
                 compare_to_arg=spec.compare_to_arg or match.compare_to_arg,
+                bind_request_id=spec.bind_request_id,
+                bind_run_id=spec.bind_run_id,
+                bind_thread_id=spec.bind_thread_id,
             )
         else:
             # Bind from kwargs / require without calling validators at authorize.
@@ -1443,6 +1487,9 @@ def authorize_use_time_facts(
                 provider_precondition=spec.provider_precondition,
                 require_value_digest=require_digest,
                 compare_to_arg=spec.compare_to_arg,
+                bind_request_id=spec.bind_request_id,
+                bind_run_id=spec.bind_run_id,
+                bind_thread_id=spec.bind_thread_id,
             )
 
         _check_age(fact, now=use_time_now(), phase=PHASE_AUTHORIZE)
@@ -1503,6 +1550,7 @@ def enforce_pending_use_time_facts_at_use(
     call_kwargs = dict(kwargs or {})
     last: UseTimeValidation | None = None
     for fact in pending:
+        _enforce_context_bindings_at_use(fact, call_kwargs)
         if not fact.validator:
             _raise_currency(
                 tool=fact.tool,
@@ -1560,6 +1608,7 @@ async def enforce_pending_use_time_facts_at_use_async(
     call_kwargs = dict(kwargs or {})
     last: UseTimeValidation | None = None
     for fact in pending:
+        _enforce_context_bindings_at_use(fact, call_kwargs)
         if not fact.validator:
             _raise_currency(
                 tool=fact.tool,
