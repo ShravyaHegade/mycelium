@@ -17,6 +17,7 @@ SCENARIO_ORDER = (
     "worker-crash",
     "ambiguous-effect",
     "reconcile",
+    "secret-in-args",
 )
 
 ScenarioFn = Callable[["ScenarioContext"], "VerificationEvidence"]
@@ -77,6 +78,7 @@ def ensure_builtin_scenarios_registered() -> None:
         contention,
         reconcile,
         redispatch,
+        secret_in_args,
         storage_outage,
         worker_crash,
     )

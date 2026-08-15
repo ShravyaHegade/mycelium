@@ -1149,6 +1149,210 @@ def check_topology(ctx: DoctorContext) -> Iterable[DoctorCheck]:
     )
 
 
+@doctor_check("secret_args")
+def check_secret_args(ctx: DoctorContext) -> Iterable[DoctorCheck]:
+    """AF-010: report secret-in-args scanning, fail-closed production, allowlists."""
+    from mycelium.budget_llm import registered_llm_budget_adapters
+    from mycelium.completion_contract import registered_terminal_adapters
+    from mycelium.secret_protection import registered_secret_resolver
+
+    cfg = ctx.config
+    raw = cfg.secret_args
+    consequential = _consequential_tools(cfg)
+    declared_fields = [
+        f"{name}:{','.join(tool.secret_fields)}"
+        for name, tool in cfg.tools.items()
+        if tool.secret_fields
+    ]
+
+    if raw is None:
+        yield _check(
+            id="secrets.scanning",
+            category="Secret-in-args",
+            status=DoctorStatus.SKIP,
+            summary="secret_args is not configured (existing behavior)",
+            details=(
+                "Omitted secret_args preserves pre-AF-010 behavior. "
+                f"consequential_tools={consequential or 'none'}."
+            ),
+            remediation=(
+                "Add secret_args: {enabled: true, policy: error} so raw "
+                "credentials are blocked before claim. Pass secret:// "
+                "references instead of credentials."
+            ),
+            evidence=EVIDENCE_STATIC,
+            blocking=False,
+        )
+        if cfg.profile == PROFILE_PRODUCTION and consequential:
+            yield _check(
+                id="secrets.production_fail_closed",
+                category="Secret-in-args",
+                status=DoctorStatus.SKIP,
+                summary="Production consequential tools do not fail closed on secrets",
+                details=(
+                    "profile=production but secret_args is omitted; "
+                    f"tools={consequential}. This is not a promised production default."
+                ),
+                remediation="Enable secret_args.policy: error for consequential tools.",
+                evidence=EVIDENCE_STATIC,
+                blocking=False,
+            )
+    else:
+        enabled = bool(raw.get("enabled", True))
+        policy = str(raw.get("policy", "error"))
+        allow_fields = list(raw.get("allow_fields") or [])
+        allow_tools = list(raw.get("allow_tools") or [])
+        yield _check(
+            id="secrets.scanning",
+            category="Secret-in-args",
+            status=DoctorStatus.PASS if enabled else DoctorStatus.WARN,
+            summary=(
+                "Secret scanning is enabled"
+                if enabled
+                else "Secret scanning is configured but disabled"
+            ),
+            details=(
+                f"enabled={enabled}; policy={policy!r}; "
+                f"allow_fields={allow_fields or 'none'}; "
+                f"allow_tools={allow_tools or 'none'}; "
+                f"entropy_detection={raw.get('entropy_detection', True)}"
+            ),
+            remediation="" if enabled else "Set secret_args.enabled: true.",
+            evidence=EVIDENCE_STATIC,
+            blocking=not enabled,
+        )
+        fail_closed = enabled and policy == "error"
+        if cfg.profile == PROFILE_PRODUCTION and consequential:
+            if fail_closed:
+                yield _check(
+                    id="secrets.production_fail_closed",
+                    category="Secret-in-args",
+                    status=DoctorStatus.PASS,
+                    summary="Production consequential tools fail closed on raw secrets",
+                    details=f"policy=error; tools={consequential}",
+                    evidence=EVIDENCE_STATIC,
+                )
+            else:
+                yield _check(
+                    id="secrets.production_fail_closed",
+                    category="Secret-in-args",
+                    status=DoctorStatus.FAIL,
+                    summary="Production consequential tools do not fail closed",
+                    details=f"policy={policy!r}; tools={consequential}",
+                    remediation="Set secret_args.policy: error under profile: production.",
+                    evidence=EVIDENCE_STATIC,
+                )
+        if allow_fields:
+            yield _check(
+                id="secrets.allow_fields",
+                category="Secret-in-args",
+                status=DoctorStatus.WARN,
+                summary="Global allow_fields weakens secret-in-args protection",
+                details=(
+                    f"allow_fields={allow_fields}. Scope allowlists narrowly "
+                    "by tool (tools.<name>.secret_fields), not as a global trust list."
+                ),
+                remediation="Prefer per-tool secret_fields and empty global allow_fields.",
+                evidence=EVIDENCE_STATIC,
+                blocking=False,
+            )
+        if allow_tools:
+            overlap = [name for name in allow_tools if name in consequential]
+            yield _check(
+                id="secrets.allow_tools",
+                category="Secret-in-args",
+                status=DoctorStatus.WARN,
+                summary="allow_tools skips secret scanning",
+                details=(
+                    f"allow_tools={allow_tools}; consequential_exempt={overlap or 'none'}"
+                ),
+                remediation="Do not exempt consequential tools from secret scanning.",
+                evidence=EVIDENCE_STATIC,
+                blocking=False,
+            )
+
+    resolver = registered_secret_resolver()
+    if declared_fields:
+        if resolver is None:
+            yield _check(
+                id="secrets.resolver",
+                category="Secret-in-args",
+                status=DoctorStatus.WARN,
+                summary="Tools declare secret_fields but no resolver is registered",
+                details=f"declared={declared_fields}",
+                remediation="Call register_secret_resolver before resolving secret:// refs.",
+                evidence=EVIDENCE_RUNTIME,
+                blocking=False,
+            )
+        else:
+            yield _check(
+                id="secrets.resolver",
+                category="Secret-in-args",
+                status=DoctorStatus.PASS,
+                summary="Secret resolver is registered for declared secret_fields",
+                details=f"declared={declared_fields}",
+                evidence=EVIDENCE_RUNTIME,
+            )
+    elif resolver is not None:
+        yield _check(
+            id="secrets.resolver",
+            category="Secret-in-args",
+            status=DoctorStatus.PASS,
+            summary="Secret resolver is registered",
+            evidence=EVIDENCE_RUNTIME,
+        )
+    else:
+        yield _check(
+            id="secrets.resolver",
+            category="Secret-in-args",
+            status=DoctorStatus.SKIP,
+            summary="No secret resolver registered (none required)",
+            details="Applications must register a resolver explicitly; none is built in.",
+            evidence=EVIDENCE_RUNTIME,
+            blocking=False,
+        )
+
+    custom_adapters = sorted(
+        set(registered_terminal_adapters()) | set(registered_llm_budget_adapters())
+    )
+    if custom_adapters:
+        yield _check(
+            id="secrets.custom_adapters",
+            category="Secret-in-args",
+            status=DoctorStatus.WARN,
+            summary="Custom adapters cannot be verified to sanitize evidence",
+            details=f"adapters={custom_adapters}",
+            remediation=(
+                "Host-owned adapters must call sanitize_secrets before emitting "
+                "or logging tool arguments."
+            ),
+            evidence=EVIDENCE_NOT_VERIFIABLE,
+            blocking=False,
+        )
+    else:
+        yield _check(
+            id="secrets.custom_adapters",
+            category="Secret-in-args",
+            status=DoctorStatus.PASS,
+            summary="No custom evidence adapters registered",
+            evidence=EVIDENCE_RUNTIME,
+        )
+
+    yield _check(
+        id="secrets.host_logs",
+        category="Secret-in-args",
+        status=DoctorStatus.SKIP,
+        summary="Host logs and third-party providers are not verifiable",
+        details=(
+            "Mycelium cannot inspect application logs, provider SDKs, or "
+            "operator terminals. Redaction is defense-in-depth; fail-closed "
+            "pre-execution blocking is the primary protection."
+        ),
+        evidence=EVIDENCE_NOT_VERIFIABLE,
+        blocking=False,
+    )
+
+
 def ensure_builtin_checks_registered() -> None:
     """Import side effect: decorators already registered this module's checks."""
     return None

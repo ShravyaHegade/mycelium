@@ -94,7 +94,15 @@ class MissingRunIdentityError(Exception):
 
 def action_hash(tool: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
     """Stable hash of tool name + canonical args (no dispatch identity)."""
-    payload = f"{tool}:{args_fingerprint(args, kwargs)}"
+    from mycelium.secret_protection import fingerprint_args, get_active_secret_policy
+
+    policy = get_active_secret_policy()
+    digest = (
+        fingerprint_args(args, kwargs)
+        if policy is not None and policy.enabled
+        else args_fingerprint(args, kwargs)
+    )
+    payload = f"{tool}:{digest}"
     return hashlib.sha256(payload.encode()).hexdigest()
 
 

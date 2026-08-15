@@ -10,7 +10,13 @@ from mycelium.doctor.types import DoctorReport, DoctorStatus
 
 def render_json(report: DoctorReport) -> str:
     """Stable machine-readable JSON for CI (no secrets)."""
-    return json.dumps(report.to_dict(), indent=2, sort_keys=True)
+    from mycelium.secret_protection import sanitize_secrets
+
+    return json.dumps(
+        sanitize_secrets(report.to_dict(), entropy_detection=False),
+        indent=2,
+        sort_keys=True,
+    )
 
 
 def render_human(report: DoctorReport, *, verbose: bool = False) -> str:
@@ -53,10 +59,11 @@ def render_human(report: DoctorReport, *, verbose: bool = False) -> str:
 
 def _format_check_line(check: object, *, verbose: bool) -> str:
     from mycelium.doctor.types import DoctorCheck
+    from mycelium.secret_protection import sanitize_text
 
     assert isinstance(check, DoctorCheck)
     pad_cat = f"{check.category:<20}"
-    line = f"[{check.status.value}] {pad_cat} {check.summary}"
+    line = f"[{check.status.value}] {pad_cat} {sanitize_text(check.summary)}"
     if check.status in (DoctorStatus.WARN, DoctorStatus.FAIL) and check.remediation:
         line += f"\n         → {check.remediation}"
     if verbose:

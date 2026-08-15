@@ -4,6 +4,8 @@
 #
 # Deployments: add `profile: production` so side-effecting memory storage
 #   and missing run_id cannot silently skip protection.
+# Optional AF-010: secret_args: {enabled: true, policy: error}
+#   Pass secret:// references instead of credentials.
 #
 # side_effect_class required only for tools listed under action_ledger.tools:
 #   read | idempotent_mutate | keyed_mutate | non_idempotent_mutate | irreversible

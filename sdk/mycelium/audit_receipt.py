@@ -241,6 +241,13 @@ class AuditReceiptEmitter:
 
         receipt_id = f"rcpt-{uuid.uuid4().hex[:16]}"
         timestamp = time.time()
+        from mycelium.secret_protection import get_active_secret_policy, sanitize_for_evidence
+
+        policy = get_active_secret_policy()
+        if policy is not None and policy.enabled:
+            inputs = sanitize_for_evidence(inputs)
+            outputs = sanitize_for_evidence(outputs)
+            error = sanitize_for_evidence(error) if error is not None else None
         payload = {
             "receipt_id": receipt_id,
             "agent_id": self.agent_id,

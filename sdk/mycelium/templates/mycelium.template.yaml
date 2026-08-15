@@ -6,7 +6,8 @@
 #   Required for transition guards:  transition, action_ledger (+ tools entries you ledger)
 #   Optional:  integrations, task_ledger, state_flush, audit_receipt, outcome_emit,
 #              loop_guard, completion, state_authority, registry, runner,
-#              history_guard, message_validator, deployment, verify — delete unused sections
+#              history_guard, message_validator, deployment, verify,
+#              secret_args — delete unused sections
 #
 # Next steps
 #   1. Allowlist first: rename tools: / tasks: stubs, then copy those exact
@@ -78,6 +79,8 @@
 #   → loop_guard / scope_guard missing_run_id_policy: error (when enabled)
 #   → outcome_emit: required, durable storage, on_failure: error
 #   → completion: requires a verified terminal adapter at startup
+#   → secret_args.policy: error when secret_args is enabled and
+#     consequential tools exist (warn/redact rejected)
 #   Weaker explicit warn/derived/memory-outcome settings are rejected.
 #   unclassified_policy: warn remains an accepted product choice.
 # Verify with:
@@ -254,7 +257,24 @@ loop_guard:
   # Per-tool: tools.my_tool.loop_guard: { consecutive_soft: 20 }  or  false
 
 # ---------------------------------------------------------------------------
-# budget  (not AF-010 — cost / time / step ceilings; refuse next step)
+# secret_args  (AF-010 — block raw credentials before claim / evidence)
+# Omitted = existing behavior. Production + consequential tools require
+#   policy: error. Pass secret:// refs; register_secret_resolver in app
+#   code (no default env-var resolver). allow_fields weakens protection —
+#   scope narrowly by tool (tools.<name>.secret_fields), not globally.
+# Fail-closed pre-execution blocking is primary; redaction is
+#   defense-in-depth. Mycelium cannot sanitize app/provider logs.
+# ---------------------------------------------------------------------------
+# secret_args:
+#   enabled: true
+#   policy: error          # error | redact | warn
+#   allow_fields: []
+#   allow_tools: []
+#   entropy_detection: true
+# Per tool: secret_fields: [api_key]  and/or  secret_args: false
+
+# ---------------------------------------------------------------------------
+# budget  (unnumbered — cost / time / step ceilings; refuse next step)
 # LangGraph/LangChain LLM turns are wired automatically from YAML.
 # Storage: memory | file | sqlite | redis | postgres (atomic update()).
 # missing_usage_policy: warn (default) | error (required in production

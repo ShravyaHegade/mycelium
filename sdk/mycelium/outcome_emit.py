@@ -276,6 +276,16 @@ class OutcomeEmitter:
         parent_request_id: str | None = None,
         handoff_id: str | None = None,
     ) -> None:
+        from mycelium.secret_protection import get_active_secret_policy, sanitize_text
+
+        policy = get_active_secret_policy()
+        if policy is not None and policy.enabled:
+            if resolution_reason:
+                resolution_reason = sanitize_text(resolution_reason)
+            if error_class:
+                error_class = sanitize_text(error_class)
+            if external_operation_ref:
+                external_operation_ref = sanitize_text(external_operation_ref)
         self.emit(
             OutcomeRow(
                 ts=time.time(),
