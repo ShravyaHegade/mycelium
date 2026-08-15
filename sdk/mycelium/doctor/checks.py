@@ -13,6 +13,12 @@ from mycelium.config import (
     _outcome_on_failure,
     _request_identity_policy,
 )
+from mycelium.destructive_confirm import (
+    SHARED_GRANT_STORAGES,
+    SINGLE_NODE_GRANT_STORAGES,
+    STORAGE_MEMORY,
+    registered_destructive_canonicalizers,
+)
 from mycelium.doctor.connectivity import (
     host_hint_from_url,
     probe_file_path,
@@ -44,6 +50,7 @@ from mycelium.storage.redis_outcome import RedisOutcomeStorage
 from mycelium.transition import (
     CONSEQUENTIAL_SIDE_EFFECT_CLASSES,
     REQUEST_IDENTITY_POLICY_REQUIRE_EXPLICIT,
+    SideEffectClass,
 )
 
 SINGLE_NODE_STORAGES = frozenset({"file", "sqlite", "memory"})
@@ -1445,6 +1452,589 @@ def check_entity_guard(ctx: DoctorContext) -> Iterable[DoctorCheck]:
         summary="Destination allowlists are host-controlled",
         details="The model cannot add recipients, hosts, or entity IDs to the allowlist.",
         evidence=EVIDENCE_STATIC,
+        blocking=False,
+    )
+
+
+@doctor_check("destructive_confirm")
+def check_destructive_confirm(ctx: DoctorContext) -> Iterable[DoctorCheck]:
+    """Object-specific grants: tool permission is not object authorization."""
+    cfg = ctx.config
+    raw = cfg.destructive_confirm
+    if raw is None:
+        yield _check(
+            id="destructive.scanning",
+            category="Destructive-confirm",
+            status=DoctorStatus.SKIP,
+            summary="destructive_confirm is not configured (existing behavior)",
+            details="Omitted destructive_confirm preserves pre-AF-011 behavior.",
+            remediation=(
+                "Add destructive_confirm: {enabled: true, missing_policy: error} "
+                "and declare operation + object id_from per destructive tool. "
+                "The model cannot mint grants."
+            ),
+            evidence=EVIDENCE_STATIC,
+            blocking=False,
+        )
+        return
+
+    enabled = bool(raw.get("enabled", True))
+    missing_policy = str(raw.get("missing_policy", "error"))
+    storage = str(raw.get("storage", STORAGE_MEMORY))
+    tools_raw = raw.get("tools") or {}
+    declared = sorted(tools_raw)
+    exact = []
+    incomplete = []
+    require_canon = []
+    binds_request = []
+    for name, tool_raw in tools_raw.items():
+        obj = (tool_raw or {}).get("object") or {}
+        grant = (tool_raw or {}).get("grant") or {}
+        if (
+            tool_raw.get("operation")
+            and obj.get("type")
+            and obj.get("id_from")
+        ):
+            exact.append(name)
+        else:
+            incomplete.append(name)
+        if obj.get("require_canonicalizer"):
+            require_canon.append((name, obj.get("type")))
+        if grant.get("bind_request_id") or grant.get("bind_run_id"):
+            binds_request.append(name)
+
+    yield _check(
+        id="destructive.enabled",
+        category="Destructive-confirm",
+        status=DoctorStatus.PASS if enabled else DoctorStatus.WARN,
+        summary=(
+            "Destructive confirmation is enabled"
+            if enabled
+            else "Destructive confirmation is configured but disabled"
+        ),
+        details=(
+            f"enabled={enabled}; missing_policy={missing_policy!r}; "
+            f"storage={storage!r}; tools={declared or 'none'}"
+        ),
+        remediation="" if enabled else "Set destructive_confirm.enabled: true.",
+        evidence=EVIDENCE_STATIC,
+        blocking=not enabled,
+    )
+    fail_closed = enabled and missing_policy == "error"
+    if cfg.profile == PROFILE_PRODUCTION and declared:
+        yield _check(
+            id="destructive.production_fail_closed",
+            category="Destructive-confirm",
+            status=DoctorStatus.PASS if fail_closed else DoctorStatus.FAIL,
+            summary=(
+                "Production destructive checks fail closed"
+                if fail_closed
+                else "Production destructive checks do not fail closed"
+            ),
+            details=f"missing_policy={missing_policy!r}",
+            remediation=""
+            if fail_closed
+            else "Set destructive_confirm.missing_policy: error under profile: production.",
+            evidence=EVIDENCE_STATIC,
+        )
+        durable = storage != STORAGE_MEMORY
+        yield _check(
+            id="destructive.production_storage",
+            category="Destructive-confirm",
+            status=DoctorStatus.PASS if durable else DoctorStatus.FAIL,
+            summary=(
+                "Production grant storage is durable"
+                if durable
+                else "Production grant storage is memory"
+            ),
+            details=f"storage={storage!r}",
+            remediation=""
+            if durable
+            else "Use file, sqlite, redis, or postgres grant storage in production.",
+            evidence=EVIDENCE_STATIC,
+        )
+        topology = (cfg.deployment or {}).get("topology")
+        if topology == "multi_node":
+            shared = storage in SHARED_GRANT_STORAGES
+            yield _check(
+                id="destructive.shared_storage",
+                category="Destructive-confirm",
+                status=DoctorStatus.PASS if shared else DoctorStatus.FAIL,
+                summary=(
+                    "multi_node grant storage is shared"
+                    if shared
+                    else "multi_node grant storage is single-node"
+                ),
+                details=f"storage={storage!r}; topology={topology}",
+                remediation=""
+                if shared
+                else "Use redis or postgres grant storage for multi-node production.",
+                evidence=EVIDENCE_STATIC,
+            )
+        elif storage in SINGLE_NODE_GRANT_STORAGES and topology != "single_node":
+            yield _check(
+                id="destructive.shared_storage",
+                category="Destructive-confirm",
+                status=DoctorStatus.WARN,
+                summary="Grant storage is single-node; topology is not declared multi_node",
+                details=f"storage={storage!r}; topology={topology!r}",
+                remediation="Set deployment.topology: single_node or use redis/postgres.",
+                evidence=EVIDENCE_STATIC,
+                blocking=False,
+            )
+
+    if enabled and incomplete:
+        yield _check(
+            id="destructive.object_identity",
+            category="Destructive-confirm",
+            status=DoctorStatus.FAIL,
+            summary="Configured destructive tools do not identify an exact object",
+            details=f"incomplete={incomplete}",
+            remediation=(
+                "Set operation, object.type, and object.id_from on each "
+                "destructive_confirm.tools entry."
+            ),
+            evidence=EVIDENCE_STATIC,
+        )
+    elif enabled and exact:
+        yield _check(
+            id="destructive.object_identity",
+            category="Destructive-confirm",
+            status=DoctorStatus.PASS,
+            summary="Configured destructive tools identify an exact object",
+            details=f"tools={exact}",
+            evidence=EVIDENCE_STATIC,
+        )
+
+    irreversible = [
+        name
+        for name, tool in cfg.tools.items()
+        if tool.side_effect_class == SideEffectClass.IRREVERSIBLE
+        and name not in declared
+        and tool.destructive_confirm is not False
+    ]
+    if enabled and irreversible:
+        yield _check(
+            id="destructive.irreversible_declared",
+            category="Destructive-confirm",
+            status=DoctorStatus.WARN
+            if cfg.profile != PROFILE_PRODUCTION
+            else DoctorStatus.FAIL,
+            summary="Irreversible tools have no destructive_confirm declaration",
+            details=f"undeclared={irreversible}",
+            remediation=(
+                "Declare destructive_confirm.tools.<name> with operation and "
+                "object.id_from. Do not infer destructiveness from the tool name."
+            ),
+            evidence=EVIDENCE_STATIC,
+            blocking=cfg.profile == PROFILE_PRODUCTION,
+        )
+
+    if enabled and declared and not binds_request:
+        yield _check(
+            id="destructive.bindings",
+            category="Destructive-confirm",
+            status=DoctorStatus.WARN,
+            summary="No destructive tool binds request_id or run_id",
+            details=f"tools={declared}",
+            remediation="Set grant.bind_request_id: true so retries reuse one grant use.",
+            evidence=EVIDENCE_STATIC,
+            blocking=False,
+        )
+    elif enabled and binds_request:
+        yield _check(
+            id="destructive.bindings",
+            category="Destructive-confirm",
+            status=DoctorStatus.PASS,
+            summary="Destructive tools bind request or run identity",
+            details=f"tools={binds_request}",
+            evidence=EVIDENCE_STATIC,
+            blocking=False,
+        )
+
+    if enabled and require_canon:
+        wired = registered_destructive_canonicalizers()
+        missing_canon = [
+            f"{name}:{otype}"
+            for name, otype in require_canon
+            if str(otype).casefold() not in wired
+        ]
+        yield _check(
+            id="destructive.canonicalizer",
+            category="Destructive-confirm",
+            status=DoctorStatus.WARN if missing_canon else DoctorStatus.PASS,
+            summary=(
+                "Required custom canonicalizers are not registered in this process"
+                if missing_canon
+                else "Required custom canonicalizers are registered"
+            ),
+            details=f"missing={missing_canon or 'none'}; registered={sorted(wired) or 'none'}",
+            remediation=(
+                "Call register_destructive_object_canonicalizer before load. "
+                "Installed or importable adapters are not wired."
+            ),
+            evidence=EVIDENCE_RUNTIME if missing_canon else EVIDENCE_STATIC,
+            blocking=False,
+        )
+
+    yield _check(
+        id="destructive.host_issued",
+        category="Destructive-confirm",
+        status=DoctorStatus.SKIP,
+        summary="Doctor cannot prove the host mints grants",
+        details=(
+            "Configuration cannot show that call sites call "
+            "issue_destructive_grant, that a human approved the grant, "
+            "that the provider honors idempotency keys, or that an "
+            "external side effect occurred. Dual control is not implemented."
+        ),
+        evidence=EVIDENCE_NOT_VERIFIABLE,
+        blocking=False,
+    )
+
+
+@doctor_check("authority_window")
+def check_authority_window(ctx: DoctorContext) -> Iterable[DoctorCheck]:
+    """Use-time expiry for time-bounded authority (batch item 4)."""
+    from mycelium.authority_window import (
+        USE_TIME_CHECK_REQUIRED,
+        registered_authority_use_adapters,
+    )
+
+    cfg = ctx.config
+    raw = cfg.authority_window
+    destructive = cfg.destructive_confirm
+    if raw is None and destructive is None:
+        yield _check(
+            id="authority_window.scanning",
+            category="Authority-window",
+            status=DoctorStatus.SKIP,
+            summary="authority_window is not configured (existing behavior)",
+            details=(
+                "Omitted authority_window preserves timeless paths. "
+                "Time-bounded destructive_confirm still enforces use-time "
+                "expiry when configured."
+            ),
+            remediation=(
+                "Add authority_window: {enabled: true, use_time_check: required} "
+                "when hosts issue time-bounded authority."
+            ),
+            evidence=EVIDENCE_STATIC,
+            blocking=False,
+        )
+        return
+
+    enabled = True if raw is None else bool(raw.get("enabled", True))
+    use_time = (
+        USE_TIME_CHECK_REQUIRED
+        if raw is None
+        else str(raw.get("use_time_check", USE_TIME_CHECK_REQUIRED))
+    )
+    skew = 0.0 if raw is None else float(raw.get("clock_skew_tolerance_seconds", 0))
+    implied = raw is None and destructive is not None
+
+    yield _check(
+        id="authority_window.enabled",
+        category="Authority-window",
+        status=DoctorStatus.PASS if enabled else DoctorStatus.WARN,
+        summary=(
+            "Authority-window use-time checks are enabled"
+            if enabled
+            else "Authority-window is configured but disabled"
+        ),
+        details=(
+            f"enabled={enabled}; use_time_check={use_time!r}; "
+            f"clock_skew_tolerance_seconds={skew}; "
+            f"implied_from_destructive={implied}"
+        ),
+        remediation="" if enabled else "Set authority_window.enabled: true.",
+        evidence=EVIDENCE_STATIC,
+        blocking=not enabled and destructive is not None,
+    )
+
+    use_required = enabled and use_time == USE_TIME_CHECK_REQUIRED
+    if destructive is not None:
+        yield _check(
+            id="authority_window.use_time_destructive",
+            category="Authority-window",
+            status=DoctorStatus.PASS if use_required else DoctorStatus.FAIL,
+            summary=(
+                "Time-bounded destructive authority requires use-time expiry"
+                if use_required
+                else "Time-bounded destructive authority does not require use-time expiry"
+            ),
+            details=f"use_time_check={use_time!r}; enabled={enabled}",
+            remediation=""
+            if use_required
+            else "Set authority_window.use_time_check: required with enabled: true.",
+            evidence=EVIDENCE_STATIC,
+            blocking=True,
+        )
+
+    if cfg.profile == PROFILE_PRODUCTION and destructive is not None:
+        fail_closed = use_required
+        yield _check(
+            id="authority_window.production_fail_closed",
+            category="Authority-window",
+            status=DoctorStatus.PASS if fail_closed else DoctorStatus.FAIL,
+            summary=(
+                "Production authority-window fails closed at use"
+                if fail_closed
+                else "Production authority-window does not fail closed at use"
+            ),
+            details=f"enabled={enabled}; use_time_check={use_time!r}",
+            remediation=""
+            if fail_closed
+            else "Require use-time expiry under profile: production.",
+            evidence=EVIDENCE_STATIC,
+        )
+
+    skew_ok = skew >= 0
+    yield _check(
+        id="authority_window.skew",
+        category="Authority-window",
+        status=DoctorStatus.PASS if skew_ok else DoctorStatus.FAIL,
+        summary=(
+            "Clock skew tolerance is non-negative (narrows validity only)"
+            if skew_ok
+            else "Clock skew tolerance is invalid"
+        ),
+        details=(
+            f"clock_skew_tolerance_seconds={skew}; "
+            "skew never extends expired authority"
+        ),
+        remediation="" if skew_ok else "Set clock_skew_tolerance_seconds >= 0.",
+        evidence=EVIDENCE_STATIC,
+        blocking=not skew_ok,
+    )
+
+    topology = (cfg.deployment or {}).get("topology")
+    grant_storage = None
+    if destructive is not None:
+        grant_storage = str(destructive.get("storage", STORAGE_MEMORY))
+    yield _check(
+        id="authority_window.clock_assumptions",
+        category="Authority-window",
+        status=DoctorStatus.PASS,
+        summary="Multi-worker clock assumptions are declared for authority expiry",
+        details=(
+            f"topology={topology!r}; grant_storage={grant_storage!r}; "
+            "durable authority uses persisted UTC expires_at; shared Redis/"
+            "PostgreSQL stores should prefer authoritative storage time when "
+            "available; process-local clocks are not the multi-worker guarantee"
+        ),
+        evidence=EVIDENCE_STATIC,
+        blocking=False,
+    )
+
+    adapters = sorted(registered_authority_use_adapters())
+    yield _check(
+        id="authority_window.adapters",
+        category="Authority-window",
+        status=DoctorStatus.PASS if not adapters else DoctorStatus.PASS,
+        summary=(
+            "Custom authority use adapters are registered in this process"
+            if adapters
+            else "No custom authority use adapters are registered in this process"
+        ),
+        details=f"registered={adapters or 'none'}; importable adapters are not wired",
+        remediation=(
+            "Call register_authority_use_adapter before load when a custom "
+            "authority kind must participate in use-time checks."
+        ),
+        evidence=EVIDENCE_RUNTIME if adapters else EVIDENCE_STATIC,
+        blocking=False,
+    )
+
+    yield _check(
+        id="authority_window.batch_incomplete",
+        category="Authority-window",
+        status=DoctorStatus.PASS
+        if getattr(cfg, "use_time_currency", None) is not None
+        else DoctorStatus.WARN,
+        summary=(
+            "Authority-window and use-time currency batch guarantee is complete"
+            if getattr(cfg, "use_time_currency", None) is not None
+            else (
+                "Authority-window is implemented; combined use-time currency "
+                "batch guarantee is incomplete"
+            )
+        ),
+        details=(
+            "Items 4 (authority-window) and 5 (use-time currency) are both "
+            "configured — the combined production authority-safety batch "
+            "guarantee is wired."
+            if getattr(cfg, "use_time_currency", None) is not None
+            else (
+                "Item 4 (authority-window expiry) alone does not complete item 5 "
+                "(use-time currency). Doctor must not claim the full production "
+                "authority-safety guarantee until use-time currency is present. "
+                "Do not release until item 5 is implemented."
+            )
+        ),
+        evidence=EVIDENCE_STATIC,
+        blocking=False,
+    )
+
+    yield _check(
+        id="authority_window.not_verifiable",
+        category="Authority-window",
+        status=DoctorStatus.SKIP,
+        summary="Doctor cannot prove end-to-end authority validity",
+        details=(
+            "not_verifiable: clock synchronization between machines; "
+            "host-issued approval timestamps; provider-side authorization "
+            "validity; absence of custom code between final validation and "
+            "the side effect. Mycelium cannot guarantee authority remains "
+            "valid throughout an external network call."
+        ),
+        evidence=EVIDENCE_NOT_VERIFIABLE,
+        blocking=False,
+    )
+
+
+@doctor_check("use_time_currency")
+def check_use_time_currency(ctx: DoctorContext) -> Iterable[DoctorCheck]:
+    """Use-time currency for decide-time facts (AF-012 / batch item 5)."""
+    from mycelium.use_time_currency import registered_use_time_validators
+
+    cfg = ctx.config
+    raw = cfg.use_time_currency
+    authority = cfg.authority_window
+    destructive = cfg.destructive_confirm
+    if raw is None:
+        yield _check(
+            id="use_time_currency.scanning",
+            category="Use-time-currency",
+            status=DoctorStatus.SKIP,
+            summary="use_time_currency is not configured (existing behavior)",
+            details=(
+                "Omitted use_time_currency preserves decide-time-only paths. "
+                "Authority-window expiry alone does not revalidate fact currency."
+            ),
+            remediation=(
+                "Add use_time_currency: {enabled: true, missing_policy: error, "
+                "tools: {...}} for consequential tools that depend on "
+                "decide-time facts."
+            ),
+            evidence=EVIDENCE_STATIC,
+            blocking=False,
+        )
+        return
+
+    enabled = bool(raw.get("enabled", True))
+    missing_policy = str(raw.get("missing_policy", "error"))
+    tools = raw.get("tools") or {}
+    validators_declared: set[str] = set()
+    for tool_raw in tools.values():
+        for fact in tool_raw.get("facts") or []:
+            name = fact.get("validator")
+            if isinstance(name, str) and name.strip():
+                validators_declared.add(name.strip())
+
+    yield _check(
+        id="use_time_currency.enabled",
+        category="Use-time-currency",
+        status=DoctorStatus.PASS if enabled else DoctorStatus.WARN,
+        summary=(
+            "Use-time currency checks are enabled"
+            if enabled
+            else "Use-time currency is configured but disabled"
+        ),
+        details=(
+            f"enabled={enabled}; missing_policy={missing_policy!r}; "
+            f"tools={sorted(tools) or 'none'}"
+        ),
+        remediation="" if enabled else "Set use_time_currency.enabled: true.",
+        evidence=EVIDENCE_STATIC,
+        blocking=False,
+    )
+
+    if cfg.profile == PROFILE_PRODUCTION and enabled and tools:
+        fail_closed = missing_policy == "error"
+        yield _check(
+            id="use_time_currency.production_fail_closed",
+            category="Use-time-currency",
+            status=DoctorStatus.PASS if fail_closed else DoctorStatus.FAIL,
+            summary=(
+                "Production use-time currency fails closed on missing facts"
+                if fail_closed
+                else "Production use-time currency does not fail closed"
+            ),
+            details=f"missing_policy={missing_policy!r}",
+            remediation=""
+            if fail_closed
+            else "Set use_time_currency.missing_policy: error under profile: production.",
+            evidence=EVIDENCE_STATIC,
+            blocking=True,
+        )
+
+    registered = registered_use_time_validators()
+    missing = sorted(validators_declared - set(registered))
+    yield _check(
+        id="use_time_currency.validators",
+        category="Use-time-currency",
+        status=DoctorStatus.PASS if not missing else DoctorStatus.WARN,
+        summary=(
+            "Declared use-time validators are registered in this process"
+            if not missing
+            else "Some declared use-time validators are not registered"
+        ),
+        details=(
+            f"declared={sorted(validators_declared) or 'none'}; "
+            f"registered={sorted(registered) or 'none'}; "
+            f"missing={missing or 'none'}"
+        ),
+        remediation=(
+            ""
+            if not missing
+            else "Call register_use_time_validator before load/run for each "
+            "validator name listed in use_time_currency.tools."
+        ),
+        evidence=EVIDENCE_RUNTIME if registered else EVIDENCE_STATIC,
+        blocking=False,
+    )
+
+    batch_ready = (
+        enabled
+        and bool(tools)
+        and (authority is not None or destructive is not None)
+    )
+    yield _check(
+        id="use_time_currency.batch_complete",
+        category="Use-time-currency",
+        status=DoctorStatus.PASS if batch_ready else DoctorStatus.WARN,
+        summary=(
+            "Authority-window and use-time currency batch guarantee is wired"
+            if batch_ready
+            else "Use-time currency batch guarantee is incomplete"
+        ),
+        details=(
+            "Item 5 is configured with tools and item 4 "
+            "(authority_window / destructive_confirm) is also present."
+            if batch_ready
+            else (
+                "Configure use_time_currency.tools and enable authority_window "
+                "(or destructive_confirm) so items 4 and 5 complete the batch."
+            )
+        ),
+        evidence=EVIDENCE_STATIC,
+        blocking=False,
+    )
+
+    yield _check(
+        id="use_time_currency.not_verifiable",
+        category="Use-time-currency",
+        status=DoctorStatus.SKIP,
+        summary="Doctor cannot prove end-to-end fact currency",
+        details=(
+            "not_verifiable: whether host validators query the authoritative "
+            "source; replica consistency or cache behavior; correctness of "
+            "host-provided fact values; provider conditional-write guarantees; "
+            "custom code after final validation; fact changes during a remote "
+            "network call. Local revalidation cannot eliminate the remote-call race."
+        ),
+        evidence=EVIDENCE_NOT_VERIFIABLE,
         blocking=False,
     )
 

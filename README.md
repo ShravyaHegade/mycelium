@@ -29,6 +29,7 @@ The taxonomy **is** the product story. Each ID is a real failure class from prod
 | **AF-007** | Premature termination | Required checklist items must complete before the run can declare success |
 | **AF-008** | Cascading permission | The run tool allowlist freezes; mid-run / handoff widen is refused |
 | **AF-010** | Secret-in-args | Raw credentials are blocked before claim; pass `secret://` references |
+| **AF-011** | Destructive confirm | Tool permission is not object authorization; host-issued grants only |
 | AF-001 / AF-005 / AF-009 | Hallucination · goal misalignment · injection | Roadmap / judgment tier — not claimed as deterministic SDK guards yet |
 
 Full definitions (shipped vs roadmap): [sdk/docs/FAILURE_MODE_CATALOG.md](sdk/docs/FAILURE_MODE_CATALOG.md).
@@ -61,6 +62,9 @@ Mycelium wraps tool calls after the LLM returns `tool_calls` and returns a verdi
 - **Budget / runaway spend (unnumbered)** — `budget:` · ceilings + `@budget_guard` / `instrument_llm` (auto `check("llm")`) · `mycelium budget release`
 - **AF-010 Secret-in-args** — `secret_args:` · block raw credentials before claim · pass `secret://` references · `mycelium verify --scenario secret-in-args`
 - **Entity / destination guard (unnumbered)** — `entity_guard:` · write tools declare the destination argument · host allowlist · fail closed before claim · `mycelium verify --scenario entity-guard`
+- **AF-011 Destructive confirm** — `destructive_confirm:` · host-issued object grant · fail closed before claim · `mycelium verify --scenario destructive-confirm`
+- **Authority-window expiry** — `authority_window:` · re-check time-bounded authority at use before the side-effect boundary · `mycelium verify --scenario authority-window`
+- **Use-time currency (AF-012)** — `use_time_currency:` · revalidate decide-time facts at use · `mycelium verify --scenario use-time-currency`
 - **AF-006 Context corruption** — `@protect` / Session · optional message/history validation
 - **AF-007 Premature termination** — `completion:` host checklist · refuse or warn-and-allow
 - **AF-008 Scope escalation** — `scope_guard:` freeze allowlist · re-check every step

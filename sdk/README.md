@@ -64,6 +64,9 @@ Mycelium sits between your agent loop and your tools (after the LLM returns `too
 | **Opt-in** | **Budget / runaway spend (unnumbered)** | `budget:` — `max_duration` / `max_steps` / `max_tokens` / `max_usd`; tools auto-wrapped; **LLM turns auto-wired** on LangGraph/LangChain; `missing_usage_policy`; operator `mycelium budget release` |
 | **Opt-in** | **AF-010 Secret-in-args** | `secret_args:` — block raw credentials before claim; pass `secret://` references; shared sanitizer on evidence. Fail-closed is primary; redaction is defense-in-depth |
 | **Opt-in** | **Entity / destination guard (unnumbered)** | `entity_guard:` — a write may carry sensitive data only into a host-authorized destination; unknown destination means no execution |
+| **Opt-in** | **AF-011 Destructive confirm** | `destructive_confirm:` — tool permission is not object authorization; a host-issued grant is required for the exact operation and canonical object |
+| **Opt-in** | **Authority-window expiry** | `authority_window:` — re-validate time-bounded authority at use (after lease/backoff, before `mark_maybe_crossed`) |
+| **Opt-in** | **AF-012 Use-time currency** | `use_time_currency:` — revalidate decide-time facts at use; stale/changed/missing/unverifiable facts cannot authorize a side effect |
 | **Opt-in** | **AF-004 Tool misuse** | `@bounded` input/output/scope checks; optional `ToolRegistry` allowlist — block before the tool runs |
 | **Opt-in** | **AF-006 Context corruption** | TTL cache (`@protect` / `Session`); optional `MessageValidator` / `HistoryGuard` before the next LLM turn |
 | **Opt-in** | **AF-007 Premature termination** | `completion:` — host checklist; unmarked **required** → refuse terminal; unmarked **optional** → warn and allow |
@@ -1106,9 +1109,9 @@ run. LangGraph's adapter copies an existing framework `run_id` into
 `execution_scope` — do not pass a duplicate when the adapter already provides
 one.
 
-Wrapper order: `@secret_args` → `@entity_guard` → `@state_authority` →
-`@scope_guard` → `@budget_guard` → `@loop_guard` → `@ledger` → `@bounded` →
-`@protect` → `func`.
+Wrapper order: `@secret_args` → `@entity_guard` → `@destructive_confirm` →
+`@state_authority` → `@scope_guard` → `@budget_guard` → `@loop_guard` →
+`@ledger` → `@bounded` → `@protect` → `func`.
 
 ### Budget guard (unnumbered)
 
@@ -1289,6 +1292,189 @@ consequential tools lack a declaration.
 `mycelium verify --scenario entity-guard` proves unauthorized destinations
 never claim.
 
+### Destructive confirm (AF-011)
+
+Tool permission is not object authorization. A configured destructive
+tool — refund, delete, cancel, settle, revoke, terminate, purge,
+overwrite — may claim or execute only when the host has granted **this
+exact operation** on **this exact canonical object**, in this scope/run
+when bound, before expiry, for at most `max_uses`. The model cannot
+create, widen, renew, or approve a grant. Dual control is intentionally
+not implemented; teams that need two-person approval must enforce it in
+the host workflow **before** grant issuance.
+
+```yaml
+destructive_confirm:
+  enabled: true
+  missing_policy: error
+
+  tools:
+    refund_payment:
+      operation: refund
+      object:
+        type: payment
+        id_from: payment_id
+      grant:
+        bind_request_id: true
+        max_uses: 1
+        ttl_seconds: 300
+    delete_file:
+      operation: delete
+      object:
+        type: file
+        id_from: file_id
+      grant:
+        bind_request_id: true
+        max_uses: 1
+        ttl_seconds: 120
+
+authority_window:
+  enabled: true
+  use_time_check: required
+  clock_skew_tolerance_seconds: 0
+```
+
+Authorization is checked again immediately before use. Expiry at or before
+the use instant (`now >= expires_at`) blocks execution; completed-result
+reads remain available. Mycelium cannot guarantee authority remains valid
+throughout an external network call. Clock synchronization is an
+operational assumption unless storage/server time is authoritative. This
+item alone does not complete use-time currency — do not release until that
+lands.
+
+```python
+from mycelium import (
+    TransitionScope,
+    destructive_grants,
+    execution_scope,
+    issue_destructive_grant,
+)
+
+grant = destructive_grants.issue(
+    operation="refund",
+    object_type="payment",
+    object_id=payment.id,
+    request_id=request.id,
+    expires_in=300,
+)
+
+with execution_scope(
+    TransitionScope(run_id=server_run.id, destructive_grants=(grant,))
+):
+    agent.run(...)
+```
+
+Do not infer destructiveness from tool names. Production protection
+depends on this explicit configuration or a trusted
+`side_effect_class: irreversible` declaration (production fails startup
+if an irreversible tool is undeclared). Grants are minted only through
+`issue_destructive_grant` / `destructive_grants.issue` — never accepted
+as a model-generated dictionary. Object type, object id, and operation
+are canonicalized before compare; custom canonicalizers register with
+`register_destructive_object_canonicalizer` and run before claim.
+
+Enforcement runs after ordinary argument validation and before ledger
+claim, lease, tool body, provider call, or any side effect. A missing,
+expired, exhausted, mismatched, or unverifiable grant raises
+`DestructiveGrantError` and does not create a claim. Canonical
+operation and object identity are bound into the ledger fingerprint so
+the same `request_id` with a changed target fails closed. A retry with
+the same stable `request_id`, operation, object, and meaningful
+arguments reuses the ledger result and does not consume a second grant
+use. If the first attempt is ambiguous after a possible provider
+crossing, a fresh grant does not authorize a second body — use
+reconcile or hard-block resolution.
+
+For `keyed_mutate` tools, reuse the same stable business `request_id` as
+the provider idempotency key where the provider supports it and the
+tool declares a safe mapping. Mycelium does not auto-inject
+provider-specific idempotency parameters. A grant authorizes an
+attempt; it does not replace provider idempotency or prove the
+provider's final outcome. Mycelium does not claim exactly-once
+external effects.
+
+Grant storage: `memory` (dev/test only), `file` / `sqlite` (single-node),
+`redis` / `postgres` (multi-worker). Production rejects memory.
+Multi-node production rejects file/sqlite. Omitted
+`destructive_confirm:` keeps existing behavior.
+
+`mycelium doctor` checks that configured tools identify an exact object,
+that production is fail-closed and durable, and labels what cannot be
+proven from configuration: host call sites actually mint grants, the
+human approval process, provider idempotency, and external side
+effects. Installed adapters are not treated as wired.
+`mycelium verify --scenario destructive-confirm` proves ungranted
+objects never claim.
+
+### Authority-window expiry
+
+Time-bounded authority must still be valid at the side-effect boundary.
+Mycelium validates at authorize and again at use (after lease / queue /
+backoff, before `mark_maybe_crossed` / provider / body). `now >=
+expires_at` raises `AuthorityExpiredError`. Skew tolerance never extends
+expired authority. Completed ledger RETURN does not need fresh
+authority. Omitted `authority_window:` keeps timeless paths unchanged;
+configured `destructive_confirm:` still enforces use-time expiry.
+Pairs with AF-012 use-time currency for the full batch guarantee.
+`mycelium verify --scenario authority-window`.
+
+### Use-time currency (AF-012)
+
+Decide-time truth is not execute-time authority. Facts the agent used to
+decide (refundability, ownership, inventory, policy revision, price) must
+still be current at the side-effect boundary. Hosts declare required facts
+and register validators; Mycelium authorizes/binds before claim and
+revalidates at use (after lease/backoff, before `mark_maybe_crossed` /
+body). Stale (`age >= max_age_seconds`), changed, missing, or unverifiable
+facts raise `UseTimeCurrencyError` — no body, no provider call, no
+`maybe_crossed`. Prompt scanning is not used. Completed ledger RETURN does
+not revalidate. Provider preconditions (ETag / If-Match) may be declared
+explicitly; local revalidation cannot eliminate a fact change during a
+remote network call. Omitted `use_time_currency:` keeps existing behavior.
+Production requires `missing_policy: error`. Together with authority-window
+expiry, this completes the five-item side-effect guardrails batch.
+`mycelium verify --scenario use-time-currency`.
+
+```yaml
+use_time_currency:
+  enabled: true
+  missing_policy: error
+  tools:
+    refund_payment:
+      facts:
+        - name: payment.refundable
+          subject: {type: payment, id_from: payment_id}
+          validator: payment_state
+          require: {value: true}
+          revision_from: payment_version
+          max_age_seconds: 30
+          bind_request_id: true
+```
+
+```python
+from mycelium import register_use_time_validator, use_time_facts, ValidatorResult
+
+def payment_state(*, fact, subject_id, **_):
+    payment = load_payment(subject_id)  # host authoritative source
+    return ValidatorResult(
+        current=payment.refundable,
+        value=payment.refundable,
+        revision=str(payment.version),
+    )
+
+register_use_time_validator("payment_state", payment_state)
+use_time_facts.capture(
+    name="payment.refundable",
+    subject_type="payment",
+    subject_id=payment.id,
+    value=True,
+    revision=payment.version,
+    max_age_seconds=30,
+    request_id=request_id,
+    require_value=True,
+)
+```
+
 ### Scope guard (AF-008): freeze run tool allowlist
 
 AF-008 is when a narrow grant **widens mid-run** (handoff, dynamic
@@ -1319,7 +1505,7 @@ with execution_scope(TransitionScope(run_id="r1", thread_id="t")):
     fetch_customer(customer_id="c1")  # ok; tools outside the freeze soft-block
 ```
 
-Wrapper order: `@secret_args` → `@entity_guard` → `@scope_guard` → `@loop_guard` → `@ledger` →
+Wrapper order: `@secret_args` → `@entity_guard` → `@destructive_confirm` → `@scope_guard` → `@loop_guard` → `@ledger` →
 `@bounded` → `@protect`. CLI: `mycelium scope status|bind`. Demo:
 `python examples/scope_guard_allowlist.py` (from `sdk/`).
 
@@ -1435,7 +1621,7 @@ def refund(amount: float, *, tool_call_id: str, state_ref: str) -> dict:
     ...
 ```
 
-Wrapper order: `@secret_args` → `@entity_guard` → `@state_authority` → `@scope_guard` →
+Wrapper order: `@secret_args` → `@entity_guard` → `@destructive_confirm` → `@state_authority` → `@scope_guard` →
 `@loop_guard` → `@ledger` → `@bounded` → `@protect` → `func`.
 
 `decision_id` / `state_ref` are bookkeeping kwargs (excluded from the args
@@ -1601,6 +1787,11 @@ policies:
   is rejected. Omitted `secret_args:` stays backward compatible.
 - `entity_guard.missing_policy: error` when `entity_guard:` is enabled.
   Omitted `entity_guard:` stays backward compatible.
+- `destructive_confirm.missing_policy: error` when `destructive_confirm:`
+  is enabled. Production grant storage must be durable (not memory).
+  Multi-node production requires redis or postgres. Irreversible tools
+  must be declared. Omitted `destructive_confirm:` stays backward
+  compatible.
 
 Explicit weaker settings (`warn`, `derived`, memory outcomes) under
 production are rejected (`ConfigError`), not silently weakened. Omit
@@ -1705,7 +1896,8 @@ $ mycelium verify --config mycelium.yaml --scenario all --strict --json
 ```
 
 Scenarios: `redispatch`, `contention`, `storage-outage`, `worker-crash`,
-`ambiguous-effect`, `reconcile`, `secret-in-args`, `entity-guard`, or `all` (that order). Verify never executes
+`ambiguous-effect`, `reconcile`, `secret-in-args`, `entity-guard`,
+`destructive-confirm`, `authority-window`, or `all` (that order). Verify never executes
 application tools, never calls an LLM, never contacts a real business provider,
 and never inspects or alters existing production transitions. Test data uses a
 unique `mycelium:verify:<uuid>:` namespace and is deleted unless

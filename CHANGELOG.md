@@ -5,7 +5,60 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
 
 ## Unreleased
 
+## 1.33.0 (2026-08-15)
+
+MINOR: side-effect guardrails batch for unsafe / irreversible writes.
+Secret-in-args, destination policy, destructive confirm, authority-window
+expiry, and use-time currency ship together so decide-time authority
+cannot authorize a stale execute-time side effect.
+
 ### Added
+
+- **Use-time currency (AF-012):** decide-time facts (refundability, ownership,
+  inventory, policy revision, price, …) are bound at authorize and
+  revalidated at use, immediately before `mark_maybe_crossed` / provider /
+  body. Stale (`age >= max_age_seconds`), changed, missing, false, or
+  unverifiable facts raise `UseTimeCurrencyError`; no body, no provider
+  call, no `maybe_crossed`. Host `use_time_facts.capture` +
+  `register_use_time_validator` only — no prompt scanning. Ordered use
+  boundary: authority-window expiry then currency. Short-lived use-boundary
+  token avoids double validation between `body_start` and
+  `mark_maybe_crossed`. Completed ledger RETURN does not revalidate.
+  Configurable via `use_time_currency:`; omitted keeps existing behavior.
+  Production requires `missing_policy: error`. Together with
+  authority-window expiry, completes the five-item side-effect guardrails
+  batch. `mycelium doctor` / `mycelium verify --scenario use-time-currency`.
+
+- **Authority-window expiry:** time-bounded authority (destructive grants and
+  future adapters) is validated at authorize and again at use, immediately
+  before `mark_maybe_crossed` / provider invocation / tool body side effect.
+  `now >= expires_at` hard-blocks with `AuthorityExpiredError`; no body, no
+  provider call, no `maybe_crossed` marker, no auto-renew. Skew tolerance
+  only narrows validity. Completed ledger RETURN retries do not require
+  fresh authority. Configurable via `authority_window:`; omitted config
+  keeps timeless paths unchanged, while configured `destructive_confirm:`
+  still enforces use-time expiry. `mycelium doctor` reports coverage and
+  labels clock sync / host timestamps / provider auth / post-check gaps
+  `not_verifiable`. Pairs with AF-012 use-time currency for the full batch
+  guarantee. `mycelium verify --scenario authority-window`.
+
+- **Destructive confirm (AF-011):** optional `destructive_confirm:` requires
+  a host-issued grant for a specific operation on a specific canonical
+  object before a configured destructive tool can claim, execute, or
+  cross a side-effect boundary. Tool permission is not object
+  authorization. The model cannot create, widen, renew, or approve a
+  grant. Dual control is intentionally not implemented — two-person
+  approval belongs in the host workflow that calls
+  `issue_destructive_grant`. Retries with the same stable `request_id`
+  reuse the ledger result and do not consume a second use. A grant
+  authorizes an attempt; it does not prove the provider outcome or
+  replace provider idempotency. Production rejects memory grant storage
+  and, on `deployment.topology: multi_node`, file/sqlite storage.
+  Omitted `destructive_confirm:` keeps existing behavior.
+  `mycelium doctor` reports coverage and labels host minting / human
+  approval / provider outcome `not_verifiable`.
+  `mycelium verify --scenario destructive-confirm` proves ungranted
+  objects never claim.
 
 - **Entity / destination guard:** optional `entity_guard:` authorizes write
   destinations (email, https URL, host, entity id) before ledger claim.

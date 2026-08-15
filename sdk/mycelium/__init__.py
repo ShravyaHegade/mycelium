@@ -47,6 +47,13 @@ from mycelium.audit_receipt import (
     InMemoryAuditReceiptStorage,
     verify_receipt,
 )
+from mycelium.authority_window import (
+    AuthorityExpiredError,
+    AuthorityValidation,
+    AuthorityValidationPhase,
+    BoundAuthority,
+    validate_authority_at_use,
+)
 from mycelium.budget_guard import (
     KIND_LLM,
     KIND_TOOL,
@@ -125,6 +132,15 @@ from mycelium.config import (
     TransitionConfig,
     load_config,
     load_config_from_string,
+)
+from mycelium.destructive_confirm import (
+    DestructiveGrant,
+    DestructiveGrantError,
+    apply_destructive_confirm,
+    destructive_grants,
+    enforce_destructive_confirm,
+    issue_destructive_grant,
+    register_destructive_object_canonicalizer,
 )
 from mycelium.doctor import (
     EVIDENCE_CONNECTIVITY,
@@ -294,6 +310,16 @@ from mycelium.transition_resolution import (
     TransitionGate,
     repair_transition_fields,
     transition_needs_repair,
+)
+from mycelium.use_time_currency import (
+    UseTimeCurrencyError,
+    UseTimeFact,
+    UseTimeValidation,
+    ValidatorResult,
+    apply_use_time_currency,
+    enforce_use_boundary,
+    register_use_time_validator,
+    use_time_facts,
 )
 from mycelium.verify import (
     IsolationRefused,
@@ -480,6 +506,26 @@ __all__ = [
     "protect",
     "protect_sync",
     "PAYLOAD_OMITTED",
+    "AuthorityExpiredError",
+    "AuthorityValidation",
+    "AuthorityValidationPhase",
+    "BoundAuthority",
+    "validate_authority_at_use",
+    "UseTimeCurrencyError",
+    "UseTimeFact",
+    "UseTimeValidation",
+    "ValidatorResult",
+    "apply_use_time_currency",
+    "enforce_use_boundary",
+    "register_use_time_validator",
+    "use_time_facts",
+    "DestructiveGrant",
+    "DestructiveGrantError",
+    "apply_destructive_confirm",
+    "destructive_grants",
+    "enforce_destructive_confirm",
+    "issue_destructive_grant",
+    "register_destructive_object_canonicalizer",
     "EntityGuardError",
     "apply_entity_guard",
     "canonicalize_email",

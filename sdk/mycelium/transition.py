@@ -542,6 +542,7 @@ class TransitionScope:
     thread_id: str = ""
     run_id: str = ""
     node: str = ""
+    destructive_grants: tuple[object, ...] = ()
 
 
 _execution_scope_var: ContextVar[TransitionScope | None] = ContextVar(

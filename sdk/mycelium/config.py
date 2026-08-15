@@ -32,6 +32,12 @@ from mycelium.audit_receipt import (
     InMemoryAuditReceiptStorage,
     resolve_signing_key,
 )
+from mycelium.authority_window import (
+    USE_TIME_CHECK_REQUIRED,
+    USE_TIME_CHECKS,
+    AuthorityWindowPolicy,
+    set_authority_window_policy,
+)
 from mycelium.budget_guard import (
     MISSING_USAGE_POLICIES,
     MISSING_USAGE_POLICY_ERROR,
@@ -56,6 +62,31 @@ from mycelium.completion_contract import (
     InMemoryCompletionStorage,
     registered_terminal_adapters,
     set_active_completion_contract,
+)
+from mycelium.destructive_confirm import (
+    MISSING_POLICIES as DESTRUCTIVE_MISSING_POLICIES,
+)
+from mycelium.destructive_confirm import (
+    MISSING_POLICY_ERROR as DESTRUCTIVE_MISSING_POLICY_ERROR,
+)
+from mycelium.destructive_confirm import (
+    SHARED_GRANT_STORAGES,
+    STORAGE_FILE,
+    STORAGE_MEMORY,
+    STORAGE_POSTGRES,
+    STORAGE_REDIS,
+    STORAGE_SQLITE,
+    DestructiveConfirmPolicy,
+    DestructiveGrantSpec,
+    DestructiveObjectSpec,
+    DestructiveToolPolicy,
+    FileDestructiveGrantStore,
+    InMemoryDestructiveGrantStore,
+    PostgresDestructiveGrantStore,
+    RedisDestructiveGrantStore,
+    SqliteDestructiveGrantStore,
+    apply_destructive_confirm,
+    destructive_confirm_policy_for_tool,
 )
 from mycelium.entity_guard import (
     DEST_TYPES,
@@ -157,6 +188,20 @@ from mycelium.transition import (
     parse_side_effect_boundary,
     parse_side_effect_class,
     parse_spendability,
+)
+from mycelium.use_time_currency import (
+    MISSING_POLICIES as USE_TIME_MISSING_POLICIES,
+)
+from mycelium.use_time_currency import (
+    MISSING_POLICY_ERROR as USE_TIME_MISSING_POLICY_ERROR,
+)
+from mycelium.use_time_currency import (
+    UseTimeCurrencyPolicy,
+    UseTimeFactSpec,
+    UseTimeToolPolicy,
+    apply_use_time_currency,
+    set_use_time_currency_policy,
+    use_time_currency_policy_for_tool,
 )
 
 
@@ -324,6 +369,10 @@ class ToolConfig:
     secret_args: bool | None = None
     # Per-tool entity_guard: None=inherit global, False=disable
     entity_guard: bool | None = None
+    # Per-tool destructive_confirm: None=inherit global, False=disable
+    destructive_confirm: bool | None = None
+    # Per-tool use_time_currency: None=inherit global, False=disable
+    use_time_currency: bool | None = None
 
     def is_noop(self) -> bool:
         return (
@@ -338,6 +387,8 @@ class ToolConfig:
             and not self.secret_fields
             and self.secret_args is None
             and self.entity_guard is None
+            and self.destructive_confirm is None
+            and self.use_time_currency is None
         )
 
 
@@ -389,6 +440,9 @@ class MyceliumConfig:
     verify: dict[str, Any] | None = None
     secret_args: dict[str, Any] | None = None
     entity_guard: dict[str, Any] | None = None
+    destructive_confirm: dict[str, Any] | None = None
+    authority_window: dict[str, Any] | None = None
+    use_time_currency: dict[str, Any] | None = None
     profile: str = PROFILE_DEVELOPMENT
     _audit_emitter: AuditReceiptEmitter | None = None
     _outcome_emitter: OutcomeEmitter | None = None
@@ -398,6 +452,7 @@ class MyceliumConfig:
     _state_authority: StateAuthority | None = None
     _completion: CompletionContract | None = None
     _state_flush: StateFlush | None = None
+    _destructive_store: Any | None = None
     _audit_auto: bool = False
     _terminal_adapters: frozenset[str] = frozenset()
     _llm_adapters: frozenset[str] = frozenset()
@@ -410,9 +465,10 @@ class MyceliumConfig:
         function is returned unchanged.
 
         Guard order (outermost first, after optional LangGraph instrument):
-        ``@secret_args`` -> ``@entity_guard`` -> ``@state_authority`` ->
-        ``@scope_guard`` -> ``@budget_guard`` -> ``@loop_guard`` ->
-        ``@ledger`` -> ``@bounded`` -> ``@protect`` -> ``func``
+        ``@secret_args`` -> ``@entity_guard`` -> ``@destructive_confirm`` ->
+        ``@use_time_currency`` -> ``@state_authority`` -> ``@scope_guard`` ->
+        ``@budget_guard`` -> ``@loop_guard`` -> ``@ledger`` -> ``@bounded`` ->
+        ``@protect`` -> ``func``
         """
         return self.apply_tool(func.__name__, func)
 
@@ -516,6 +572,109 @@ class MyceliumConfig:
             return False
         return name in policy.tools
 
+    def destructive_confirm_applies(
+        self, name: str, tool_config: ToolConfig | None = None
+    ) -> bool:
+        """Whether destructive-confirm should wrap this tool."""
+        if self.destructive_confirm is None:
+            return False
+        policy = destructive_confirm_policy_from_mapping(self.destructive_confirm)
+        if not policy.enabled:
+            return False
+        cfg = tool_config if tool_config is not None else self.tools.get(name)
+        if cfg is not None and cfg.destructive_confirm is False:
+            return False
+        return name in policy.tools
+
+    def use_time_currency_applies(
+        self, name: str, tool_config: ToolConfig | None = None
+    ) -> bool:
+        """Whether use-time currency should wrap this tool."""
+        if self.use_time_currency is None:
+            return False
+        policy = use_time_currency_policy_from_mapping(self.use_time_currency)
+        if not policy.enabled:
+            return False
+        cfg = tool_config if tool_config is not None else self.tools.get(name)
+        if cfg is not None and cfg.use_time_currency is False:
+            return False
+        return name in policy.tools
+
+    def build_destructive_grant_store(self) -> Any:
+        """Build (once) the grant store declared by ``destructive_confirm:``."""
+        if self._destructive_store is not None:
+            return self._destructive_store
+        raw = self.destructive_confirm or {}
+        self._destructive_store = self._build_destructive_grant_store(raw)
+        return self._destructive_store
+
+    @staticmethod
+    def _build_destructive_grant_store(raw: dict[str, Any]) -> Any:
+        storage_type = raw.get("storage", STORAGE_MEMORY)
+        if storage_type == STORAGE_MEMORY:
+            return InMemoryDestructiveGrantStore()
+        if storage_type == STORAGE_FILE:
+            path = raw.get("path")
+            if not path:
+                raise ConfigError("destructive_confirm storage 'file' requires a 'path'")
+            return FileDestructiveGrantStore(path)
+        if storage_type == STORAGE_SQLITE:
+            path = raw.get("path")
+            if not path:
+                raise ConfigError("destructive_confirm storage 'sqlite' requires a 'path'")
+            return SqliteDestructiveGrantStore(
+                path,
+                table=str(raw.get("table", "mycelium_destructive_grants")),
+            )
+        if storage_type == STORAGE_REDIS:
+            from mycelium.storage._helpers import resolve_storage_url
+
+            try:
+                url = resolve_storage_url(raw)
+            except ValueError as exc:
+                raise ConfigError(str(exc)) from exc
+            return RedisDestructiveGrantStore(
+                url,
+                prefix=str(raw.get("prefix", "mycelium:destructive:")),
+            )
+        if storage_type == STORAGE_POSTGRES:
+            from mycelium.storage._helpers import resolve_storage_url
+
+            try:
+                dsn = resolve_storage_url(raw, url_key="dsn")
+            except ValueError as exc:
+                raise ConfigError(str(exc)) from exc
+            return PostgresDestructiveGrantStore(
+                dsn,
+                table=str(raw.get("table", "mycelium_destructive_grants")),
+            )
+        raise ConfigError(f"unknown destructive_confirm storage type: {storage_type!r}")
+
+    def _activate_authority_window(self) -> None:
+        """Bind process policy for use-time expiry checks."""
+        raw = self.authority_window
+        if raw is None and self.destructive_confirm is not None:
+            # AF-011 already promises expiry; enable use-time even when
+            # authority_window: is omitted.
+            set_authority_window_policy(
+                AuthorityWindowPolicy(
+                    enabled=True,
+                    use_time_check=USE_TIME_CHECK_REQUIRED,
+                    clock_skew_tolerance_seconds=0.0,
+                )
+            )
+            return
+        if raw is None:
+            return
+        set_authority_window_policy(authority_window_policy_from_mapping(raw))
+
+    def _activate_use_time_currency(self) -> None:
+        """Bind process policy for use-time currency checks."""
+        raw = self.use_time_currency
+        if raw is None:
+            return
+        set_use_time_currency_policy(use_time_currency_policy_from_mapping(raw))
+
     def apply_tool(
         self,
         name: str,
@@ -531,6 +690,8 @@ class MyceliumConfig:
         applies_state = self.state_authority_applies(name, tool_config)
         applies_secret = self.secret_args_applies(name, tool_config)
         applies_entity = self.entity_guard_applies(name, tool_config)
+        applies_destructive = self.destructive_confirm_applies(name, tool_config)
+        applies_use_time = self.use_time_currency_applies(name, tool_config)
         if tool_config.secret_fields:
             setattr(func, "_mycelium_secret_fields", tool_config.secret_fields)
         if (
@@ -541,6 +702,8 @@ class MyceliumConfig:
             and not applies_state
             and not applies_secret
             and not applies_entity
+            and not applies_destructive
+            and not applies_use_time
         ):
             return func
         if _check_existing_config_wrapper(func, kind="tool", name=name):
@@ -643,6 +806,48 @@ class MyceliumConfig:
                 side_effect_class=tool_config.side_effect_class,
             )
 
+        # Use-time currency outside claim: authorize before claim, use inside ledger.
+        if applies_use_time:
+            self._activate_use_time_currency()
+            policy = use_time_currency_policy_from_mapping(self.use_time_currency or {})
+            if (
+                self.profile == PROFILE_PRODUCTION
+                and policy.missing_policy != USE_TIME_MISSING_POLICY_ERROR
+            ):
+                raise ConfigError(
+                    f"profile is {PROFILE_PRODUCTION!r} but "
+                    f"use_time_currency.missing_policy is {policy.missing_policy!r}; "
+                    "production requires 'error'"
+                )
+            func = apply_use_time_currency(
+                func,
+                use_time_currency_policy_for_tool(policy, name),
+                tool_name=name,
+                outcome_emitter=self.build_outcome_emitter(),
+            )
+
+        # Destructive confirm outside claim: ungranted objects never execute.
+        if applies_destructive:
+            self._activate_authority_window()
+            policy = destructive_confirm_policy_from_mapping(self.destructive_confirm or {})
+            if (
+                self.profile == PROFILE_PRODUCTION
+                and policy.missing_policy != DESTRUCTIVE_MISSING_POLICY_ERROR
+            ):
+                raise ConfigError(
+                    f"profile is {PROFILE_PRODUCTION!r} but "
+                    f"destructive_confirm.missing_policy is {policy.missing_policy!r}; "
+                    "production requires 'error'"
+                )
+            store = self.build_destructive_grant_store()
+            func = apply_destructive_confirm(
+                func,
+                destructive_confirm_policy_for_tool(policy, name),
+                tool_name=name,
+                store=store,
+                outcome_emitter=self.build_outcome_emitter(),
+            )
+
         # Destination policy outside claim: unauthorized recipients never execute.
         if applies_entity:
             from dataclasses import replace as _replace_policy
@@ -706,6 +911,7 @@ class MyceliumConfig:
             or applies_state
             or applies_secret
             or applies_entity
+            or applies_destructive
         ):
             try:
                 func = instrument_langgraph_tool(func)
@@ -2086,6 +2292,24 @@ def _parse_tool_config(
     else:
         raise ConfigError(f"tool '{name}'.entity_guard must be a bool")
 
+    destructive_raw = raw.get("destructive_confirm")
+    destructive_cfg: bool | None
+    if destructive_raw is None:
+        destructive_cfg = None
+    elif isinstance(destructive_raw, bool):
+        destructive_cfg = destructive_raw
+    else:
+        raise ConfigError(f"tool '{name}'.destructive_confirm must be a bool")
+
+    use_time_raw = raw.get("use_time_currency")
+    use_time_cfg: bool | None
+    if use_time_raw is None:
+        use_time_cfg = None
+    elif isinstance(use_time_raw, bool):
+        use_time_cfg = use_time_raw
+    else:
+        raise ConfigError(f"tool '{name}'.use_time_currency must be a bool")
+
     return ToolConfig(
         name=name,
         protect=protect,
@@ -2107,6 +2331,8 @@ def _parse_tool_config(
         secret_fields=secret_fields,
         secret_args=secret_args_cfg,
         entity_guard=entity_guard_cfg,
+        destructive_confirm=destructive_cfg,
+        use_time_currency=use_time_cfg,
     )
 
 
@@ -2214,6 +2440,8 @@ def _apply_action_ledger_tools(
             secret_fields=existing.secret_fields,
             secret_args=existing.secret_args,
             entity_guard=existing.entity_guard,
+            destructive_confirm=existing.destructive_confirm,
+            use_time_currency=existing.use_time_currency,
         )
 
 
@@ -2995,6 +3223,305 @@ def _parse_destination_spec(raw: Any, *, tool: str) -> dict[str, Any]:
     }
 
 
+_AUTHORITY_WINDOW_KEYS = frozenset(
+    {"enabled", "use_time_check", "clock_skew_tolerance_seconds"}
+)
+
+
+def authority_window_policy_from_mapping(raw: dict[str, Any]) -> AuthorityWindowPolicy:
+    return AuthorityWindowPolicy(
+        enabled=bool(raw.get("enabled", True)),
+        use_time_check=str(raw.get("use_time_check", USE_TIME_CHECK_REQUIRED)),
+        clock_skew_tolerance_seconds=float(
+            raw.get("clock_skew_tolerance_seconds", 0.0)
+        ),
+    )
+
+
+def _parse_authority_window(
+    data: dict[str, Any],
+    *,
+    profile: str,
+    destructive_confirm: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    raw = data.get("authority_window")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ConfigError("'authority_window' must be a mapping")
+    extra = set(raw) - _AUTHORITY_WINDOW_KEYS
+    if extra:
+        names = ", ".join(sorted(str(item) for item in extra))
+        raise ConfigError(f"unsupported 'authority_window' option(s): {names}")
+    enabled = raw.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ConfigError("'authority_window.enabled' must be a boolean")
+    use_time = raw.get("use_time_check", USE_TIME_CHECK_REQUIRED)
+    if use_time not in USE_TIME_CHECKS:
+        raise ConfigError(
+            "'authority_window.use_time_check' must be one of "
+            f"{sorted(USE_TIME_CHECKS)}"
+        )
+    skew = raw.get("clock_skew_tolerance_seconds", 0)
+    if not isinstance(skew, (int, float)) or isinstance(skew, bool) or skew < 0:
+        raise ConfigError(
+            "'authority_window.clock_skew_tolerance_seconds' must be a number >= 0"
+        )
+    if profile == PROFILE_PRODUCTION and destructive_confirm is not None:
+        if not enabled or use_time != USE_TIME_CHECK_REQUIRED:
+            raise ConfigError(
+                "profile is 'production' with time-bounded destructive_confirm "
+                "but authority_window does not require use-time expiry "
+                "(enabled: true, use_time_check: required)"
+            )
+    return {
+        "enabled": enabled,
+        "use_time_check": str(use_time),
+        "clock_skew_tolerance_seconds": float(skew),
+    }
+
+
+_USE_TIME_TOP_KEYS = frozenset({"enabled", "missing_policy", "policy_version", "tools"})
+_USE_TIME_FACT_KEYS = frozenset(
+    {
+        "name",
+        "subject",
+        "validator",
+        "require",
+        "revision_from",
+        "max_age_seconds",
+        "bind_request_id",
+        "bind_run_id",
+        "bind_thread_id",
+        "compare_to_arg",
+        "provider_precondition",
+    }
+)
+_USE_TIME_SUBJECT_KEYS = frozenset(
+    {"type", "id_from", "tenant_from", "account_from"}
+)
+
+
+def use_time_currency_policy_from_mapping(raw: dict[str, Any]) -> UseTimeCurrencyPolicy:
+    tools: dict[str, UseTimeToolPolicy] = {}
+    for name, tool_raw in (raw.get("tools") or {}).items():
+        facts_raw = tool_raw.get("facts") or []
+        facts: list[UseTimeFactSpec] = []
+        for item in facts_raw:
+            subject = item.get("subject") or {}
+            require = item.get("require")
+            facts.append(
+                UseTimeFactSpec(
+                    name=str(item["name"]),
+                    subject_type=str(subject["type"]),
+                    id_from=str(subject["id_from"]),
+                    validator=str(item["validator"]),
+                    tenant_from=subject.get("tenant_from"),
+                    account_from=subject.get("account_from"),
+                    require=dict(require) if isinstance(require, dict) else None,
+                    revision_from=item.get("revision_from"),
+                    max_age_seconds=(
+                        float(item["max_age_seconds"])
+                        if item.get("max_age_seconds") is not None
+                        else None
+                    ),
+                    bind_request_id=bool(item.get("bind_request_id", False)),
+                    bind_run_id=bool(item.get("bind_run_id", False)),
+                    bind_thread_id=bool(item.get("bind_thread_id", False)),
+                    compare_to_arg=item.get("compare_to_arg"),
+                    provider_precondition=item.get("provider_precondition"),
+                )
+            )
+        tools[str(name)] = UseTimeToolPolicy(facts=tuple(facts))
+    return UseTimeCurrencyPolicy(
+        enabled=bool(raw.get("enabled", True)),
+        missing_policy=str(raw.get("missing_policy", USE_TIME_MISSING_POLICY_ERROR)),
+        policy_version=str(raw.get("policy_version") or "unspecified"),
+        tools=tools,
+    )
+
+
+def _parse_use_time_fact(raw: Any, *, tool: str) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise ConfigError(f"use_time_currency.tools.{tool}.facts items must be mappings")
+    extra = set(raw) - _USE_TIME_FACT_KEYS
+    if extra:
+        names = ", ".join(sorted(str(item) for item in extra))
+        raise ConfigError(
+            f"unsupported use_time_currency.tools.{tool}.facts option(s): {names}"
+        )
+    name = raw.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise ConfigError(
+            f"use_time_currency.tools.{tool}.facts[].name must be a non-empty string"
+        )
+    subject = raw.get("subject")
+    if not isinstance(subject, dict):
+        raise ConfigError(
+            f"use_time_currency.tools.{tool}.facts[].subject must be a mapping"
+        )
+    subject_extra = set(subject) - _USE_TIME_SUBJECT_KEYS
+    if subject_extra:
+        names = ", ".join(sorted(str(item) for item in subject_extra))
+        raise ConfigError(
+            f"unsupported use_time_currency.tools.{tool}.facts[].subject "
+            f"option(s): {names}"
+        )
+    subject_type = subject.get("type")
+    id_from = subject.get("id_from")
+    if not isinstance(subject_type, str) or not subject_type.strip():
+        raise ConfigError(
+            f"use_time_currency.tools.{tool}.facts[].subject.type is required"
+        )
+    if not isinstance(id_from, str) or not id_from.strip():
+        raise ConfigError(
+            f"use_time_currency.tools.{tool}.facts[].subject.id_from is required"
+        )
+    validator = raw.get("validator")
+    if not isinstance(validator, str) or not validator.strip():
+        raise ConfigError(
+            f"use_time_currency.tools.{tool}.facts[].validator is required"
+        )
+    max_age = raw.get("max_age_seconds")
+    if max_age is not None and (
+        not isinstance(max_age, (int, float))
+        or isinstance(max_age, bool)
+        or max_age < 0
+    ):
+        raise ConfigError(
+            f"use_time_currency.tools.{tool}.facts[].max_age_seconds must be >= 0"
+        )
+    require = raw.get("require")
+    if require is not None and not isinstance(require, dict):
+        raise ConfigError(
+            f"use_time_currency.tools.{tool}.facts[].require must be a mapping"
+        )
+    for key in ("bind_request_id", "bind_run_id", "bind_thread_id"):
+        if key in raw and not isinstance(raw[key], bool):
+            raise ConfigError(
+                f"use_time_currency.tools.{tool}.facts[].{key} must be a bool"
+            )
+    for key in ("revision_from", "compare_to_arg", "provider_precondition"):
+        if key in raw and raw[key] is not None:
+            if not isinstance(raw[key], str) or not str(raw[key]).strip():
+                raise ConfigError(
+                    f"use_time_currency.tools.{tool}.facts[].{key} must be a "
+                    "non-empty string"
+                )
+    for key in ("tenant_from", "account_from"):
+        if key in subject and subject[key] is not None:
+            if not isinstance(subject[key], str) or not str(subject[key]).strip():
+                raise ConfigError(
+                    f"use_time_currency.tools.{tool}.facts[].subject.{key} must be "
+                    "a non-empty string"
+                )
+    parsed: dict[str, Any] = {
+        "name": name.strip(),
+        "subject": {
+            "type": subject_type.strip(),
+            "id_from": id_from.strip(),
+        },
+        "validator": validator.strip(),
+    }
+    if subject.get("tenant_from"):
+        parsed["subject"]["tenant_from"] = str(subject["tenant_from"]).strip()
+    if subject.get("account_from"):
+        parsed["subject"]["account_from"] = str(subject["account_from"]).strip()
+    if require is not None:
+        parsed["require"] = dict(require)
+    if raw.get("revision_from"):
+        parsed["revision_from"] = str(raw["revision_from"]).strip()
+    if max_age is not None:
+        parsed["max_age_seconds"] = float(max_age)
+    for key in ("bind_request_id", "bind_run_id", "bind_thread_id"):
+        if key in raw:
+            parsed[key] = bool(raw[key])
+    if raw.get("compare_to_arg"):
+        parsed["compare_to_arg"] = str(raw["compare_to_arg"]).strip()
+    if raw.get("provider_precondition"):
+        parsed["provider_precondition"] = str(raw["provider_precondition"]).strip()
+    return parsed
+
+
+def _parse_use_time_currency(
+    data: dict[str, Any],
+    *,
+    profile: str,
+    tools: dict[str, ToolConfig],
+) -> dict[str, Any] | None:
+    raw = data.get("use_time_currency")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ConfigError("'use_time_currency' must be a mapping")
+    extra = set(raw) - _USE_TIME_TOP_KEYS
+    if extra:
+        names = ", ".join(sorted(str(item) for item in extra))
+        raise ConfigError(f"unsupported 'use_time_currency' option(s): {names}")
+    enabled = raw.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ConfigError("'use_time_currency.enabled' must be a boolean")
+    missing_policy = raw.get("missing_policy", USE_TIME_MISSING_POLICY_ERROR)
+    if missing_policy not in USE_TIME_MISSING_POLICIES:
+        raise ConfigError(
+            "'use_time_currency.missing_policy' must be one of "
+            f"{sorted(USE_TIME_MISSING_POLICIES)}, got {missing_policy!r}"
+        )
+    policy_version = raw.get("policy_version")
+    if policy_version is not None and (
+        not isinstance(policy_version, str) or not policy_version.strip()
+    ):
+        raise ConfigError("'use_time_currency.policy_version' must be a non-empty string")
+    tools_raw = raw.get("tools", {})
+    if not isinstance(tools_raw, dict):
+        raise ConfigError("'use_time_currency.tools' must be a mapping of tool names")
+
+    parsed_tools: dict[str, Any] = {}
+    for name, tool_raw in tools_raw.items():
+        if not isinstance(name, str) or not name.strip():
+            raise ConfigError(
+                "'use_time_currency.tools' keys must be non-empty tool names"
+            )
+        if not isinstance(tool_raw, dict):
+            raise ConfigError(f"use_time_currency.tools.{name} must be a mapping")
+        tool_extra = set(tool_raw) - {"facts"}
+        if tool_extra:
+            names = ", ".join(sorted(str(item) for item in tool_extra))
+            raise ConfigError(
+                f"unsupported use_time_currency.tools.{name} option(s): {names}"
+            )
+        facts_raw = tool_raw.get("facts")
+        if not isinstance(facts_raw, list) or not facts_raw:
+            raise ConfigError(
+                f"use_time_currency.tools.{name}.facts must be a non-empty list"
+            )
+        parsed_tools[name.strip()] = {
+            "facts": [
+                _parse_use_time_fact(item, tool=name.strip()) for item in facts_raw
+            ]
+        }
+
+    if enabled and profile == PROFILE_PRODUCTION:
+        if missing_policy != USE_TIME_MISSING_POLICY_ERROR:
+            _reject_weaker_production_policy(
+                "use_time_currency.missing_policy", str(missing_policy)
+            )
+        for name, tool in tools.items():
+            if tool.use_time_currency is False or name not in parsed_tools:
+                continue
+            # Consequential tools with use_time enabled must declare facts —
+            # already enforced by requiring non-empty facts above.
+
+    parsed: dict[str, Any] = {
+        "enabled": enabled,
+        "missing_policy": str(missing_policy),
+        "tools": parsed_tools,
+    }
+    if policy_version is not None:
+        parsed["policy_version"] = str(policy_version).strip()
+    return parsed
+
+
 def _parse_entity_guard(data: dict[str, Any], *, profile: str) -> dict[str, Any] | None:
     """Optional destination-policy section. Omitted keeps existing behavior."""
     raw = data.get("entity_guard")
@@ -3059,6 +3586,283 @@ def _parse_entity_guard(data: dict[str, Any], *, profile: str) -> dict[str, Any]
     }
     if policy_version is not None:
         parsed["policy_version"] = str(policy_version).strip()
+    return parsed
+
+
+_DESTRUCTIVE_TOP_KEYS = frozenset(
+    {
+        "enabled",
+        "missing_policy",
+        "policy_version",
+        "storage",
+        "path",
+        "table",
+        "url",
+        "url_env",
+        "dsn",
+        "dsn_env",
+        "prefix",
+        "tools",
+    }
+)
+_DESTRUCTIVE_TOOL_KEYS = frozenset({"operation", "object", "grant"})
+_DESTRUCTIVE_OBJECT_KEYS = frozenset(
+    {
+        "type",
+        "id_from",
+        "tenant_from",
+        "account_from",
+        "case_sensitive",
+        "require_canonicalizer",
+    }
+)
+_DESTRUCTIVE_GRANT_KEYS = frozenset(
+    {
+        "bind_request_id",
+        "bind_run_id",
+        "bind_thread_id",
+        "max_uses",
+        "ttl_seconds",
+    }
+)
+def destructive_confirm_policy_from_mapping(raw: dict[str, Any]) -> DestructiveConfirmPolicy:
+    tools: dict[str, DestructiveToolPolicy] = {}
+    for name, tool_raw in (raw.get("tools") or {}).items():
+        object_raw = tool_raw.get("object") or {}
+        grant_raw = tool_raw.get("grant") or {}
+        tools[str(name)] = DestructiveToolPolicy(
+            operation=str(tool_raw["operation"]),
+            object=DestructiveObjectSpec(
+                object_type=str(object_raw["type"]),
+                id_from=str(object_raw["id_from"]),
+                tenant_from=object_raw.get("tenant_from"),
+                account_from=object_raw.get("account_from"),
+                case_sensitive=bool(object_raw.get("case_sensitive", True)),
+                require_canonicalizer=bool(object_raw.get("require_canonicalizer", False)),
+            ),
+            grant=DestructiveGrantSpec(
+                bind_request_id=bool(grant_raw.get("bind_request_id", False)),
+                bind_run_id=bool(grant_raw.get("bind_run_id", False)),
+                bind_thread_id=bool(grant_raw.get("bind_thread_id", False)),
+                max_uses=int(grant_raw.get("max_uses", 1)),
+                ttl_seconds=float(grant_raw.get("ttl_seconds", 300)),
+            ),
+        )
+    return DestructiveConfirmPolicy(
+        enabled=bool(raw.get("enabled", True)),
+        missing_policy=str(raw.get("missing_policy", DESTRUCTIVE_MISSING_POLICY_ERROR)),
+        policy_version=str(raw.get("policy_version") or "unspecified"),
+        storage=str(raw.get("storage") or STORAGE_MEMORY),
+        tools=tools,
+    )
+
+
+def _parse_destructive_object(raw: Any, *, tool: str) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise ConfigError(f"destructive_confirm.tools.{tool}.object must be a mapping")
+    extra = set(raw) - _DESTRUCTIVE_OBJECT_KEYS
+    if extra:
+        names = ", ".join(sorted(str(item) for item in extra))
+        raise ConfigError(
+            f"unsupported destructive_confirm.tools.{tool}.object option(s): {names}"
+        )
+    object_type = raw.get("type")
+    id_from = raw.get("id_from")
+    if not isinstance(object_type, str) or not object_type.strip():
+        raise ConfigError(
+            f"destructive_confirm.tools.{tool}.object.type is required"
+        )
+    if not isinstance(id_from, str) or not id_from.strip():
+        raise ConfigError(
+            f"destructive_confirm.tools.{tool}.object.id_from is required"
+        )
+    parsed: dict[str, Any] = {
+        "type": object_type.strip(),
+        "id_from": id_from.strip(),
+        "case_sensitive": True,
+        "require_canonicalizer": False,
+    }
+    if "case_sensitive" in raw:
+        if not isinstance(raw["case_sensitive"], bool):
+            raise ConfigError(
+                f"destructive_confirm.tools.{tool}.object.case_sensitive must be a bool"
+            )
+        parsed["case_sensitive"] = raw["case_sensitive"]
+    if "require_canonicalizer" in raw:
+        if not isinstance(raw["require_canonicalizer"], bool):
+            raise ConfigError(
+                f"destructive_confirm.tools.{tool}.object.require_canonicalizer "
+                "must be a bool"
+            )
+        parsed["require_canonicalizer"] = raw["require_canonicalizer"]
+    for key in ("tenant_from", "account_from"):
+        if key not in raw:
+            continue
+        value = raw[key]
+        if not isinstance(value, str) or not value.strip():
+            raise ConfigError(
+                f"destructive_confirm.tools.{tool}.object.{key} must be a non-empty string"
+            )
+        parsed[key] = value.strip()
+    return parsed
+
+
+def _parse_destructive_grant(raw: Any, *, tool: str) -> dict[str, Any]:
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise ConfigError(f"destructive_confirm.tools.{tool}.grant must be a mapping")
+    extra = set(raw) - _DESTRUCTIVE_GRANT_KEYS
+    if extra:
+        names = ", ".join(sorted(str(item) for item in extra))
+        raise ConfigError(
+            f"unsupported destructive_confirm.tools.{tool}.grant option(s): {names}"
+        )
+    parsed: dict[str, Any] = {
+        "bind_request_id": False,
+        "bind_run_id": False,
+        "bind_thread_id": False,
+        "max_uses": 1,
+        "ttl_seconds": 300.0,
+    }
+    for key in ("bind_request_id", "bind_run_id", "bind_thread_id"):
+        if key not in raw:
+            continue
+        if not isinstance(raw[key], bool):
+            raise ConfigError(
+                f"destructive_confirm.tools.{tool}.grant.{key} must be a bool"
+            )
+        parsed[key] = raw[key]
+    if "max_uses" in raw:
+        value = raw["max_uses"]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise ConfigError(
+                f"destructive_confirm.tools.{tool}.grant.max_uses must be an integer >= 1"
+            )
+        parsed["max_uses"] = value
+    if "ttl_seconds" in raw:
+        value = raw["ttl_seconds"]
+        if not isinstance(value, (int, float)) or isinstance(value, bool) or value <= 0:
+            raise ConfigError(
+                f"destructive_confirm.tools.{tool}.grant.ttl_seconds must be > 0"
+            )
+        parsed["ttl_seconds"] = float(value)
+    return parsed
+
+
+def _parse_destructive_confirm(
+    data: dict[str, Any],
+    *,
+    profile: str,
+    tools: dict[str, ToolConfig],
+    deployment: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    raw = data.get("destructive_confirm")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ConfigError("'destructive_confirm' must be a mapping")
+    extra = set(raw) - _DESTRUCTIVE_TOP_KEYS
+    if extra:
+        names = ", ".join(sorted(str(item) for item in extra))
+        raise ConfigError(f"unsupported 'destructive_confirm' option(s): {names}")
+    enabled = raw.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ConfigError("'destructive_confirm.enabled' must be a boolean")
+    missing_policy = raw.get("missing_policy", DESTRUCTIVE_MISSING_POLICY_ERROR)
+    if missing_policy not in DESTRUCTIVE_MISSING_POLICIES:
+        raise ConfigError(
+            "'destructive_confirm.missing_policy' must be one of "
+            f"{sorted(DESTRUCTIVE_MISSING_POLICIES)}"
+        )
+    policy_version = raw.get("policy_version")
+    if policy_version is not None and (
+        not isinstance(policy_version, str) or not policy_version.strip()
+    ):
+        raise ConfigError("'destructive_confirm.policy_version' must be a non-empty string")
+    storage = raw.get("storage", STORAGE_MEMORY)
+    if storage not in {
+        STORAGE_MEMORY,
+        STORAGE_FILE,
+        STORAGE_SQLITE,
+        STORAGE_REDIS,
+        STORAGE_POSTGRES,
+    }:
+        raise ConfigError(
+            "'destructive_confirm.storage' must be one of "
+            "memory, file, sqlite, redis, postgres"
+        )
+    tools_raw = raw.get("tools", {})
+    if not isinstance(tools_raw, dict):
+        raise ConfigError("'destructive_confirm.tools' must be a mapping of tool names")
+    parsed_tools: dict[str, Any] = {}
+    for name, tool_raw in tools_raw.items():
+        if not isinstance(name, str) or not name.strip():
+            raise ConfigError(
+                "'destructive_confirm.tools' keys must be non-empty tool names"
+            )
+        if not isinstance(tool_raw, dict):
+            raise ConfigError(f"destructive_confirm.tools.{name} must be a mapping")
+        extra_tool = set(tool_raw) - _DESTRUCTIVE_TOOL_KEYS
+        if extra_tool:
+            names = ", ".join(sorted(str(item) for item in extra_tool))
+            raise ConfigError(
+                f"unsupported destructive_confirm.tools.{name} option(s): {names}"
+            )
+        operation = tool_raw.get("operation")
+        if not isinstance(operation, str) or not operation.strip():
+            raise ConfigError(
+                f"destructive_confirm.tools.{name}.operation is required"
+            )
+        object_spec = _parse_destructive_object(tool_raw.get("object"), tool=name.strip())
+        grant_spec = _parse_destructive_grant(tool_raw.get("grant"), tool=name.strip())
+        parsed_tools[name.strip()] = {
+            "operation": operation.strip(),
+            "object": object_spec,
+            "grant": grant_spec,
+        }
+
+    if enabled and profile == PROFILE_PRODUCTION:
+        if missing_policy != DESTRUCTIVE_MISSING_POLICY_ERROR:
+            _reject_weaker_production_policy(
+                "destructive_confirm.missing_policy", str(missing_policy)
+            )
+        if storage == STORAGE_MEMORY:
+            raise ConfigError(
+                "profile is 'production' but destructive_confirm.storage is "
+                "'memory'; production requires durable grant storage "
+                "(file, sqlite, redis, or postgres)"
+            )
+        topology = (deployment or {}).get("topology")
+        if topology == "multi_node" and storage not in SHARED_GRANT_STORAGES:
+            raise ConfigError(
+                "profile is 'production' and deployment.topology is 'multi_node' "
+                "but destructive_confirm.storage is "
+                f"{storage!r}; multi-node production requires redis or postgres"
+            )
+        for name, tool in tools.items():
+            if tool.side_effect_class != SideEffectClass.IRREVERSIBLE:
+                continue
+            if tool.destructive_confirm is False or name not in parsed_tools:
+                raise ConfigError(
+                    f"profile is 'production' and tool {name!r} is "
+                    "side_effect_class: irreversible but has no "
+                    "destructive_confirm.tools declaration. Do not infer "
+                    "destructiveness from the tool name; list the tool with "
+                    "operation, object type, and id_from."
+                )
+
+    parsed: dict[str, Any] = {
+        "enabled": enabled,
+        "missing_policy": str(missing_policy),
+        "storage": storage,
+        "tools": parsed_tools,
+    }
+    if policy_version is not None:
+        parsed["policy_version"] = str(policy_version).strip()
+    for key in ("path", "table", "url", "url_env", "dsn", "dsn_env", "prefix"):
+        if key in raw:
+            parsed[key] = raw[key]
     return parsed
 
 
@@ -3301,6 +4105,7 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
 
     secret_args_raw = _parse_secret_args(data, profile=profile, tools=tools)
     entity_guard_raw = _parse_entity_guard(data, profile=profile)
+    # destructive_confirm is parsed after deployment so topology can be checked.
 
     message_validator_raw = data.get("message_validator", False)
     if isinstance(message_validator_raw, dict):
@@ -3315,6 +4120,15 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
     integrations = _parse_integrations(data)
     deployment = _parse_deployment(data)
     verify = _parse_verify(data)
+    destructive_confirm_raw = _parse_destructive_confirm(
+        data, profile=profile, tools=tools, deployment=deployment
+    )
+    authority_window_raw = _parse_authority_window(
+        data, profile=profile, destructive_confirm=destructive_confirm_raw
+    )
+    use_time_currency_raw = _parse_use_time_currency(
+        data, profile=profile, tools=tools
+    )
 
     cfg = MyceliumConfig(
         tools=tools,
@@ -3339,11 +4153,18 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
         verify=verify,
         secret_args=secret_args_raw,
         entity_guard=entity_guard_raw,
+        destructive_confirm=destructive_confirm_raw,
+        authority_window=authority_window_raw,
+        use_time_currency=use_time_currency_raw,
         profile=profile,
         _audit_auto=audit_auto,
     )
     cfg._activate_completion_terminal()
     cfg._activate_llm_budget()
+    if authority_window_raw is not None or destructive_confirm_raw is not None:
+        cfg._activate_authority_window()
+    if use_time_currency_raw is not None:
+        cfg._activate_use_time_currency()
     return cfg
 
 

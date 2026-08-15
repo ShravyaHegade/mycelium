@@ -221,6 +221,35 @@ section; the tests are concrete `file::test_name` entries.
     payload. Omitted `entity_guard:` keeps existing behavior.
     *Where:* [Entity / destination guard](../README.md#entity--destination-guard-unnumbered).
 
+19. **Destructive confirm (when `destructive_confirm:` is enabled).** A
+    destructive tool may execute only with a host-issued grant for this
+    exact operation and canonical object, before expiry, for at most
+    `max_uses`. Tool permission is not object authorization. The model
+    cannot mint or widen grants. Dual control is not implemented.
+    Omitted `destructive_confirm:` keeps existing behavior.
+    *Where:* [Destructive confirm (AF-011)](../README.md#destructive-confirm-af-011).
+
+20. **Authority-window expiry (when time-bounded authority is in play).**
+    An authorize-phase check is not enough. Mycelium re-validates expiry
+    at use — after lease/queue/backoff waits, immediately before
+    `mark_maybe_crossed` / provider / consequential body. `now >=
+    expires_at` raises `AuthorityExpiredError` without executing the body
+    or marking the boundary crossed. Completed ledger RETURN still works
+    without fresh authority. Mycelium does not guarantee authority remains
+    valid during a remote network call. Clock sync across machines is an
+    operational assumption unless storage time is authoritative. Pairs with
+    AF-012 use-time currency for fact freshness beyond expiry.
+    *Where:* `authority_window:` / `validate_authority_at_use`.
+
+21. **Use-time currency (when `use_time_currency:` is enabled).** A
+    decide-time fact that is stale, changed, missing, or unverifiable at
+    execute cannot authorize a consequential side effect.
+    `UseTimeCurrencyError` hard-blocks before the side-effect boundary.
+    Host facts and validators only — no prompt scanning. Completed RETURN
+    does not revalidate. Local revalidation cannot eliminate a fact change
+    during a remote network call.
+    *Where:* [Use-time currency (AF-012)](../README.md#use-time-currency-af-012).
+
 ---
 
 ## D. What we do not protect
@@ -340,6 +369,9 @@ are cited once. "Where documented" links the README section.
 | Task-level idempotency | README § [Quickstart: task-level idempotency](../README.md#quickstart-task-level-idempotency) | `test_cli_run.py::test_run_instruments_sync_tool_and_task_across_processes` |
 | Secret-in-args (when enabled) | README § [Secret-in-args (AF-010)](../README.md#secret-in-args-af-010) | `test_secret_protection.py` · `test_verify.py::test_cli_smoke_each_scenario` (`secret-in-args`) |
 | Destination policy (when enabled) | README § [Entity / destination guard](../README.md#entity--destination-guard-unnumbered) | `test_entity_guard.py` · `test_verify.py::test_cli_smoke_each_scenario` (`entity-guard`) |
+| Destructive confirm (when enabled) | README § [Destructive confirm (AF-011)](../README.md#destructive-confirm-af-011) | `test_destructive_confirm.py` · `test_verify.py::test_cli_smoke_each_scenario` (`destructive-confirm`) |
+| Authority-window expiry (when enabled) | README § [Authority-window expiry](../README.md#authority-window-expiry) | `test_authority_window.py` · `test_verify.py::test_cli_smoke_each_scenario` (`authority-window`) |
+| Use-time currency (when enabled) | README § [Use-time currency (AF-012)](../README.md#use-time-currency-af-012) | `test_use_time_currency.py` · `test_verify.py::test_cli_smoke_each_scenario` (`use-time-currency`) |
 | Single-key state machine invariants (executions ≤ 1 + not-executed verdicts; COMPLETED terminal; CAS out of IN_FLIGHT) | this doc, § C / [NOT_EXECUTED reset CAS](../README.md#not_executed-reset-cas-v118) | `test_property_transitions.py::test_transition_key_invariants` (Hypothesis, file + Redis) · `test_payment_provider_mock.py::test_redispatch_storm_never_double_charges` |
 
 <sup>1</sup> `test_postgres_storage_atomic_claim` runs when `psycopg` is

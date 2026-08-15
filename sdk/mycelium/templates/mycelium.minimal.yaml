@@ -7,6 +7,9 @@
 # Optional AF-010: secret_args: {enabled: true, policy: error}
 #   Pass secret:// references instead of credentials.
 # Optional destination policy: entity_guard: {enabled: true, missing_policy: error}
+# Optional AF-011: destructive_confirm: {enabled: true, missing_policy: error}
+# Optional authority_window: {enabled: true, use_time_check: required}
+# Optional AF-012: use_time_currency: {enabled: true, missing_policy: error}
 #
 # side_effect_class required only for tools listed under action_ledger.tools:
 #   read | idempotent_mutate | keyed_mutate | non_idempotent_mutate | irreversible
