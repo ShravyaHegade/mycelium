@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -245,8 +246,8 @@ def run_use_time_currency(ctx: ScenarioContext) -> VerificationEvidence:
             max_age_seconds=30,
             request_id=rid_age,
             require_value=True,
-            observed_at=__import__("datetime").datetime.fromtimestamp(
-                clock["now"], tz=__import__("datetime").UTC
+            observed_at=datetime.fromtimestamp(
+                clock["now"], tz=timezone.utc
             ),
         )
         clock["now"] = 1_040.0
