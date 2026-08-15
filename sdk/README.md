@@ -75,6 +75,27 @@ Envelope field stack (`side_effect_class` → spendability → boundary → …)
 
 Framework-agnostic. Raw message lists and plain Python functions (LangGraph, CrewAI, OpenAI tool loops, etc.).
 
+### Framework integration support
+
+Framework-agnostic means the core ledger can wrap plain Python callables. It
+does not mean every framework provides the same automatic runtime identity or
+terminal hooks. AF-002 depends on stable transition identity, so choose the
+integration path explicitly:
+
+| Runtime | Tool identity | Ledger integration | Additional integration |
+|---|---|---|---|
+| LangGraph `ToolNode` / `create_agent` | Automatic from injected `ToolRuntime` when `integrations.langgraph` is enabled | YAML, `@config.apply`, or ledger decorators | Automatic budget and completion adapters when configured |
+| CrewAI | Host-supplied `request_id` (required in production); derived identity is development-only | Generic sync/async decorators | `instrument_crewai_llm` provides budget accounting only |
+| Plain Python or another Python framework | Host-supplied identity is recommended | Decorators or [manual claim/complete](#manual-integration-claim--execute--complete) | Host calls completion, budget, and scope hooks explicitly |
+| TypeScript or another non-Python runtime | No native identity adapter | No native SDK; place the guarded operation behind a Python service boundary or implement the transition protocol in the host | Host-owned |
+
+For consequential operations, prefer a stable host-owned business identifier
+such as `charge-order:ORD-123` over a random or model-generated dispatch ID.
+Automatic LangGraph metadata is convenient for redispatch detection, but it
+does not replace business identity when two different tool calls represent the
+same real-world action. See
+[Transition identity and host-owned `request_id`](#transition-identity-and-host-owned-request_id).
+
 ## What Mycelium does not do
 
 Mycelium is an **embeddable transition envelope at the tool boundary** — classify → claim/lease → gate (`RETURN` / `POLL` / `REPAIR` / `HARD_BLOCK` / …) → optional reconcile — for LangGraph, CrewAI, or plain Python, via YAML + decorators or manual claim/complete. It is not a full agent platform and deliberately stays out of adjacent lanes:
