@@ -16,7 +16,7 @@ from collections.abc import Callable, Mapping
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from enum import StrEnum
+from mycelium._compat import StrEnum
 from typing import Any
 
 from mycelium.tool_boundary import ToolBoundaryError
