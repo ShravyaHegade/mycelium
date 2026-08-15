@@ -3,6 +3,29 @@
 Release policy: **batch; calm over velocity.** Prefer one coherent cut over many
 small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEASE.md).
 
+## Unreleased
+
+### Added
+
+- **Secret-in-args (AF-010):** optional `secret_args:` scans tool arguments
+  before claim, fingerprinting, receipts, execution, logs, and outcomes.
+  Default omitted config keeps existing behavior. `policy: error` raises
+  `SecretInArgsError` before any side effect; `redact` may pass a redacted
+  copy only when that cannot change required tool semantics, otherwise
+  fail-closed; `warn` preserves compatibility in development but sanitizes
+  every persisted or emitted representation. Production consequential tools
+  require `error`. Pass `secret://…` references instead of credentials;
+  applications must `register_secret_resolver` (no default env-var
+  resolver). Fail-closed pre-execution blocking is the primary protection;
+  redaction is defense-in-depth. Mycelium cannot sanitize logs created
+  inside arbitrary application or provider code. `allow_fields` /
+  `allow_tools` weaken protection and should be scoped per tool, not
+  globally trusted. `mycelium doctor` reports scanning, fail-closed
+  production, resolver registration, broad allowlists, and labels host
+  logs / third-party providers `not_verifiable`.
+  `mycelium verify --scenario secret-in-args` searches generated artifacts
+  for synthetic credentials.
+
 ## 1.32.0 (2026-08-13)
 
 MINOR: production verification batch. Read-only readiness diagnosis, synthetic

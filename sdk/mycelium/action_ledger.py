@@ -1573,11 +1573,12 @@ class ActionLedger:
             parent_raw = active_handoff.parent_request_id
         if handoff_raw is None and active_handoff is not None:
             handoff_raw = active_handoff.handoff_id
+        stored_args, stored_kwargs = _evidence_args(bound["args"], bound["kwargs"])
         return LedgerEntry(
             request_id=request_id,
             tool=tool,
-            args=bound["args"],
-            kwargs=bound["kwargs"],
+            args=stored_args,
+            kwargs=stored_kwargs,
             status=legacy_status_from_terminal(TerminalOutcome.IN_FLIGHT),
             terminal_outcome=TerminalOutcome.IN_FLIGHT.value,
             owner=_ledger_owner(),
@@ -2702,7 +2703,7 @@ class ActionLedger:
             existing,
             status=legacy_status_from_terminal(TerminalOutcome.COMPLETED),
             terminal_outcome=TerminalOutcome.COMPLETED.value,
-            result=result,
+            result=_evidence_value(result),
             finished_at=time.time(),
             lease_until=None,
             side_effect_boundary=SideEffectBoundary.CROSSED.value,
@@ -2752,7 +2753,7 @@ class ActionLedger:
             existing,
             status=legacy_status_from_terminal(terminal),
             terminal_outcome=terminal.value,
-            error=f"{type(error).__name__}: {error}",
+            error=_evidence_error(error),
             finished_at=time.time(),
             lease_until=None,
             side_effect_boundary=boundary,
@@ -3220,6 +3221,12 @@ class ActionLedger:
 
     @staticmethod
     def _hash_args(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
+        from mycelium.secret_protection import fingerprint_args, get_active_secret_policy
+
+        policy = get_active_secret_policy()
+        if policy is not None and policy.enabled:
+            digest = fingerprint_args(args, kwargs)
+            return digest[:16]
         payload = json.dumps(
             {"args": args, "kwargs": kwargs},
             sort_keys=True,
@@ -3283,15 +3290,59 @@ def _args_drift_exclude_keys(
     return frozenset({binding.provider_idempotency_key_param})
 
 
+def _evidence_value(value: Any) -> Any:
+    from mycelium.secret_protection import get_active_secret_policy, sanitize_for_evidence
+
+    policy = get_active_secret_policy()
+    if policy is None or not policy.enabled:
+        return value
+    return sanitize_for_evidence(value)
+
+
+def _evidence_args(args: Any, kwargs: Any) -> tuple[list[Any], dict[str, Any]]:
+    from mycelium.secret_protection import get_active_secret_policy, sanitize_secrets
+
+    policy = get_active_secret_policy()
+    if policy is None or not policy.enabled:
+        return list(args), dict(kwargs)
+    safe = sanitize_secrets(
+        {"args": list(args), "kwargs": dict(kwargs)},
+        entropy_detection=policy.entropy_detection,
+        allow_fields=policy.allow_fields,
+    )
+    return list(safe["args"]), dict(safe["kwargs"])
+
+
+def _evidence_error(error: BaseException) -> str:
+    from mycelium.secret_protection import (
+        get_active_secret_policy,
+        sanitize_exception,
+        sanitize_text,
+    )
+
+    policy = get_active_secret_policy()
+    if policy is None or not policy.enabled:
+        return f"{type(error).__name__}: {error}"
+    safe = sanitize_exception(error)
+    return sanitize_text(f"{type(safe).__name__}: {safe}")
+
+
 def _args_drift_fingerprint(
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
     *,
     exclude: frozenset[str],
 ) -> str:
-    if not exclude:
-        return args_fingerprint(args, kwargs)
-    filtered = {key: value for key, value in kwargs.items() if key not in exclude}
+    from mycelium.secret_protection import fingerprint_args, get_active_secret_policy
+
+    filtered = (
+        kwargs
+        if not exclude
+        else {key: value for key, value in kwargs.items() if key not in exclude}
+    )
+    policy = get_active_secret_policy()
+    if policy is not None and policy.enabled:
+        return fingerprint_args(args, filtered)
     return args_fingerprint(args, filtered)
 
 
@@ -3587,9 +3638,29 @@ def _run_ledgered(
         _ActiveTransition(ledger, request_id, transition_binding)
     )
     try:
+        from mycelium.secret_protection import (
+            get_active_secret_policy,
+            resolve_declared_secret_fields,
+        )
+
+        policy = get_active_secret_policy()
+        extra = policy.secret_fields if policy is not None else frozenset()
+        exec_args, exec_kwargs = resolve_declared_secret_fields(
+            func, args, clean_kwargs, extra_fields=extra
+        )
         with _lease_auto_renew(ledger, request_id):
-            result = func(*args, **clean_kwargs)
+            result = func(*exec_args, **exec_kwargs)
     except Exception as exc:
+        from mycelium.secret_protection import (
+            get_active_secret_policy,
+        )
+        from mycelium.secret_protection import (
+            sanitize_exception as _sanitize_exc,
+        )
+
+        policy = get_active_secret_policy()
+        if policy is not None and policy.enabled:
+            exc = _sanitize_exc(exc)
         # A storage failure while recording the failure must not mask the
         # original tool exception — log it, then re-raise the tool's own error.
         # An outcome-already-set error also does not mask — the transition was
@@ -3631,7 +3702,7 @@ def _run_ledgered(
                 "original tool error follows",
                 request_id,
             )
-        raise
+        raise exc
     finally:
         _active_transition_var.reset(token)
 
@@ -3767,9 +3838,29 @@ async def _run_ledgered_async(
         _ActiveTransition(ledger, request_id, transition_binding)
     )
     try:
+        from mycelium.secret_protection import (
+            get_active_secret_policy,
+            resolve_declared_secret_fields,
+        )
+
+        policy = get_active_secret_policy()
+        extra = policy.secret_fields if policy is not None else frozenset()
+        exec_args, exec_kwargs = resolve_declared_secret_fields(
+            func, args, clean_kwargs, extra_fields=extra
+        )
         with _lease_auto_renew(ledger, request_id):
-            result = await func(*args, **clean_kwargs)
+            result = await func(*exec_args, **exec_kwargs)
     except Exception as exc:
+        from mycelium.secret_protection import (
+            get_active_secret_policy,
+        )
+        from mycelium.secret_protection import (
+            sanitize_exception as _sanitize_exc,
+        )
+
+        policy = get_active_secret_policy()
+        if policy is not None and policy.enabled:
+            exc = _sanitize_exc(exc)
         # A storage failure while recording the failure must not mask the
         # original tool exception — log it, then re-raise the tool's own error.
         # An outcome-already-set error also does not mask — the transition was
@@ -3811,7 +3902,7 @@ async def _run_ledgered_async(
                 "original tool error follows",
                 request_id,
             )
-        raise
+        raise exc
     finally:
         _active_transition_var.reset(token)
 

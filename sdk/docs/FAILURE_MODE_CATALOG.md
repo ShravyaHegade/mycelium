@@ -1,4 +1,4 @@
-# Failure-mode catalog (AF-001…AF-009)
+# Failure-mode catalog (AF-001…AF-010)
 
 **The taxonomy is the product story.** Mycelium is the reliability layer for AI
 agents; these IDs are the public promise. Stable across the SDK README,
@@ -16,6 +16,7 @@ LangGraph, CrewAI, AutoGen, Cline, OpenHands, and related stacks.
 | AF-007 | Premature termination | `completion:` / `complete_run` |
 | AF-008 | Cascading permission | `scope_guard:` / `@scope_guard` |
 | AF-009 | Instruction injection | (MCP gateway revisit; not in SDK) |
+| AF-010 | Secret-in-args | `secret_args:` / `SecretInArgsError` · `secret://` references · shared sanitizer |
 
 ---
 
@@ -191,7 +192,32 @@ mechanically enforceable. Complementary to dedicated prompt-injection products.
 
 ---
 
-## Budget enforcement (not AF-010)
+## AF-010 Secret-in-args
+
+**Class:** Credential / evidence leakage
+
+**One line:** Raw credentials, tokens, passwords, and private keys must not
+reach tool arguments, receipts, ledgers, logs, exceptions, telemetry,
+outcomes, fingerprints, or verification artifacts.
+
+**What users hit:** an LLM or caller pastes an API key into a tool call;
+the value is fingerprinted, claimed, receipted, logged, and left in
+Doctor/Verify dumps.
+
+**Guard:** optional `secret_args:` (`error` | `redact` | `warn`). Fail-closed
+pre-execution blocking is the primary protection. Redaction of persisted
+and emitted representations is defense-in-depth. Pass `secret://…`
+references instead of credentials; resolve only at the trusted
+tool/provider call for fields the tool declared. Applications must
+`register_secret_resolver` — Mycelium does not invent a default
+environment-variable resolver. `allow_fields` / `allow_tools` weaken
+protection and must be scoped narrowly by tool, not globally trusted.
+Mycelium cannot sanitize logs created inside arbitrary application or
+provider code; Doctor labels those paths `not_verifiable`.
+
+---
+
+## Budget enforcement (unnumbered)
 
 **Class:** Run-level reliability / blast-radius
 
@@ -209,7 +235,7 @@ gate; atomic `record_usage` for tokens/USD; `missing_usage_policy`; soft warn
 then `LedgerHardBlockError`
 on the next step (never mid-flight kill). Operator
 `mycelium budget status|release`. Loop guard (AF-003) ≠ spend budget.
-**AF-010 not assigned** until corpus naming is settled. See
+Budget is intentionally **not** given an AF-00N id. See
 `notes/catalog/budget-enforcement.md`.
 
 ---
@@ -223,4 +249,4 @@ on the next step (never mid-flight kill). Operator
   [FAILURE_AND_THREAT_MODEL.md](FAILURE_AND_THREAT_MODEL.md); other AF modules
   are optional guards documented in the SDK README.
 - **Budget enforcement** ships as `budget:` / `@budget_guard` and is
-  intentionally **not** given an AF-00N id yet.
+  intentionally **not** given an AF-00N id. AF-010 is secret-in-args.

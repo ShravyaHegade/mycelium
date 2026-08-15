@@ -455,6 +455,7 @@ def test_cli_smoke_each_scenario(tmp_path: Path) -> None:
         "worker-crash",
         "ambiguous-effect",
         "reconcile",
+        "secret-in-args",
     ):
         code = main(
             [
@@ -664,6 +665,7 @@ def test_all_order_sqlite(tmp_path: Path, scenario: str) -> None:
         "worker-crash",
         "ambiguous-effect",
         "reconcile",
+        "secret-in-args",
     ]
     assert all(item.status == VerificationStatus.PASS for item in report.scenarios)
     assert report.empirically_verified is True

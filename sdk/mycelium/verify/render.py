@@ -16,11 +16,18 @@ _SCENARIO_LABELS = {
     "worker-crash": "Worker crash",
     "ambiguous-effect": "Ambiguous effect",
     "reconcile": "Reconcile",
+    "secret-in-args": "Secret-in-args",
 }
 
 
 def render_json(report: VerificationReport) -> str:
-    return json.dumps(report.to_dict(), indent=2, sort_keys=True)
+    from mycelium.secret_protection import sanitize_secrets
+
+    return json.dumps(
+        sanitize_secrets(report.to_dict(), entropy_detection=False),
+        indent=2,
+        sort_keys=True,
+    )
 
 
 def render_human(report: VerificationReport) -> str:

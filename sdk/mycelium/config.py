@@ -101,6 +101,11 @@ from mycelium.scope_guard import (
     ScopeGuardStorage,
     apply_scope_guard,
 )
+from mycelium.secret_protection import (
+    SECRET_ARGS_POLICIES,
+    SecretArgsPolicy,
+    apply_secret_args,
+)
 from mycelium.session import Session
 from mycelium.state_authority import (
     ON_MISMATCH_HARD,
@@ -184,6 +189,7 @@ _GUARD_MARKERS = (
     "_mycelium_budget_guarded",
     "_mycelium_scope_guarded",
     "_mycelium_state_authority",
+    "_mycelium_secret_args",
     "_mycelium_langgraph_integration",
 )
 
@@ -300,6 +306,10 @@ class ToolConfig:
     scope_guard: dict[str, Any] | bool | None = None
     # Per-tool state_authority: None=inherit global, False=disable, dict=overrides
     state_authority: dict[str, Any] | bool | None = None
+    # Fields that may hold secret:// references (resolved only at execution).
+    secret_fields: tuple[str, ...] = ()
+    # Per-tool secret_args: None=inherit global, False=disable
+    secret_args: bool | None = None
 
     def is_noop(self) -> bool:
         return (
@@ -311,6 +321,8 @@ class ToolConfig:
             and self.budget_guard is None
             and self.scope_guard is None
             and self.state_authority is None
+            and not self.secret_fields
+            and self.secret_args is None
         )
 
 
@@ -360,6 +372,7 @@ class MyceliumConfig:
     completion: dict[str, Any] | None = None
     deployment: dict[str, Any] | None = None
     verify: dict[str, Any] | None = None
+    secret_args: dict[str, Any] | None = None
     profile: str = PROFILE_DEVELOPMENT
     _audit_emitter: AuditReceiptEmitter | None = None
     _outcome_emitter: OutcomeEmitter | None = None
@@ -381,9 +394,9 @@ class MyceliumConfig:
         function is returned unchanged.
 
         Guard order (outermost first, after optional LangGraph instrument):
-        ``@state_authority`` -> ``@scope_guard`` -> ``@budget_guard`` ->
-        ``@loop_guard`` -> ``@ledger`` -> ``@bounded`` -> ``@protect`` ->
-        ``func``
+        ``@secret_args`` -> ``@state_authority`` -> ``@scope_guard`` ->
+        ``@budget_guard`` -> ``@loop_guard`` -> ``@ledger`` -> ``@bounded`` ->
+        ``@protect`` -> ``func``
         """
         return self.apply_tool(func.__name__, func)
 
@@ -457,6 +470,22 @@ class MyceliumConfig:
                 return False
         return True
 
+    def secret_args_applies(
+        self, name: str, tool_config: ToolConfig | None = None
+    ) -> bool:
+        """Whether secret-in-args scanning should wrap this tool."""
+        if self.secret_args is None:
+            return False
+        policy = secret_args_policy_from_mapping(self.secret_args)
+        if not policy.enabled:
+            return False
+        cfg = tool_config if tool_config is not None else self.tools.get(name)
+        if cfg is not None and cfg.secret_args is False:
+            return False
+        if name in policy.allow_tools:
+            return False
+        return True
+
     def apply_tool(
         self,
         name: str,
@@ -470,18 +499,24 @@ class MyceliumConfig:
         applies_budget = self.budget_guard_applies(name, tool_config)
         applies_scope = self.scope_guard_applies(name, tool_config)
         applies_state = self.state_authority_applies(name, tool_config)
+        applies_secret = self.secret_args_applies(name, tool_config)
+        if tool_config.secret_fields:
+            setattr(func, "_mycelium_secret_fields", tool_config.secret_fields)
         if (
             tool_config.is_noop()
             and not applies_loop
             and not applies_budget
             and not applies_scope
             and not applies_state
+            and not applies_secret
         ):
             return func
         if _check_existing_config_wrapper(func, kind="tool", name=name):
             return func
 
         func = _callable_with_name(func, name)
+        if tool_config.secret_fields:
+            setattr(func, "_mycelium_secret_fields", tool_config.secret_fields)
         is_async = inspect.iscoroutinefunction(func)
 
         # Apply protect first so it sits inside bounded.
@@ -576,12 +611,41 @@ class MyceliumConfig:
                 side_effect_class=tool_config.side_effect_class,
             )
 
+        # Secret-in-args outside every other guard: scan before claim/fingerprint.
+        if applies_secret:
+            from mycelium.transition import CONSEQUENTIAL_SIDE_EFFECT_CLASSES
+
+            policy = secret_args_policy_from_mapping(self.secret_args or {})
+            consequential = (
+                tool_config.side_effect_class in CONSEQUENTIAL_SIDE_EFFECT_CLASSES
+                if tool_config.side_effect_class is not None
+                else False
+            )
+            if (
+                self.profile == PROFILE_PRODUCTION
+                and consequential
+                and policy.policy != "error"
+            ):
+                raise ConfigError(
+                    f"profile is {PROFILE_PRODUCTION!r} but secret_args.policy "
+                    f"is {policy.policy!r}; consequential tool {name!r} requires "
+                    "'error'"
+                )
+            func = apply_secret_args(
+                func,
+                policy,
+                tool_name=name,
+                secret_fields=tool_config.secret_fields,
+                consequential=consequential,
+            )
+
         # LangGraph outermost so it can inject scope/dispatch before inner guards.
         if self.langgraph_enabled and (
             tool_config.ledger is not None
             or applies_loop
             or applies_scope
             or applies_state
+            or applies_secret
         ):
             try:
                 func = instrument_langgraph_tool(func)
@@ -1933,6 +1997,26 @@ def _parse_tool_config(
             f"tool '{name}'.state_authority must be a bool or a mapping"
         )
 
+    secret_fields_raw = raw.get("secret_fields")
+    secret_fields: tuple[str, ...] = ()
+    if secret_fields_raw is not None:
+        if not isinstance(secret_fields_raw, list) or not all(
+            isinstance(item, str) and item.strip() for item in secret_fields_raw
+        ):
+            raise ConfigError(
+                f"tool '{name}'.secret_fields must be a list of non-empty strings"
+            )
+        secret_fields = tuple(item.strip() for item in secret_fields_raw)
+
+    secret_args_raw = raw.get("secret_args")
+    secret_args_cfg: bool | None
+    if secret_args_raw is None:
+        secret_args_cfg = None
+    elif isinstance(secret_args_raw, bool):
+        secret_args_cfg = secret_args_raw
+    else:
+        raise ConfigError(f"tool '{name}'.secret_args must be a bool")
+
     return ToolConfig(
         name=name,
         protect=protect,
@@ -1951,6 +2035,8 @@ def _parse_tool_config(
         budget_guard=budget_guard_cfg,
         scope_guard=scope_guard_cfg,
         state_authority=state_authority_cfg,
+        secret_fields=secret_fields,
+        secret_args=secret_args_cfg,
     )
 
 
@@ -2055,6 +2141,8 @@ def _apply_action_ledger_tools(
             budget_guard=existing.budget_guard,
             scope_guard=existing.scope_guard,
             state_authority=existing.state_authority,
+            secret_fields=existing.secret_fields,
+            secret_args=existing.secret_args,
         )
 
 
@@ -2640,6 +2728,88 @@ def _parse_verify(data: dict[str, Any]) -> dict[str, Any] | None:
     return {"allow_temporary_schema": allow}
 
 
+def secret_args_policy_from_mapping(raw: dict[str, Any]) -> SecretArgsPolicy:
+    """Build a :class:`SecretArgsPolicy` from a validated mapping."""
+    return SecretArgsPolicy(
+        enabled=bool(raw.get("enabled", True)),
+        policy=str(raw.get("policy", "error")),
+        allow_fields=frozenset(str(item) for item in (raw.get("allow_fields") or [])),
+        allow_tools=frozenset(str(item) for item in (raw.get("allow_tools") or [])),
+        entropy_detection=bool(raw.get("entropy_detection", True)),
+    )
+
+
+def _parse_secret_args(
+    data: dict[str, Any],
+    *,
+    profile: str,
+    tools: dict[str, ToolConfig],
+) -> dict[str, Any] | None:
+    """Optional AF-010 secret-in-args section. Omitted keeps existing behavior."""
+    raw = data.get("secret_args")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ConfigError("'secret_args' must be a mapping")
+    allowed_keys = {
+        "enabled",
+        "policy",
+        "allow_fields",
+        "allow_tools",
+        "entropy_detection",
+    }
+    unknown = set(raw) - allowed_keys
+    if unknown:
+        names = ", ".join(sorted(str(name) for name in unknown))
+        raise ConfigError(f"unsupported 'secret_args' option(s): {names}")
+
+    enabled = raw.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ConfigError("'secret_args.enabled' must be a boolean")
+    policy = raw.get("policy", "error")
+    if policy not in SECRET_ARGS_POLICIES:
+        raise ConfigError(
+            "'secret_args.policy' must be one of "
+            f"{sorted(SECRET_ARGS_POLICIES)}, got {policy!r}"
+        )
+    allow_fields = raw.get("allow_fields", [])
+    if not isinstance(allow_fields, list) or not all(
+        isinstance(item, str) and item.strip() for item in allow_fields
+    ):
+        raise ConfigError(
+            "'secret_args.allow_fields' must be a list of non-empty strings; "
+            "scope allowlists narrowly by tool, not as a global trust list"
+        )
+    allow_tools = raw.get("allow_tools", [])
+    if not isinstance(allow_tools, list) or not all(
+        isinstance(item, str) and item.strip() for item in allow_tools
+    ):
+        raise ConfigError("'secret_args.allow_tools' must be a list of tool names")
+    entropy = raw.get("entropy_detection", True)
+    if not isinstance(entropy, bool):
+        raise ConfigError("'secret_args.entropy_detection' must be a boolean")
+
+    parsed = {
+        "enabled": enabled,
+        "policy": str(policy),
+        "allow_fields": [str(item).strip() for item in allow_fields],
+        "allow_tools": [str(item).strip() for item in allow_tools],
+        "entropy_detection": entropy,
+    }
+    if enabled and profile == PROFILE_PRODUCTION and parsed["policy"] != "error":
+        from mycelium.transition import CONSEQUENTIAL_SIDE_EFFECT_CLASSES
+
+        consequential = [
+            name
+            for name, tool in tools.items()
+            if tool.side_effect_class in CONSEQUENTIAL_SIDE_EFFECT_CLASSES
+            and name not in parsed["allow_tools"]
+        ]
+        if consequential:
+            _reject_weaker_production_policy("secret_args.policy", parsed["policy"])
+    return parsed
+
+
 def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
     if not isinstance(data, dict):
         raise ConfigError("config root must be a mapping")
@@ -2877,6 +3047,8 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
         if not isinstance(exclude, list):
             raise ConfigError("'state_authority.exclude' must be a list of tool names")
 
+    secret_args_raw = _parse_secret_args(data, profile=profile, tools=tools)
+
     message_validator_raw = data.get("message_validator", False)
     if isinstance(message_validator_raw, dict):
         message_validator = bool(message_validator_raw.get("enabled", True))
@@ -2912,6 +3084,7 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
         completion=completion_raw,
         deployment=deployment,
         verify=verify,
+        secret_args=secret_args_raw,
         profile=profile,
         _audit_auto=audit_auto,
     )

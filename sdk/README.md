@@ -6,7 +6,7 @@
 **The reliability layer for AI agents** — installable as `mycelium-runtime`
 (current version on [PyPI](https://pypi.org/project/mycelium-runtime/)).
 
-The public story is the [failure-mode catalog](docs/FAILURE_MODE_CATALOG.md) (**AF-001…AF-009**): each ID is a real runtime failure class; each shipped surface is a deterministic guard. The taxonomy is the product promise; envelope fields and gates are how AF-002 is implemented underneath.
+The public story is the [failure-mode catalog](docs/FAILURE_MODE_CATALOG.md) (**AF-001…AF-010**): each ID is a real runtime failure class; each shipped surface is a deterministic guard. The taxonomy is the product promise; envelope fields and gates are how AF-002 is implemented underneath.
 
 **Releases:** batch; calm over velocity — [release policy & pre-release checklist](docs/RELEASE.md).
 
@@ -61,7 +61,8 @@ Mycelium sits between your agent loop and your tools (after the LLM returns `too
 |---|---------------|-------------------|
 | **Core** | **AF-002 Observability black hole** | **Flagship:** any tool, any provider — prove run-or-not, at-most-once. Ledger · lease · gates · `Reconciler` · operator release · receipts (Gmail/Stripe adapters = demos) |
 | **Opt-in** | **AF-003 Infinite action loops** | `loop_guard:` — action-hash streak across *new* `tool_call_id`s; soft then hard; operator `mycelium loops release` |
-| **Opt-in** | **Budget / runaway spend (not AF-010)** | `budget:` — `max_duration` / `max_steps` / `max_tokens` / `max_usd`; tools auto-wrapped; **LLM turns auto-wired** on LangGraph/LangChain; `missing_usage_policy`; operator `mycelium budget release` |
+| **Opt-in** | **Budget / runaway spend (unnumbered)** | `budget:` — `max_duration` / `max_steps` / `max_tokens` / `max_usd`; tools auto-wrapped; **LLM turns auto-wired** on LangGraph/LangChain; `missing_usage_policy`; operator `mycelium budget release` |
+| **Opt-in** | **AF-010 Secret-in-args** | `secret_args:` — block raw credentials before claim; pass `secret://` references; shared sanitizer on evidence. Fail-closed is primary; redaction is defense-in-depth |
 | **Opt-in** | **AF-004 Tool misuse** | `@bounded` input/output/scope checks; optional `ToolRegistry` allowlist — block before the tool runs |
 | **Opt-in** | **AF-006 Context corruption** | TTL cache (`@protect` / `Session`); optional `MessageValidator` / `HistoryGuard` before the next LLM turn |
 | **Opt-in** | **AF-007 Premature termination** | `completion:` — host checklist; unmarked **required** → refuse terminal; unmarked **optional** → warn and allow |
@@ -513,7 +514,7 @@ See [examples/failure_cases/](examples/failure_cases/)
 - Resolve redispatches through **gates** (see [Resolution gates](#resolution-gates)) instead of re-running blindly
 - Persist failed attempts with **terminal outcomes** (`FAILED_BEFORE_EFFECT`, `FAILED_AFTER_EFFECT`, `UNKNOWN`, `EXPIRED`, etc.) for audit and reconciliation
 
-**Failure-mode catalog.** Stable AF-001…AF-009 definitions (shipped vs roadmap)
+**Failure-mode catalog.** Stable AF-001…AF-010 definitions (shipped vs roadmap)
 live in [`docs/FAILURE_MODE_CATALOG.md`](docs/FAILURE_MODE_CATALOG.md).
 
 **Failure & threat model.** What this core can and cannot protect you from is
@@ -1104,9 +1105,10 @@ run. LangGraph's adapter copies an existing framework `run_id` into
 `execution_scope` — do not pass a duplicate when the adapter already provides
 one.
 
-Wrapper order: `@budget_guard` → `@loop_guard` → `@ledger` → `@bounded` → `@protect` → `func`.
+Wrapper order: `@secret_args` → `@state_authority` → `@scope_guard` →
+`@budget_guard` → `@loop_guard` → `@ledger` → `@bounded` → `@protect` → `func`.
 
-### Budget guard (not AF-010)
+### Budget guard (unnumbered)
 
 Loop guard stops *identical* action thrash. Budget stops **total burn** when
 every call is different — including pure LLM chat loops with no tools.
@@ -1183,6 +1185,53 @@ mycelium loops release <run_id> --verified clear|allow-once|abort-run \
 
 Demo: `python examples/loop_guard_db_search.py` (from `sdk/`).
 
+### Secret-in-args (AF-010)
+
+Raw credentials must not reach the tool boundary. Pass **references**, not
+secrets:
+
+```yaml
+secret_args:
+  enabled: true
+  policy: error          # error | redact | warn
+  allow_fields: []       # weaken protection; scope per tool, not globally
+  allow_tools: []
+  entropy_detection: true
+
+tools:
+  charge:
+    side_effect_class: non_idempotent_mutate
+    secret_fields: [api_key]   # may hold secret://… refs
+```
+
+```python
+from mycelium import register_secret_resolver
+
+register_secret_resolver(lambda ref: vault.get(ref))  # host-owned; none is built in
+charge(api_key="secret://stripe/production/api-key")
+```
+
+`policy: error` raises `SecretInArgsError` **before** ledger claim, argument
+fingerprinting, receipts, execution, or telemetry. `redact` may pass a
+redacted copy only when that cannot change required tool semantics;
+otherwise it fail-closes. `warn` keeps compatibility in development and
+still sanitizes every persisted or emitted representation. Production
+consequential tools require `error`. Omitted `secret_args:` keeps existing
+behavior.
+
+Fail-closed pre-execution blocking is the primary protection. Redaction of
+Mycelium-owned evidence (ledgers, receipts, outcomes, Doctor/Verify/CLI
+JSON, structured logs) is defense-in-depth. Mycelium **cannot** sanitize
+logs created inside arbitrary application or provider code after a
+resolved value is handed over. `allow_fields` / `allow_tools` weaken the
+guard — keep them empty or tool-narrow.
+
+`mycelium doctor` reports whether scanning is enabled, whether production
+consequential tools fail closed, whether a resolver is registered, and
+labels host logs / third-party providers `not_verifiable`.
+`mycelium verify --scenario secret-in-args` searches generated artifacts
+for synthetic credentials.
+
 ### Scope guard (AF-008): freeze run tool allowlist
 
 AF-008 is when a narrow grant **widens mid-run** (handoff, dynamic
@@ -1213,8 +1262,8 @@ with execution_scope(TransitionScope(run_id="r1", thread_id="t")):
     fetch_customer(customer_id="c1")  # ok; tools outside the freeze soft-block
 ```
 
-Wrapper order: `@scope_guard` → `@loop_guard` → `@ledger` → `@bounded` →
-`@protect`. CLI: `mycelium scope status|bind`. Demo:
+Wrapper order: `@secret_args` → `@scope_guard` → `@loop_guard` → `@ledger` →
+`@bounded` → `@protect`. CLI: `mycelium scope status|bind`. Demo:
 `python examples/scope_guard_allowlist.py` (from `sdk/`).
 
 ### Completion contract (AF-007): refuse terminal while required subtasks pending
@@ -1329,8 +1378,8 @@ def refund(amount: float, *, tool_call_id: str, state_ref: str) -> dict:
     ...
 ```
 
-Wrapper order: `@state_authority` → `@scope_guard` → `@loop_guard` →
-`@ledger` → `@bounded` → `@protect` → `func`.
+Wrapper order: `@secret_args` → `@state_authority` → `@scope_guard` →
+`@loop_guard` → `@ledger` → `@bounded` → `@protect` → `func`.
 
 `decision_id` / `state_ref` are bookkeeping kwargs (excluded from the args
 fingerprint) and are stored on `LedgerEntry` at claim for audit. Enforcement
@@ -1490,6 +1539,9 @@ policies:
   single-node only. `storage: redis` needs `persistence: required` (AOF
   or equivalently durable Redis; Mycelium cannot verify the server).
   Emission failure is fail-closed.
+- `secret_args.policy: error` when `secret_args:` is enabled and
+  consequential tools exist. Weaker `warn` / `redact` under production
+  is rejected. Omitted `secret_args:` stays backward compatible.
 
 Explicit weaker settings (`warn`, `derived`, memory outcomes) under
 production are rejected (`ConfigError`), not silently weakened. Omit
@@ -1536,6 +1588,13 @@ budget:
   path: ./mycelium-budget.json
   missing_usage_policy: error
 
+secret_args:
+  enabled: true
+  policy: error
+  allow_fields: []
+  allow_tools: []
+  entropy_detection: true
+
 outcome_emit:
   storage: postgres
   url_env: DATABASE_URL
@@ -1563,7 +1622,8 @@ $ mycelium doctor --config mycelium.yaml --strict --json   # CI gate
 
 It checks profile defaults, tool classification, business request identity,
 durable ActionLedger / outcome backends, run-id guard policies, completion and
-budget adapter selection, and optional `deployment.topology`. It never executes
+budget adapter selection, secret-in-args scanning / fail-closed production,
+and optional `deployment.topology`. It never executes
 application tools, never calls an LLM, never writes ledger/outcome rows, and
 never repairs config.
 
@@ -1585,7 +1645,7 @@ $ mycelium verify --config mycelium.yaml --scenario all --strict --json
 ```
 
 Scenarios: `redispatch`, `contention`, `storage-outage`, `worker-crash`,
-`ambiguous-effect`, `reconcile`, or `all` (that order). Verify never executes
+`ambiguous-effect`, `reconcile`, `secret-in-args`, or `all` (that order). Verify never executes
 application tools, never calls an LLM, never contacts a real business provider,
 and never inspects or alters existing production transitions. Test data uses a
 unique `mycelium:verify:<uuid>:` namespace and is deleted unless

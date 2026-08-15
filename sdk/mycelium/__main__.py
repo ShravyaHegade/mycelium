@@ -324,7 +324,15 @@ def cmd_transitions_list(args: argparse.Namespace) -> int:
         )
     entries.sort(key=lambda entry: entry.started_at)
     if args.json:
-        print(json.dumps([_entry_row(entry, now) for entry in entries], indent=2, default=str))
+        from mycelium.secret_protection import sanitize_for_evidence
+
+        print(
+            json.dumps(
+                sanitize_for_evidence([_entry_row(entry, now) for entry in entries]),
+                indent=2,
+                default=str,
+            )
+        )
         return 0
     if not entries:
         print("no transitions found" + (" (stuck only)" if args.stuck else ""))
@@ -354,8 +362,10 @@ def cmd_transitions_show(args: argparse.Namespace) -> int:
     resolved = entry.resolved_terminal_outcome()
     print(f"request_id: {entry.request_id}")
     print(f"tool: {entry.tool}")
-    print(f"args: {json.dumps(entry.args, default=str)}")
-    print(f"kwargs: {json.dumps(entry.kwargs, default=str)}")
+    from mycelium.secret_protection import sanitize_for_evidence, sanitize_text
+
+    print(f"args: {json.dumps(sanitize_for_evidence(entry.args), default=str)}")
+    print(f"kwargs: {json.dumps(sanitize_for_evidence(entry.kwargs), default=str)}")
     print(f"status: {entry.status}")
     print(f"resolved_outcome: {resolved.value}")
     print(f"parent_request_id: {entry.parent_request_id or '-'}")
@@ -374,8 +384,8 @@ def cmd_transitions_show(args: argparse.Namespace) -> int:
     else:
         print("provider_key_first_attempt_at: -")
     print(f"external_operation_ref: {entry.external_operation_ref or '-'}")
-    print(f"error: {entry.error or '-'}")
-    print(f"result: {json.dumps(entry.result, default=str)}")
+    print(f"error: {sanitize_text(entry.error) if entry.error else '-'}")
+    print(f"result: {json.dumps(sanitize_for_evidence(entry.result), default=str)}")
     print(f"receipt_ref: {entry.receipt_ref or '-'}")
     print(f"operator_resolution: {entry.operator_resolution or '-'}")
     print(f"resolved_by: {entry.resolved_by or '-'}")
@@ -1116,7 +1126,8 @@ def main(argv: list[str] | None = None) -> int:
         metavar="NAME",
         help=(
             "Scenario to run (repeatable): redispatch, contention, "
-            "worker-crash, storage-outage, ambiguous-effect, reconcile, or all"
+            "worker-crash, storage-outage, ambiguous-effect, reconcile, "
+            "secret-in-args, or all"
         ),
     )
     verify_parser.add_argument(

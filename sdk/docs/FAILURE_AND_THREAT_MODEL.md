@@ -205,6 +205,14 @@ section; the tests are concrete `file::test_name` entries.
     repeated task id (deduplicated across processes when storage is durable).
     *Where:* [Quickstart: task-level idempotency](../README.md#quickstart-task-level-idempotency).
 
+17. **Secret-in-args (when `secret_args:` is enabled).** Raw credentials,
+    tokens, passwords, and private keys are blocked or sanitized before
+    claim, fingerprinting, receipts, outcomes, CLI dumps, and Doctor/Verify
+    JSON. `policy: error` raises `SecretInArgsError` before any side effect.
+    Pass `secret://…` references; resolve only at the trusted tool call for
+    declared fields. Omitted `secret_args:` keeps pre-AF-010 behavior.
+    *Where:* [Secret-in-args (AF-010)](../README.md#secret-in-args-af-010).
+
 ---
 
 ## D. What we do not protect
@@ -236,7 +244,7 @@ than the code makes.
   across new dispatch ids; it is **not** a general spend/time budget. Without a
   stable `run_id` the detector skips (default `missing_run_id_policy: warn`).
   Set `error` so an enabled guard cannot run unprotected. Optional
-  `budget:` (not AF-010) hard-stops on host-declared duration/steps/tokens/USD
+  `budget:` (unnumbered) hard-stops on host-declared duration/steps/tokens/USD
   ceilings before the next step. Supported LangGraph/LangChain model
   boundaries are wired automatically. Residual risk remains for custom
   providers if the host skips `instrument_llm` / `@budget_llm` (or manual
@@ -282,8 +290,16 @@ than the code makes.
   orchestrator recovery semantics.
 - **The optional guard surface.** `@protect` / `HistoryGuard` /
   `MessageValidator` / `@bounded` / `Session` / `loop_guard` / `completion` /
-  `scope_guard` / `state_authority` are documented elsewhere and are not part
-  of this threat model.
+  `scope_guard` / `state_authority` / `secret_args` are documented elsewhere
+  and are not part of the ledger-core guarantee set unless enabled.
+- **Application and provider logs (AF-010 residual).** Mycelium cannot
+  sanitize logs, traces, or exceptions created inside arbitrary application
+  or third-party provider code after a resolved secret is handed to that
+  call. Redaction of Mycelium-owned evidence is defense-in-depth;
+  fail-closed pre-execution blocking is the primary protection. Doctor
+  labels host logs and third-party providers `not_verifiable`.
+  `allow_fields` / `allow_tools` weaken the guard and must stay
+  tool-narrow.
 
 ---
 
@@ -314,6 +330,7 @@ are cited once. "Where documented" links the README section.
 | Provider idempotency-key enforcement (opt-in) | README § [Enforcing the same provider idempotency key](../README.md#enforcing-the-same-provider-idempotency-key-provider_idempotency_key_param) | `test_provider_idempotency_key.py::test_gate_hard_blocks_different_provider_key` · `test_provider_idempotency_key.py::test_gate_hard_blocks_missing_incoming_key` · `test_provider_idempotency_key.py::test_gate_hard_blocks_missing_stored_key` · `test_provider_idempotency_key.py::test_declared_key_is_excluded_from_transition_key` · `test_provider_key_validity.py::test_same_key_expired_ttl_hard_blocks` · `test_provider_key_validity.py::test_unknown_same_key_valid_ttl_allows` · `test_provider_key_validity.py::test_unknown_same_key_expired_ttl_hard_blocks` · `test_provider_key_validity.py::test_unknown_same_key_prefers_reconciler_over_reexec` |
 | Key derivation soundness | README § [Transition identity and host-owned `request_id`](../README.md#transition-identity-and-host-owned-request_id) | `test_transition.py::test_same_inputs_produce_same_transition_key` · `test_transition.py::test_different_tool_call_id_produces_different_key` · `test_transition.py::test_ledger_deduplicates_by_transition_key` · `test_property_transitions.py::test_transition_key_invariants` (property test) · `test_explicit_request_id.py` |
 | Task-level idempotency | README § [Quickstart: task-level idempotency](../README.md#quickstart-task-level-idempotency) | `test_cli_run.py::test_run_instruments_sync_tool_and_task_across_processes` |
+| Secret-in-args (when enabled) | README § [Secret-in-args (AF-010)](../README.md#secret-in-args-af-010) | `test_secret_protection.py` · `test_verify.py::test_cli_smoke_each_scenario` (`secret-in-args`) |
 | Single-key state machine invariants (executions ≤ 1 + not-executed verdicts; COMPLETED terminal; CAS out of IN_FLIGHT) | this doc, § C / [NOT_EXECUTED reset CAS](../README.md#not_executed-reset-cas-v118) | `test_property_transitions.py::test_transition_key_invariants` (Hypothesis, file + Redis) · `test_payment_provider_mock.py::test_redispatch_storm_never_double_charges` |
 
 <sup>1</sup> `test_postgres_storage_atomic_claim` runs when `psycopg` is
@@ -359,6 +376,11 @@ Still can go wrong — even with everything above configured correctly:
 - **Wall-clock leases.** Leases rely on `time.time()`. Clock skew can renew or
   expire leases early; extreme skew is a deployment concern, not something the
   runtime compensates for.
+- **Secrets after the trusted call (AF-010).** Once a declared
+  `secret://` reference is resolved and passed into application or
+  provider code, Mycelium cannot prevent that code from logging the
+  value. Do not print resolved secrets; keep `secret_args.policy: error`
+  for consequential tools.
 - **Silent duplicates are invisible without opt-in telemetry.** The guard
   prevents unauthorized re-execution, but a violation (lying reconciler,
   caller escaping the key, bug in the runtime) only surfaces as

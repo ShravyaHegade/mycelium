@@ -182,11 +182,12 @@ class TaskLedger:
         Raises TaskLedgerPendingError if the task is currently in-flight.
         """
         bound = _bind_args(args, kwargs)
+        stored_args, stored_kwargs = _evidence_args(bound["args"], bound["kwargs"])
         entry = TaskLedgerEntry(
             request_id=request_id,
             task=task,
-            args=bound["args"],
-            kwargs=bound["kwargs"],
+            args=stored_args,
+            kwargs=stored_kwargs,
             status="in-flight",
         )
         outcome, existing = self._storage.try_claim_inflight(entry)
@@ -208,7 +209,7 @@ class TaskLedger:
             args=existing.args,
             kwargs=existing.kwargs,
             status="completed",
-            result=result,
+            result=_evidence_value(result),
             started_at=existing.started_at,
             finished_at=time.time(),
         )
@@ -225,7 +226,7 @@ class TaskLedger:
             args=existing.args,
             kwargs=existing.kwargs,
             status="failed",
-            error=f"{type(error).__name__}: {error}",
+            error=_evidence_error(error),
             started_at=existing.started_at,
             finished_at=time.time(),
         )
@@ -283,6 +284,43 @@ class TaskLedger:
         return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
+def _evidence_value(value: Any) -> Any:
+    from mycelium.secret_protection import get_active_secret_policy, sanitize_for_evidence
+
+    policy = get_active_secret_policy()
+    if policy is None or not policy.enabled:
+        return value
+    return sanitize_for_evidence(value)
+
+
+def _evidence_args(args: Any, kwargs: Any) -> tuple[list[Any], dict[str, Any]]:
+    from mycelium.secret_protection import get_active_secret_policy, sanitize_secrets
+
+    policy = get_active_secret_policy()
+    if policy is None or not policy.enabled:
+        return list(args), dict(kwargs)
+    safe = sanitize_secrets(
+        {"args": list(args), "kwargs": dict(kwargs)},
+        entropy_detection=policy.entropy_detection,
+        allow_fields=policy.allow_fields,
+    )
+    return list(safe["args"]), dict(safe["kwargs"])
+
+
+def _evidence_error(error: BaseException) -> str:
+    from mycelium.secret_protection import (
+        get_active_secret_policy,
+        sanitize_exception,
+        sanitize_text,
+    )
+
+    policy = get_active_secret_policy()
+    if policy is None or not policy.enabled:
+        return f"{type(error).__name__}: {error}"
+    safe = sanitize_exception(error)
+    return sanitize_text(f"{type(safe).__name__}: {safe}")
+
+
 def _bind_args(args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, Any]:
     """Store a serializable snapshot of the call arguments."""
     return {
@@ -323,11 +361,31 @@ def _run_task_ledgered(
         return existing.result
 
     try:
-        result = func(*args, **clean_kwargs)
+        from mycelium.secret_protection import (
+            get_active_secret_policy,
+            resolve_declared_secret_fields,
+        )
+
+        policy = get_active_secret_policy()
+        extra = policy.secret_fields if policy is not None else frozenset()
+        exec_args, exec_kwargs = resolve_declared_secret_fields(
+            func, args, clean_kwargs, extra_fields=extra
+        )
+        result = func(*exec_args, **exec_kwargs)
     except Exception as exc:
+        from mycelium.secret_protection import (
+            get_active_secret_policy,
+        )
+        from mycelium.secret_protection import (
+            sanitize_exception as _sanitize_exc,
+        )
+
+        policy = get_active_secret_policy()
+        if policy is not None and policy.enabled:
+            exc = _sanitize_exc(exc)
         ledger.fail(request_id, exc)
         _emit_task_receipt(audit_emitter, ledger, request_id)
-        raise
+        raise exc
 
     ledger.complete(request_id, result)
     _emit_task_receipt(audit_emitter, ledger, request_id)
@@ -349,11 +407,31 @@ async def _run_task_ledgered_async(
         return existing.result
 
     try:
-        result = await func(*args, **clean_kwargs)
+        from mycelium.secret_protection import (
+            get_active_secret_policy,
+            resolve_declared_secret_fields,
+        )
+
+        policy = get_active_secret_policy()
+        extra = policy.secret_fields if policy is not None else frozenset()
+        exec_args, exec_kwargs = resolve_declared_secret_fields(
+            func, args, clean_kwargs, extra_fields=extra
+        )
+        result = await func(*exec_args, **exec_kwargs)
     except Exception as exc:
+        from mycelium.secret_protection import (
+            get_active_secret_policy,
+        )
+        from mycelium.secret_protection import (
+            sanitize_exception as _sanitize_exc,
+        )
+
+        policy = get_active_secret_policy()
+        if policy is not None and policy.enabled:
+            exc = _sanitize_exc(exc)
         ledger.fail(request_id, exc)
         _emit_task_receipt(audit_emitter, ledger, request_id)
-        raise
+        raise exc
 
     ledger.complete(request_id, result)
     _emit_task_receipt(audit_emitter, ledger, request_id)

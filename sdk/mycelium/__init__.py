@@ -199,6 +199,17 @@ from mycelium.scope_guard import (
     scope_guard,
     scope_guard_sync,
 )
+from mycelium.secret_protection import (
+    REDACTED_MARKER,
+    SecretInArgsError,
+    declare_secret_fields,
+    is_secret_reference,
+    register_secret_hmac_key,
+    register_secret_resolver,
+    resolve_secret_reference,
+    sanitize_secrets,
+    scan_secrets,
+)
 from mycelium.session import Session
 from mycelium.state_authority import (
     ON_MISMATCH_HARD,
@@ -458,6 +469,15 @@ __all__ = [
     "load_config_from_string",
     "protect",
     "protect_sync",
+    "REDACTED_MARKER",
+    "SecretInArgsError",
+    "declare_secret_fields",
+    "is_secret_reference",
+    "register_secret_hmac_key",
+    "register_secret_resolver",
+    "resolve_secret_reference",
+    "sanitize_secrets",
+    "scan_secrets",
     "Session",
     "StateFlush",
     "StateFlushError",

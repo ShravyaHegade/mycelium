@@ -401,6 +401,31 @@ scope_guard:
     assert scope.missing_run_id_policy == "error"
 
 
+def test_production_accepts_secret_args_error_policy() -> None:
+    cfg = load_config_from_string(
+        """
+profile: production
+action_ledger:
+  storage: sqlite
+  path: ./ledger.db
+  tools: [charge]
+outcome_emit:
+  storage: file
+  path: ./outcomes.jsonl
+secret_args:
+  enabled: true
+  policy: error
+tools:
+  charge:
+    side_effect_class: non_idempotent_mutate
+    secret_fields: [api_key]
+"""
+    )
+    assert cfg.secret_args is not None
+    assert cfg.secret_args["policy"] == "error"
+    assert cfg.tools["charge"].secret_fields == ("api_key",)
+
+
 def test_existing_configs_without_profile_still_load() -> None:
     cfg = load_config_from_string(
         """

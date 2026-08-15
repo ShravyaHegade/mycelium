@@ -28,6 +28,7 @@ The taxonomy **is** the product story. Each ID is a real failure class from prod
 | **AF-006** | Context corruption | Stale or broken tool/history context is caught before the next turn |
 | **AF-007** | Premature termination | Required checklist items must complete before the run can declare success |
 | **AF-008** | Cascading permission | The run tool allowlist freezes; mid-run / handoff widen is refused |
+| **AF-010** | Secret-in-args | Raw credentials are blocked before claim; pass `secret://` references |
 | AF-001 / AF-005 / AF-009 | Hallucination · goal misalignment · injection | Roadmap / judgment tier — not claimed as deterministic SDK guards yet |
 
 Full definitions (shipped vs roadmap): [sdk/docs/FAILURE_MODE_CATALOG.md](sdk/docs/FAILURE_MODE_CATALOG.md).
@@ -57,7 +58,8 @@ Mycelium wraps tool calls after the LLM returns `tool_calls` and returns a verdi
 
 - **AF-003 Infinite loops** — `loop_guard:` · soft → hard → `mycelium loops release`
 - **AF-004 Tool misuse** — `@bounded` / registry · block bad args (incl. `array` / `object`) and out-of-scope tools / paths
-- **Budget / runaway spend (not AF-010)** — `budget:` · ceilings + `@budget_guard` / `instrument_llm` (auto `check("llm")`) · `mycelium budget release`
+- **Budget / runaway spend (unnumbered)** — `budget:` · ceilings + `@budget_guard` / `instrument_llm` (auto `check("llm")`) · `mycelium budget release`
+- **AF-010 Secret-in-args** — `secret_args:` · block raw credentials before claim · pass `secret://` references · `mycelium verify --scenario secret-in-args`
 - **AF-006 Context corruption** — `@protect` / Session · optional message/history validation
 - **AF-007 Premature termination** — `completion:` host checklist · refuse or warn-and-allow
 - **AF-008 Scope escalation** — `scope_guard:` freeze allowlist · re-check every step

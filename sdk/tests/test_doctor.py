@@ -477,3 +477,39 @@ def test_verbose_includes_evidence(tmp_path: Path) -> None:
     report = run_doctor(path, connectivity=False)
     text = render_human(report, verbose=True)
     assert "evidence=" in text
+
+
+def test_secret_args_omitted_is_skip_not_warn(tmp_path: Path) -> None:
+    path = _write(tmp_path, _single_node_prod(tmp_path))
+    report = run_doctor(path, connectivity=False)
+    scanning = next(c for c in report.checks if c.id == "secrets.scanning")
+    assert scanning.status == DoctorStatus.SKIP
+    host = next(c for c in report.checks if c.id == "secrets.host_logs")
+    assert host.evidence == "not_verifiable"
+    assert host.status == DoctorStatus.SKIP
+    assert not any(
+        c.id.startswith("secrets.") and c.status in (DoctorStatus.WARN, DoctorStatus.FAIL)
+        for c in report.checks
+    )
+
+
+def test_secret_args_enabled_reports_fail_closed(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        _single_node_prod(
+            tmp_path,
+            extra="""
+secret_args:
+  enabled: true
+  policy: error
+  allow_fields: [authorization]
+""",
+        ),
+    )
+    report = run_doctor(path, connectivity=False)
+    scanning = next(c for c in report.checks if c.id == "secrets.scanning")
+    assert scanning.status == DoctorStatus.PASS
+    closed = next(c for c in report.checks if c.id == "secrets.production_fail_closed")
+    assert closed.status == DoctorStatus.PASS
+    allow = next(c for c in report.checks if c.id == "secrets.allow_fields")
+    assert allow.status == DoctorStatus.WARN
