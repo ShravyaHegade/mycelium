@@ -14,7 +14,7 @@ import threading
 import time
 import uuid
 import warnings
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
@@ -318,6 +318,7 @@ class _ActiveTransition:
     ledger: ActionLedger
     request_id: str
     binding: ToolTransitionBinding | None
+    call_kwargs: Mapping[str, Any]
 
 
 _active_transition_var: ContextVar[_ActiveTransition | None] = ContextVar(
@@ -372,7 +373,8 @@ def mark_maybe_crossed() -> None:
     """
     from mycelium.use_time_currency import enforce_use_boundary
 
-    enforce_use_boundary(skip_if_token_valid=True)
+    active = _active_transition_var.get()
+    enforce_use_boundary(kwargs=active.call_kwargs if active is not None else {})
     _advance_active_boundary(SideEffectBoundary.MAYBE_CROSSED)
 
 
@@ -3438,6 +3440,19 @@ def _args_drift_scopes_match(
     return incoming == stored
 
 
+def _canonical_call_mapping(
+    func: Callable[..., Any], args: tuple[Any, ...], kwargs: Mapping[str, Any]
+) -> dict[str, Any]:
+    mapping = dict(kwargs)
+    try:
+        bound = inspect.signature(func).bind_partial(*args, **kwargs)
+        bound.apply_defaults()
+        mapping.update(bound.arguments)
+    except (TypeError, ValueError):
+        pass
+    return mapping
+
+
 def _claim_kwargs(kwargs: dict[str, Any], clean_kwargs: dict[str, Any]) -> dict[str, Any]:
     """Kwargs for claim: tool args plus optional bookkeeping pass-through.
 
@@ -3694,7 +3709,12 @@ def _run_ledgered(
     )
 
     token = _active_transition_var.set(
-        _ActiveTransition(ledger, request_id, transition_binding)
+        _ActiveTransition(
+            ledger,
+            request_id,
+            transition_binding,
+            _canonical_call_mapping(func, args, clean_kwargs),
+        )
     )
     try:
         from mycelium.authority_window import AuthorityExpiredError
@@ -4000,7 +4020,12 @@ async def _run_ledgered_async(
     )
 
     token = _active_transition_var.set(
-        _ActiveTransition(ledger, request_id, transition_binding)
+        _ActiveTransition(
+            ledger,
+            request_id,
+            transition_binding,
+            _canonical_call_mapping(func, args, clean_kwargs),
+        )
     )
     try:
         from mycelium.authority_window import AuthorityExpiredError

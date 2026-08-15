@@ -8,7 +8,13 @@ from typing import Any
 
 import pytest
 
-from mycelium.action_ledger import InMemoryLedgerStorage, ledger, ledger_sync, side_effect
+from mycelium.action_ledger import (
+    InMemoryLedgerStorage,
+    get_active_transition,
+    ledger,
+    ledger_sync,
+    side_effect,
+)
 from mycelium.config import ConfigError, load_config_from_string
 from mycelium.transition import (
     SideEffectBoundary,
@@ -457,7 +463,7 @@ def test_completed_return_skips_use() -> None:
         assert calls["n"] == first_calls
 
 
-def test_use_boundary_token_skips_double_call() -> None:
+def test_use_boundary_revalidates_each_call() -> None:
     set_use_time_currency_policy(_policy())
     calls = {"n": 0}
 
@@ -482,11 +488,140 @@ def test_use_boundary_token_skips_double_call() -> None:
     )
     enforce_use_boundary(kwargs={"payment_id": "pay_1", "payment_version": "1"})
     assert calls["n"] == 1
-    enforce_use_boundary(
-        skip_if_token_valid=True,
-        kwargs={"payment_id": "pay_1", "payment_version": "1"},
+    enforce_use_boundary(kwargs={"payment_id": "pay_1", "payment_version": "1"})
+    assert calls["n"] == 2
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "tenant", "account", "reason"),
+    [
+        ({"account_id": "acct-1"}, "tenant-1", "acct-1", "missing"),
+        ({"tenant_id": "tenant-1"}, "tenant-1", "acct-1", "missing"),
+        (
+            {"tenant_id": "tenant-2", "account_id": "acct-1"},
+            "tenant-1",
+            "acct-1",
+            "tenant_mismatch",
+        ),
+        (
+            {"tenant_id": "tenant-1", "account_id": "acct-2"},
+            "tenant-1",
+            "acct-1",
+            "account_mismatch",
+        ),
+    ],
+)
+def test_authorize_requires_exact_configured_scope(
+    kwargs: dict[str, str], tenant: str, account: str, reason: str
+) -> None:
+    policy = UseTimeCurrencyPolicy(
+        policy_version="test",
+        tools={
+            "refund_payment": UseTimeToolPolicy(
+                facts=(
+                    UseTimeFactSpec(
+                        name="payment.refundable",
+                        subject_type="payment",
+                        id_from="payment_id",
+                        tenant_from="tenant_id",
+                        account_from="account_id",
+                        validator="payment_state",
+                        require={"value": True},
+                    ),
+                )
+            )
+        },
     )
-    assert calls["n"] == 1
+    use_time_facts.capture(
+        name="payment.refundable",
+        subject_type="payment",
+        subject_id="pay-1",
+        value=True,
+        require_value=True,
+        tenant=tenant,
+        account=account,
+    )
+    with pytest.raises(UseTimeCurrencyError) as exc:
+        authorize_use_time_facts(
+            "refund_payment", (), {"payment_id": "pay-1", **kwargs}, policy=policy
+        )
+    assert exc.value.reason == reason
+
+
+def test_sync_boundary_denies_fact_changed_after_body_start() -> None:
+    storage = InMemoryLedgerStorage()
+    state = {"current": True}
+    provider_calls: list[str] = []
+    request_ids: list[str] = []
+
+    def payment_state(**_kwargs: Any) -> ValidatorResult:
+        return ValidatorResult(current=state["current"], value=state["current"], revision="1")
+
+    register_use_time_validator("payment_state", payment_state)
+
+    @ledger_sync(storage=storage, transition_binding=_binding())
+    def refund_payment(payment_id: str, payment_version: str) -> None:
+        active = get_active_transition()
+        assert active is not None
+        request_ids.append(active.request_id)
+        state["current"] = False
+        with side_effect():
+            provider_calls.append(payment_id)
+
+    wrapped = apply_use_time_currency(refund_payment, _policy(), tool_name="refund_payment")
+    use_time_facts.capture(
+        name="payment.refundable",
+        subject_type="payment",
+        subject_id="pay_1",
+        value=True,
+        revision="1",
+        require_value=True,
+    )
+    with pytest.raises(UseTimeCurrencyError):
+        wrapped(payment_id="pay_1", payment_version="1", request_id="boundary-sync")
+    assert provider_calls == []
+    assert storage.get(request_ids[0]).side_effect_boundary == SideEffectBoundary.NOT_CROSSED.value
+
+
+def test_async_boundary_denies_fact_changed_after_body_start() -> None:
+    storage = InMemoryLedgerStorage()
+    state = {"current": True}
+    provider_calls: list[str] = []
+    request_ids: list[str] = []
+
+    def payment_state(**_kwargs: Any) -> ValidatorResult:
+        return ValidatorResult(current=state["current"], value=state["current"], revision="1")
+
+    register_use_time_validator("payment_state", payment_state)
+
+    @ledger(storage=storage, transition_binding=_binding())
+    async def refund_payment(payment_id: str, payment_version: str) -> None:
+        active = get_active_transition()
+        assert active is not None
+        request_ids.append(active.request_id)
+        state["current"] = False
+        with side_effect():
+            provider_calls.append(payment_id)
+
+    wrapped = apply_use_time_currency(refund_payment, _policy(), tool_name="refund_payment")
+    use_time_facts.capture(
+        name="payment.refundable",
+        subject_type="payment",
+        subject_id="pay_1",
+        value=True,
+        revision="1",
+        require_value=True,
+    )
+
+    async def run() -> None:
+        with pytest.raises(UseTimeCurrencyError):
+            await wrapped(
+                payment_id="pay_1", payment_version="1", request_id="boundary-async"
+            )
+
+    asyncio.run(run())
+    assert provider_calls == []
+    assert storage.get(request_ids[0]).side_effect_boundary == SideEffectBoundary.NOT_CROSSED.value
 
 
 def test_fingerprint_excludes_raw_values() -> None:

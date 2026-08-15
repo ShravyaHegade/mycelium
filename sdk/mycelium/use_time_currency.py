@@ -14,7 +14,6 @@ import asyncio
 import functools
 import hashlib
 import inspect
-import time
 from collections.abc import Awaitable, Callable, Mapping
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
@@ -50,6 +49,7 @@ REASON_CONDITION_FALSE = "condition_false"
 REASON_REVISION_MISMATCH = "revision_mismatch"
 REASON_SUBJECT_MISMATCH = "subject_mismatch"
 REASON_TENANT_MISMATCH = "tenant_mismatch"
+REASON_ACCOUNT_MISMATCH = "account_mismatch"
 REASON_POLICY_CHANGED = "policy_changed"
 REASON_VALIDATOR_MISSING = "validator_missing"
 REASON_VALIDATOR_FAILED = "validator_failed"
@@ -60,7 +60,6 @@ REASON_MALFORMED = "malformed"
 REASON_DISABLED = "disabled"
 REASON_TIMELESS = "timeless"
 
-_USE_BOUNDARY_TOKEN_TTL_SECONDS = 2.0
 _MISSING = object()
 
 ValidatorFn = Callable[..., "ValidatorResult | Awaitable[ValidatorResult]"]
@@ -263,22 +262,6 @@ class UseTimeCurrencyPolicy:
             )
 
 
-@dataclass(frozen=True)
-class UseBoundaryToken:
-    """Short-lived token so body_start + mark_maybe_crossed share one validation."""
-
-    created_mono: float
-    fingerprint: str
-    attempt: str
-    policy_version: str | None
-    authority_revision: str
-    fact_revision: str
-
-    def still_valid(self, *, now_mono: float | None = None) -> bool:
-        observed = time.monotonic() if now_mono is None else now_mono
-        return (observed - self.created_mono) < _USE_BOUNDARY_TOKEN_TTL_SECONDS
-
-
 _clock_var: ContextVar[Callable[[], float] | None] = ContextVar(
     "mycelium_use_time_clock", default=None
 )
@@ -293,9 +276,6 @@ _pending_var: ContextVar[tuple[UseTimeFact, ...]] = ContextVar(
 )
 _decision_var: ContextVar[tuple[UseTimeValidation, ...]] = ContextVar(
     "mycelium_use_time_decisions", default=()
-)
-_token_var: ContextVar[UseBoundaryToken | None] = ContextVar(
-    "mycelium_use_boundary_token", default=None
 )
 _validators: dict[str, ValidatorFn] = {}
 _validator_timeouts: dict[str, float] = {}
@@ -363,7 +343,6 @@ def get_captured_use_time_facts() -> tuple[UseTimeFact, ...]:
 
 def clear_pending_use_time_facts() -> None:
     _pending_var.set(())
-    _token_var.set(None)
 
 
 def clear_captured_use_time_facts() -> None:
@@ -376,7 +355,6 @@ def reset_use_time_currency_state() -> None:
     _captured_var.set(())
     _pending_var.set(())
     _decision_var.set(())
-    _token_var.set(None)
     _validators.clear()
     _validator_timeouts.clear()
 
@@ -914,6 +892,7 @@ def _evaluate_use_result(
                 REASON_REVISION_MISMATCH,
                 REASON_SUBJECT_MISMATCH,
                 REASON_TENANT_MISMATCH,
+                REASON_ACCOUNT_MISMATCH,
                 REASON_POLICY_CHANGED,
                 REASON_VALIDATOR_MISSING,
                 REASON_VALIDATOR_FAILED,
@@ -1111,7 +1090,6 @@ def register_fact_for_use(fact: UseTimeFact) -> UseTimeFact:
         )
     )
     _pending_var.set((*kept, fact))
-    _token_var.set(None)
     return fact
 
 
@@ -1181,13 +1159,32 @@ def authorize_use_time_facts(
         tenant = None
         if spec.tenant_from:
             raw_tenant = _lookup_path(mapping, spec.tenant_from)
-            if raw_tenant is not _MISSING and raw_tenant is not None:
-                tenant = str(raw_tenant)
+            if raw_tenant is _MISSING or raw_tenant is None or raw_tenant == "":
+                _raise_currency(
+                    tool=tool,
+                    fact_name=spec.name,
+                    reason=REASON_MISSING,
+                    phase=PHASE_AUTHORIZE,
+                    policy_version=active.policy_version,
+                    request_id=request_id,
+                    run_id=run_id,
+                )
+            tenant = str(raw_tenant)
         account = None
         if spec.account_from:
             raw_account = _lookup_path(mapping, spec.account_from)
-            if raw_account is not _MISSING and raw_account is not None:
-                account = str(raw_account)
+            if raw_account is _MISSING or raw_account is None or raw_account == "":
+                _raise_currency(
+                    tool=tool,
+                    fact_name=spec.name,
+                    reason=REASON_MISSING,
+                    phase=PHASE_AUTHORIZE,
+                    policy_version=active.policy_version,
+                    request_id=request_id,
+                    run_id=run_id,
+                    tenant=tenant,
+                )
+            account = str(raw_account)
 
         match = None
         for item in captured:
@@ -1210,7 +1207,7 @@ def authorize_use_time_facts(
             require_digest = value_digest(spec.require["value"])
 
         if match is not None:
-            if match.tenant is not None and tenant is not None and match.tenant != tenant:
+            if spec.tenant_from and match.tenant != tenant:
                 _raise_currency(
                     tool=tool,
                     fact_name=spec.name,
@@ -1222,6 +1219,20 @@ def authorize_use_time_facts(
                     request_id=request_id,
                     run_id=run_id,
                     tenant=tenant,
+                )
+            if spec.account_from and match.account != account:
+                _raise_currency(
+                    tool=tool,
+                    fact_name=spec.name,
+                    reason=REASON_ACCOUNT_MISMATCH,
+                    phase=PHASE_AUTHORIZE,
+                    subject_ref=match.subject_ref,
+                    decide_revision=match.revision,
+                    policy_version=active.policy_version,
+                    request_id=request_id,
+                    run_id=run_id,
+                    tenant=tenant,
+                    account=account,
                 )
             if (
                 match.policy_version is not None
@@ -1489,97 +1500,22 @@ async def enforce_pending_use_time_facts_at_use_async(
     return last
 
 
-def _issue_use_boundary_token() -> UseBoundaryToken:
-    from mycelium.authority_window import get_pending_authorities
-
-    pending_facts = _pending_var.get()
-    pending_auth = get_pending_authorities()
-    fact_rev = "|".join(
-        f"{item.name}:{item.revision or ''}:{item.value_digest or ''}"
-        for item in pending_facts
-    )
-    auth_rev = "|".join(
-        f"{item.authority_ref}:{item.expires_at.isoformat()}" for item in pending_auth
-    )
-    fp = "|".join(use_time_fingerprint(pending_facts))
-    policy = _policy_var.get()
-    token = UseBoundaryToken(
-        created_mono=time.monotonic(),
-        fingerprint=fp,
-        attempt=str(id(pending_facts)),
-        policy_version=policy.policy_version if policy else None,
-        authority_revision=auth_rev,
-        fact_revision=fact_rev,
-    )
-    _token_var.set(token)
-    return token
-
-
-def _token_matches_current(token: UseBoundaryToken) -> bool:
-    if not token.still_valid():
-        return False
-    from mycelium.authority_window import get_pending_authorities
-
-    pending_facts = _pending_var.get()
-    pending_auth = get_pending_authorities()
-    fact_rev = "|".join(
-        f"{item.name}:{item.revision or ''}:{item.value_digest or ''}"
-        for item in pending_facts
-    )
-    auth_rev = "|".join(
-        f"{item.authority_ref}:{item.expires_at.isoformat()}" for item in pending_auth
-    )
-    fp = "|".join(use_time_fingerprint(pending_facts))
-    policy = _policy_var.get()
-    return (
-        token.fingerprint == fp
-        and token.fact_revision == fact_rev
-        and token.authority_revision == auth_rev
-        and token.policy_version == (policy.policy_version if policy else None)
-        and token.attempt == str(id(pending_facts))
-    )
-
-
 def enforce_use_boundary(
     *,
-    skip_if_token_valid: bool = False,
     kwargs: Mapping[str, Any] | None = None,
 ) -> tuple[Any, UseTimeValidation]:
     """Ordered use-boundary pipeline: authority expiry, then use-time currency."""
-    existing = _token_var.get()
-    if skip_if_token_valid and existing is not None and _token_matches_current(existing):
-        skipped = UseTimeValidation(
-            decision=DECISION_SKIPPED,
-            reason="token_valid",
-            phase=PHASE_USE,
-            observed_at=use_time_now(),
-        )
-        return existing, _append_decision(skipped)
-
     auth = enforce_pending_authorities_at_use()
     currency = enforce_pending_use_time_facts_at_use(kwargs=kwargs)
-    _issue_use_boundary_token()
     return auth, currency
 
 
 async def enforce_use_boundary_async(
     *,
-    skip_if_token_valid: bool = False,
     kwargs: Mapping[str, Any] | None = None,
 ) -> tuple[Any, UseTimeValidation]:
-    existing = _token_var.get()
-    if skip_if_token_valid and existing is not None and _token_matches_current(existing):
-        skipped = UseTimeValidation(
-            decision=DECISION_SKIPPED,
-            reason="token_valid",
-            phase=PHASE_USE,
-            observed_at=use_time_now(),
-        )
-        return existing, _append_decision(skipped)
-
     auth = enforce_pending_authorities_at_use()
     currency = await enforce_pending_use_time_facts_at_use_async(kwargs=kwargs)
-    _issue_use_boundary_token()
     return auth, currency
 
 
@@ -1740,6 +1676,7 @@ __all__ = [
     "MISSING_POLICY_ERROR",
     "MISSING_POLICY_WARN",
     "REASON_CHANGED",
+    "REASON_ACCOUNT_MISMATCH",
     "REASON_CONDITION_FALSE",
     "REASON_MALFORMED",
     "REASON_MISSING",
@@ -1754,7 +1691,6 @@ __all__ = [
     "REASON_VALIDATOR_MISSING",
     "REASON_VALIDATOR_TIMEOUT",
     "AuthorityValidationPhase",
-    "UseBoundaryToken",
     "UseTimeCurrencyError",
     "UseTimeCurrencyPolicy",
     "UseTimeFact",
