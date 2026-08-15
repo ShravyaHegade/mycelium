@@ -912,6 +912,7 @@ class MyceliumConfig:
             or applies_secret
             or applies_entity
             or applies_destructive
+            or applies_use_time
         ):
             try:
                 func = instrument_langgraph_tool(func)

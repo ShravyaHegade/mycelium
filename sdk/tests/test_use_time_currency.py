@@ -87,7 +87,6 @@ def _policy() -> UseTimeCurrencyPolicy:
                         require={"value": True},
                         revision_from="payment_version",
                         max_age_seconds=30,
-                        bind_request_id=True,
                     ),
                 )
             )
@@ -126,6 +125,27 @@ def _nested_policy(tool: str, fact_name: str, validator: str) -> UseTimeCurrency
                         id_from="resource_id",
                         validator=validator,
                         require={"value": True},
+                    ),
+                )
+            )
+        },
+    )
+
+
+def _context_policy(tool: str) -> UseTimeCurrencyPolicy:
+    return UseTimeCurrencyPolicy(
+        policy_version="test",
+        tools={
+            tool: UseTimeToolPolicy(
+                facts=(
+                    UseTimeFactSpec(
+                        name="resource.current",
+                        subject_type="resource",
+                        id_from="resource_id",
+                        validator="resource_state",
+                        bind_request_id=True,
+                        bind_run_id=True,
+                        bind_thread_id=True,
                     ),
                 )
             )
@@ -1325,6 +1345,69 @@ def test_async_final_boundary_revalidates_distinct_same_fact_requirements() -> N
     assert calls == {"first": 2, "second": 2}
     assert provider_calls == []
     assert storage.get(request_ids[0]).side_effect_boundary == SideEffectBoundary.NOT_CROSSED.value
+
+
+def test_sync_context_binding_rejects_mismatch_before_body() -> None:
+    body_calls: list[str] = []
+
+    def resource_state(**_kwargs: Any) -> ValidatorResult:
+        return ValidatorResult(current=True)
+
+    register_use_time_validator("resource_state", resource_state)
+
+    def update_resource(resource_id: str, **_kwargs: Any) -> str:
+        body_calls.append(resource_id)
+        return resource_id
+
+    wrapped = apply_use_time_currency(
+        update_resource, _context_policy("update_resource"), tool_name="update_resource"
+    )
+    use_time_facts.capture(
+        name="resource.current",
+        subject_type="resource",
+        subject_id="resource-1",
+        request_id="request-1",
+        run_id="run-1",
+        thread_id="thread-1",
+    )
+    with execution_scope(TransitionScope(run_id="run-2", thread_id="thread-1")):
+        with pytest.raises(UseTimeCurrencyError) as exc:
+            wrapped("resource-1", request_id="request-1")
+    assert exc.value.reason == "subject_mismatch"
+    assert body_calls == []
+
+
+def test_async_context_binding_rejects_missing_capture_before_body() -> None:
+    body_calls: list[str] = []
+
+    async def resource_state(**_kwargs: Any) -> ValidatorResult:
+        return ValidatorResult(current=True)
+
+    register_use_time_validator("resource_state", resource_state)
+
+    async def update_resource(resource_id: str, **_kwargs: Any) -> str:
+        body_calls.append(resource_id)
+        return resource_id
+
+    wrapped = apply_use_time_currency(
+        update_resource, _context_policy("update_resource"), tool_name="update_resource"
+    )
+    use_time_facts.capture(
+        name="resource.current",
+        subject_type="resource",
+        subject_id="resource-1",
+        request_id="request-1",
+        run_id="run-1",
+    )
+
+    async def run() -> None:
+        with execution_scope(TransitionScope(run_id="run-1", thread_id="thread-1")):
+            with pytest.raises(UseTimeCurrencyError) as exc:
+                await wrapped("resource-1", request_id="request-1")
+        assert exc.value.reason == "missing"
+
+    asyncio.run(run())
+    assert body_calls == []
 
 
 def test_fingerprint_excludes_raw_values() -> None:

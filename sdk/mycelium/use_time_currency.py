@@ -29,7 +29,7 @@ from mycelium.authority_window import (
     utc_now,
 )
 from mycelium.tool_boundary import ToolBoundaryError
-from mycelium.transition import get_active_execution_scope
+from mycelium.transition import get_active_dispatch_id, get_active_execution_scope
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -523,7 +523,7 @@ def _bound_mapping(
 def _call_ids(kwargs: Mapping[str, Any]) -> tuple[str | None, str | None, str | None]:
     request_id = kwargs.get("request_id")
     if not isinstance(request_id, str) or not request_id.strip():
-        request_id = None
+        request_id = get_active_dispatch_id()
     scope = get_active_execution_scope()
     run_id = kwargs.get("run_id") or (scope.run_id if scope else None)
     thread_id = kwargs.get("thread_id") or (scope.thread_id if scope else None)
@@ -532,6 +532,44 @@ def _call_ids(kwargs: Mapping[str, Any]) -> tuple[str | None, str | None, str | 
     if thread_id is not None:
         thread_id = str(thread_id)
     return request_id, run_id, thread_id
+
+
+def _enforce_context_bindings(
+    spec: UseTimeFactSpec,
+    match: UseTimeFact,
+    *,
+    tool: str,
+    request_id: str | None,
+    run_id: str | None,
+    thread_id: str | None,
+    policy_version: str | None,
+) -> None:
+    for enabled, captured, current in (
+        (spec.bind_request_id, match.request_id, request_id),
+        (spec.bind_run_id, match.run_id, run_id),
+        (spec.bind_thread_id, match.thread_id, thread_id),
+    ):
+        if not enabled:
+            continue
+        reason = (
+            REASON_MISSING
+            if captured is None or current is None
+            else REASON_SUBJECT_MISMATCH
+        )
+        if captured is None or current is None or str(captured) != str(current):
+            _raise_currency(
+                tool=tool,
+                fact_name=match.name,
+                reason=reason,
+                phase=PHASE_AUTHORIZE,
+                subject_ref=match.subject_ref,
+                decide_revision=match.revision,
+                policy_version=policy_version,
+                request_id=request_id,
+                run_id=run_id,
+                tenant=match.tenant,
+                account=match.account,
+            )
 
 
 def use_time_fingerprint(facts: tuple[UseTimeFact, ...] | None = None) -> tuple[str, ...]:
@@ -1310,23 +1348,15 @@ def authorize_use_time_facts(
                     run_id=run_id,
                     tenant=tenant,
                 )
-            if (
-                spec.bind_request_id
-                and request_id
-                and match.request_id
-                and match.request_id != request_id
-            ):
-                _raise_currency(
-                    tool=tool,
-                    fact_name=spec.name,
-                    reason=REASON_SUBJECT_MISMATCH,
-                    phase=PHASE_AUTHORIZE,
-                    subject_ref=match.subject_ref,
-                    decide_revision=match.revision,
-                    policy_version=active.policy_version,
-                    request_id=request_id,
-                    run_id=run_id,
-                )
+            _enforce_context_bindings(
+                spec,
+                match,
+                tool=tool,
+                request_id=request_id,
+                run_id=run_id,
+                thread_id=thread_id,
+                policy_version=active.policy_version,
+            )
             fact = UseTimeFact(
                 name=match.name,
                 subject_type=match.subject_type,
@@ -1342,9 +1372,9 @@ def authorize_use_time_facts(
                     if spec.max_age_seconds is not None
                     else match.max_age_seconds
                 ),
-                request_id=request_id if spec.bind_request_id else match.request_id,
-                run_id=run_id if spec.bind_run_id else match.run_id,
-                thread_id=thread_id if spec.bind_thread_id else match.thread_id,
+                request_id=match.request_id,
+                run_id=match.run_id,
+                thread_id=match.thread_id,
                 policy_version=active.policy_version,
                 validator=spec.validator,
                 provenance=match.provenance or "host_capture",
