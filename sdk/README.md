@@ -63,6 +63,7 @@ Mycelium sits between your agent loop and your tools (after the LLM returns `too
 | **Opt-in** | **AF-003 Infinite action loops** | `loop_guard:` — action-hash streak across *new* `tool_call_id`s; soft then hard; operator `mycelium loops release` |
 | **Opt-in** | **Budget / runaway spend (unnumbered)** | `budget:` — `max_duration` / `max_steps` / `max_tokens` / `max_usd`; tools auto-wrapped; **LLM turns auto-wired** on LangGraph/LangChain; `missing_usage_policy`; operator `mycelium budget release` |
 | **Opt-in** | **AF-010 Secret-in-args** | `secret_args:` — block raw credentials before claim; pass `secret://` references; shared sanitizer on evidence. Fail-closed is primary; redaction is defense-in-depth |
+| **Opt-in** | **Entity / destination guard (unnumbered)** | `entity_guard:` — a write may carry sensitive data only into a host-authorized destination; unknown destination means no execution |
 | **Opt-in** | **AF-004 Tool misuse** | `@bounded` input/output/scope checks; optional `ToolRegistry` allowlist — block before the tool runs |
 | **Opt-in** | **AF-006 Context corruption** | TTL cache (`@protect` / `Session`); optional `MessageValidator` / `HistoryGuard` before the next LLM turn |
 | **Opt-in** | **AF-007 Premature termination** | `completion:` — host checklist; unmarked **required** → refuse terminal; unmarked **optional** → warn and allow |
@@ -1105,8 +1106,9 @@ run. LangGraph's adapter copies an existing framework `run_id` into
 `execution_scope` — do not pass a duplicate when the adapter already provides
 one.
 
-Wrapper order: `@secret_args` → `@state_authority` → `@scope_guard` →
-`@budget_guard` → `@loop_guard` → `@ledger` → `@bounded` → `@protect` → `func`.
+Wrapper order: `@secret_args` → `@entity_guard` → `@state_authority` →
+`@scope_guard` → `@budget_guard` → `@loop_guard` → `@ledger` → `@bounded` →
+`@protect` → `func`.
 
 ### Budget guard (unnumbered)
 
@@ -1232,6 +1234,61 @@ labels host logs / third-party providers `not_verifiable`.
 `mycelium verify --scenario secret-in-args` searches generated artifacts
 for synthetic credentials.
 
+### Entity / destination guard (unnumbered)
+
+A write may contain sensitive data, but it can only cross into a destination
+the host explicitly authorized. Unknown destination means no execution. This
+is a tool-boundary allowlist, not prompt scanning.
+
+```yaml
+entity_guard:
+  enabled: true
+  missing_policy: error
+
+  tools:
+    send_email:
+      destinations:
+        - path: recipient
+          type: email
+          allow:
+            addresses: [billing@customer.com]
+            domains: [customer.com]
+        - path: cc
+          type: email
+          allow: []
+          required: false
+    http_post:
+      destinations:
+        - path: url
+          type: https_url
+          allow:
+            hosts: [api.stripe.com, hooks.slack.com]
+          reject_redirects: true
+    create_ticket:
+      destinations:
+        - path: project_id
+          type: entity_id
+          allow:
+            values: [SUPPORT, INCIDENTS]
+```
+
+Each consequential write tool declares which argument is the destination.
+Mycelium canonicalizes it (lowercase email domains/hosts, parsed https URL,
+normalized ids) and checks every recipient — `to` / `cc` / `bcc`, webhook
+URLs, redirect targets, and nested destination fields. Missing, malformed,
+dynamic, undeclared, or unapproved destinations raise `EntityGuardError`
+before ledger claim. Canonical destinations are bound into the operation
+fingerprint so a retry cannot change recipients on the same `request_id`.
+Evidence records tool, destination class or approved entity id, policy
+version, and decision — never the payload. Allowlists are host-controlled;
+the model cannot add recipients. Omitted `entity_guard:` keeps existing
+behavior. Production requires `missing_policy: error`.
+
+`mycelium doctor` reports whether destination policy is enabled and which
+consequential tools lack a declaration.
+`mycelium verify --scenario entity-guard` proves unauthorized destinations
+never claim.
+
 ### Scope guard (AF-008): freeze run tool allowlist
 
 AF-008 is when a narrow grant **widens mid-run** (handoff, dynamic
@@ -1262,7 +1319,7 @@ with execution_scope(TransitionScope(run_id="r1", thread_id="t")):
     fetch_customer(customer_id="c1")  # ok; tools outside the freeze soft-block
 ```
 
-Wrapper order: `@secret_args` → `@scope_guard` → `@loop_guard` → `@ledger` →
+Wrapper order: `@secret_args` → `@entity_guard` → `@scope_guard` → `@loop_guard` → `@ledger` →
 `@bounded` → `@protect`. CLI: `mycelium scope status|bind`. Demo:
 `python examples/scope_guard_allowlist.py` (from `sdk/`).
 
@@ -1378,7 +1435,7 @@ def refund(amount: float, *, tool_call_id: str, state_ref: str) -> dict:
     ...
 ```
 
-Wrapper order: `@secret_args` → `@state_authority` → `@scope_guard` →
+Wrapper order: `@secret_args` → `@entity_guard` → `@state_authority` → `@scope_guard` →
 `@loop_guard` → `@ledger` → `@bounded` → `@protect` → `func`.
 
 `decision_id` / `state_ref` are bookkeeping kwargs (excluded from the args
@@ -1542,6 +1599,8 @@ policies:
 - `secret_args.policy: error` when `secret_args:` is enabled and
   consequential tools exist. Weaker `warn` / `redact` under production
   is rejected. Omitted `secret_args:` stays backward compatible.
+- `entity_guard.missing_policy: error` when `entity_guard:` is enabled.
+  Omitted `entity_guard:` stays backward compatible.
 
 Explicit weaker settings (`warn`, `derived`, memory outcomes) under
 production are rejected (`ConfigError`), not silently weakened. Omit
@@ -1623,6 +1682,7 @@ $ mycelium doctor --config mycelium.yaml --strict --json   # CI gate
 It checks profile defaults, tool classification, business request identity,
 durable ActionLedger / outcome backends, run-id guard policies, completion and
 budget adapter selection, secret-in-args scanning / fail-closed production,
+destination-policy coverage,
 and optional `deployment.topology`. It never executes
 application tools, never calls an LLM, never writes ledger/outcome rows, and
 never repairs config.
@@ -1645,7 +1705,7 @@ $ mycelium verify --config mycelium.yaml --scenario all --strict --json
 ```
 
 Scenarios: `redispatch`, `contention`, `storage-outage`, `worker-crash`,
-`ambiguous-effect`, `reconcile`, `secret-in-args`, or `all` (that order). Verify never executes
+`ambiguous-effect`, `reconcile`, `secret-in-args`, `entity-guard`, or `all` (that order). Verify never executes
 application tools, never calls an LLM, never contacts a real business provider,
 and never inspects or alters existing production transitions. Test data uses a
 unique `mycelium:verify:<uuid>:` namespace and is deleted unless

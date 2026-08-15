@@ -17,6 +17,7 @@ _SCENARIO_LABELS = {
     "ambiguous-effect": "Ambiguous effect",
     "reconcile": "Reconcile",
     "secret-in-args": "Secret-in-args",
+    "entity-guard": "Entity-guard",
 }
 
 

@@ -426,6 +426,37 @@ tools:
     assert cfg.tools["charge"].secret_fields == ("api_key",)
 
 
+def test_production_accepts_entity_guard_error_policy() -> None:
+    cfg = load_config_from_string(
+        """
+profile: production
+action_ledger:
+  storage: sqlite
+  path: ./ledger.db
+  tools: [send_email]
+outcome_emit:
+  storage: file
+  path: ./outcomes.jsonl
+entity_guard:
+  enabled: true
+  missing_policy: error
+  tools:
+    send_email:
+      destinations:
+        - path: recipient
+          type: email
+          allow:
+            addresses: [billing@customer.com]
+tools:
+  send_email:
+    side_effect_class: non_idempotent_mutate
+"""
+    )
+    assert cfg.entity_guard is not None
+    assert cfg.entity_guard["missing_policy"] == "error"
+    assert cfg.entity_guard_applies("send_email") is True
+
+
 def test_existing_configs_without_profile_still_load() -> None:
     cfg = load_config_from_string(
         """

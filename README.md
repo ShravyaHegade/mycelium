@@ -60,6 +60,7 @@ Mycelium wraps tool calls after the LLM returns `tool_calls` and returns a verdi
 - **AF-004 Tool misuse** — `@bounded` / registry · block bad args (incl. `array` / `object`) and out-of-scope tools / paths
 - **Budget / runaway spend (unnumbered)** — `budget:` · ceilings + `@budget_guard` / `instrument_llm` (auto `check("llm")`) · `mycelium budget release`
 - **AF-010 Secret-in-args** — `secret_args:` · block raw credentials before claim · pass `secret://` references · `mycelium verify --scenario secret-in-args`
+- **Entity / destination guard (unnumbered)** — `entity_guard:` · write tools declare the destination argument · host allowlist · fail closed before claim · `mycelium verify --scenario entity-guard`
 - **AF-006 Context corruption** — `@protect` / Session · optional message/history validation
 - **AF-007 Premature termination** — `completion:` host checklist · refuse or warn-and-allow
 - **AF-008 Scope escalation** — `scope_guard:` freeze allowlist · re-check every step

@@ -213,6 +213,14 @@ section; the tests are concrete `file::test_name` entries.
     declared fields. Omitted `secret_args:` keeps pre-AF-010 behavior.
     *Where:* [Secret-in-args (AF-010)](../README.md#secret-in-args-af-010).
 
+18. **Destination policy (when `entity_guard:` is enabled).** A write may
+    carry sensitive payload only into a host-authorized destination.
+    Missing, malformed, dynamic, undeclared, or unapproved recipients /
+    hosts / entity ids fail closed before claim. Canonical destinations
+    are bound into the operation fingerprint. Evidence never stores the
+    payload. Omitted `entity_guard:` keeps existing behavior.
+    *Where:* [Entity / destination guard](../README.md#entity--destination-guard-unnumbered).
+
 ---
 
 ## D. What we do not protect
@@ -331,6 +339,7 @@ are cited once. "Where documented" links the README section.
 | Key derivation soundness | README § [Transition identity and host-owned `request_id`](../README.md#transition-identity-and-host-owned-request_id) | `test_transition.py::test_same_inputs_produce_same_transition_key` · `test_transition.py::test_different_tool_call_id_produces_different_key` · `test_transition.py::test_ledger_deduplicates_by_transition_key` · `test_property_transitions.py::test_transition_key_invariants` (property test) · `test_explicit_request_id.py` |
 | Task-level idempotency | README § [Quickstart: task-level idempotency](../README.md#quickstart-task-level-idempotency) | `test_cli_run.py::test_run_instruments_sync_tool_and_task_across_processes` |
 | Secret-in-args (when enabled) | README § [Secret-in-args (AF-010)](../README.md#secret-in-args-af-010) | `test_secret_protection.py` · `test_verify.py::test_cli_smoke_each_scenario` (`secret-in-args`) |
+| Destination policy (when enabled) | README § [Entity / destination guard](../README.md#entity--destination-guard-unnumbered) | `test_entity_guard.py` · `test_verify.py::test_cli_smoke_each_scenario` (`entity-guard`) |
 | Single-key state machine invariants (executions ≤ 1 + not-executed verdicts; COMPLETED terminal; CAS out of IN_FLIGHT) | this doc, § C / [NOT_EXECUTED reset CAS](../README.md#not_executed-reset-cas-v118) | `test_property_transitions.py::test_transition_key_invariants` (Hypothesis, file + Redis) · `test_payment_provider_mock.py::test_redispatch_storm_never_double_charges` |
 
 <sup>1</sup> `test_postgres_storage_atomic_claim` runs when `psycopg` is

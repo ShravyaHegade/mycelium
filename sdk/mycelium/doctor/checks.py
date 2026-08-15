@@ -1353,6 +1353,102 @@ def check_secret_args(ctx: DoctorContext) -> Iterable[DoctorCheck]:
     )
 
 
+@doctor_check("entity_guard")
+def check_entity_guard(ctx: DoctorContext) -> Iterable[DoctorCheck]:
+    """Destination policy: writes may only reach host-authorized entities."""
+    cfg = ctx.config
+    raw = cfg.entity_guard
+    consequential = _consequential_tools(cfg)
+    declared = sorted((raw or {}).get("tools") or {}) if raw else []
+    missing = [name for name in consequential if name not in declared]
+
+    if raw is None:
+        yield _check(
+            id="entity.scanning",
+            category="Entity-guard",
+            status=DoctorStatus.SKIP,
+            summary="entity_guard is not configured (existing behavior)",
+            details=f"consequential_tools={consequential or 'none'}.",
+            remediation=(
+                "Add entity_guard: {enabled: true, missing_policy: error} "
+                "and declare destination paths per write tool. The model "
+                "must never add recipients to the allowlist."
+            ),
+            evidence=EVIDENCE_STATIC,
+            blocking=False,
+        )
+        return
+
+    enabled = bool(raw.get("enabled", True))
+    missing_policy = str(raw.get("missing_policy", "error"))
+    yield _check(
+        id="entity.scanning",
+        category="Entity-guard",
+        status=DoctorStatus.PASS if enabled else DoctorStatus.WARN,
+        summary=(
+            "Destination policy is enabled"
+            if enabled
+            else "Destination policy is configured but disabled"
+        ),
+        details=(
+            f"enabled={enabled}; missing_policy={missing_policy!r}; "
+            f"tools={declared or 'none'}"
+        ),
+        remediation="" if enabled else "Set entity_guard.enabled: true.",
+        evidence=EVIDENCE_STATIC,
+        blocking=not enabled,
+    )
+    fail_closed = enabled and missing_policy == "error"
+    if cfg.profile == PROFILE_PRODUCTION and declared:
+        yield _check(
+            id="entity.production_fail_closed",
+            category="Entity-guard",
+            status=DoctorStatus.PASS if fail_closed else DoctorStatus.FAIL,
+            summary=(
+                "Production destination checks fail closed"
+                if fail_closed
+                else "Production destination checks do not fail closed"
+            ),
+            details=f"missing_policy={missing_policy!r}; tools={declared}",
+            remediation=""
+            if fail_closed
+            else "Set entity_guard.missing_policy: error under profile: production.",
+            evidence=EVIDENCE_STATIC,
+        )
+    if enabled and missing:
+        yield _check(
+            id="entity.undeclared_tools",
+            category="Entity-guard",
+            status=DoctorStatus.WARN,
+            summary="Consequential tools have no destination declaration",
+            details=f"undeclared={missing}",
+            remediation=(
+                "Declare entity_guard.tools.<name>.destinations for each "
+                "write tool. Unknown destination means no execution."
+            ),
+            evidence=EVIDENCE_STATIC,
+            blocking=False,
+        )
+    elif enabled and declared:
+        yield _check(
+            id="entity.undeclared_tools",
+            category="Entity-guard",
+            status=DoctorStatus.PASS,
+            summary="Listed write tools declare destination paths",
+            details=f"tools={declared}",
+            evidence=EVIDENCE_STATIC,
+        )
+    yield _check(
+        id="entity.host_owned",
+        category="Entity-guard",
+        status=DoctorStatus.PASS if enabled else DoctorStatus.SKIP,
+        summary="Destination allowlists are host-controlled",
+        details="The model cannot add recipients, hosts, or entity IDs to the allowlist.",
+        evidence=EVIDENCE_STATIC,
+        blocking=False,
+    )
+
+
 def ensure_builtin_checks_registered() -> None:
     """Import side effect: decorators already registered this module's checks."""
     return None

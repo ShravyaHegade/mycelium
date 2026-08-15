@@ -17,6 +17,7 @@ LangGraph, CrewAI, AutoGen, Cline, OpenHands, and related stacks.
 | AF-008 | Cascading permission | `scope_guard:` / `@scope_guard` |
 | AF-009 | Instruction injection | (MCP gateway revisit; not in SDK) |
 | AF-010 | Secret-in-args | `secret_args:` / `SecretInArgsError` · `secret://` references · shared sanitizer |
+| — | Exfil via write / destination policy | `entity_guard:` / `EntityGuardError` · host allowlist · fail closed before claim |
 
 ---
 
@@ -250,3 +251,5 @@ Budget is intentionally **not** given an AF-00N id. See
   are optional guards documented in the SDK README.
 - **Budget enforcement** ships as `budget:` / `@budget_guard` and is
   intentionally **not** given an AF-00N id. AF-010 is secret-in-args.
+- **Destination policy** ships as `entity_guard:` and is also unnumbered:
+  a write may carry sensitive data only into a host-authorized destination.
