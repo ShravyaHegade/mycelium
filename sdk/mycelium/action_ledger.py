@@ -14,12 +14,12 @@ import threading
 import time
 import uuid
 import warnings
-from collections.abc import Awaitable, Callable, Iterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, AsyncIterator, ParamSpec, TypeVar
+from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar
 
 from mycelium.reconcile import Reconciler, ReconcileResult, ReconcileStatus
 from mycelium.session import Session, _session_var
@@ -3478,6 +3478,13 @@ def _use_boundary_call_mapping(
     clean_kwargs: Mapping[str, Any],
     dispatch_kwargs: Mapping[str, Any],
 ) -> dict[str, Any]:
+    """Canonical tool args for use-boundary validation.
+
+    Authorize-time ``request_id`` is retained for call comparisons / validators.
+    Configured request bindings at USE compare against the current trusted
+    ``dispatch_scope`` (see use_time_currency._current_context_ids), not this
+    frozen authorize-time copy.
+    """
     mapping = _canonical_call_mapping(func, args, clean_kwargs)
     request_id = dispatch_kwargs.get("request_id")
     if isinstance(request_id, str) and request_id.strip():

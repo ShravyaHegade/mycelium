@@ -527,12 +527,39 @@ def _bound_mapping(
 
 
 def _call_ids(kwargs: Mapping[str, Any]) -> tuple[str | None, str | None, str | None]:
+    """Resolve context IDs for AUTHORIZE (call args / active scope as fallback)."""
     request_id = kwargs.get("request_id")
     if not isinstance(request_id, str) or not request_id.strip():
         request_id = get_active_dispatch_id()
     scope = get_active_execution_scope()
     run_id = kwargs.get("run_id") or (scope.run_id if scope else None)
     thread_id = kwargs.get("thread_id") or (scope.thread_id if scope else None)
+    if run_id is not None:
+        run_id = str(run_id)
+    if thread_id is not None:
+        thread_id = str(thread_id)
+    return request_id, run_id, thread_id
+
+
+def _current_context_ids(
+    kwargs: Mapping[str, Any],
+) -> tuple[str | None, str | None, str | None]:
+    """Resolve trusted current context for USE-phase binding checks.
+
+    Prefer active dispatch / execution scope over authorize-time call mapping so
+    a ``dispatch_scope`` or ``execution_scope`` switch before the side-effect
+    boundary fails closed. Fall back to call kwargs only when no active context
+    is set (tools that pass ids as arguments without scopes).
+    """
+    request_id = get_active_dispatch_id()
+    if not isinstance(request_id, str) or not request_id.strip():
+        rid = kwargs.get("request_id")
+        request_id = rid if isinstance(rid, str) and rid.strip() else None
+    scope = get_active_execution_scope()
+    run_id = (scope.run_id if scope is not None else None) or kwargs.get("run_id")
+    thread_id = (scope.thread_id if scope is not None else None) or kwargs.get(
+        "thread_id"
+    )
     if run_id is not None:
         run_id = str(run_id)
     if thread_id is not None:
@@ -581,7 +608,7 @@ def _enforce_context_bindings(
 def _enforce_context_bindings_at_use(
     fact: UseTimeFact, kwargs: Mapping[str, Any]
 ) -> None:
-    request_id, run_id, thread_id = _call_ids(kwargs)
+    request_id, run_id, thread_id = _current_context_ids(kwargs)
     for enabled, captured, current in (
         (fact.bind_request_id, fact.request_id, request_id),
         (fact.bind_run_id, fact.run_id, run_id),

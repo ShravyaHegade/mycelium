@@ -378,7 +378,9 @@ def crash_worker(payload: dict[str, Any]) -> None:
             },
             binding,
         )
-        token = _active_transition_var.set(_ActiveTransition(ledger, request_id, binding))
+        token = _active_transition_var.set(
+            _ActiveTransition(ledger, request_id, binding, {})
+        )
         try:
             if phase == "after_claim":
                 _append_line(payload["ready_file"], "after_claim")

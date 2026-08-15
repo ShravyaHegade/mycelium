@@ -29,6 +29,7 @@ from mycelium.transition import (
     SideEffectClass,
     ToolTransitionBinding,
     TransitionScope,
+    dispatch_scope,
     execution_scope,
 )
 from mycelium.use_time_currency import (
@@ -1484,6 +1485,89 @@ def test_async_scope_switch_denies_at_final_boundary() -> None:
             with pytest.raises(UseTimeCurrencyError) as exc:
                 await wrapped("resource-1", request_id="request-1")
         assert exc.value.reason == "subject_mismatch"
+
+    asyncio.run(run())
+    assert provider_calls == []
+    assert storage.get(request_ids[0]).side_effect_boundary == SideEffectBoundary.NOT_CROSSED.value
+
+
+def test_sync_dispatch_scope_switch_denies_at_final_boundary() -> None:
+    """Captured request binding must compare against current dispatch, not authorize-time kwargs."""
+    storage = InMemoryLedgerStorage()
+    provider_calls: list[str] = []
+    request_ids: list[str] = []
+
+    def resource_state(**_kwargs: Any) -> ValidatorResult:
+        return ValidatorResult(current=True)
+
+    register_use_time_validator("resource_state", resource_state)
+
+    @ledger_sync(storage=storage, transition_binding=_binding())
+    def update_resource(resource_id: str) -> None:
+        active = get_active_transition()
+        assert active is not None
+        request_ids.append(active.request_id)
+        with dispatch_scope("request-B"):
+            with side_effect():
+                provider_calls.append(resource_id)
+
+    wrapped = apply_use_time_currency(
+        update_resource, _context_policy("update_resource"), tool_name="update_resource"
+    )
+    use_time_facts.capture(
+        name="resource.current",
+        subject_type="resource",
+        subject_id="resource-1",
+        request_id="request-1",
+        run_id="run-1",
+        thread_id="thread-1",
+    )
+    with execution_scope(TransitionScope(run_id="run-1", thread_id="thread-1")):
+        with dispatch_scope("request-1"):
+            with pytest.raises(UseTimeCurrencyError) as exc:
+                wrapped("resource-1", request_id="request-1")
+    assert exc.value.reason == "subject_mismatch"
+    assert provider_calls == []
+    assert storage.get(request_ids[0]).side_effect_boundary == SideEffectBoundary.NOT_CROSSED.value
+
+
+def test_async_dispatch_scope_switch_denies_at_final_boundary() -> None:
+    storage = InMemoryLedgerStorage()
+    provider_calls: list[str] = []
+    request_ids: list[str] = []
+
+    async def resource_state(**_kwargs: Any) -> ValidatorResult:
+        return ValidatorResult(current=True)
+
+    register_use_time_validator("resource_state", resource_state)
+
+    @ledger(storage=storage, transition_binding=_binding())
+    async def update_resource(resource_id: str) -> None:
+        active = get_active_transition()
+        assert active is not None
+        request_ids.append(active.request_id)
+        with dispatch_scope("request-B"):
+            async with side_effect_async():
+                provider_calls.append(resource_id)
+
+    wrapped = apply_use_time_currency(
+        update_resource, _context_policy("update_resource"), tool_name="update_resource"
+    )
+    use_time_facts.capture(
+        name="resource.current",
+        subject_type="resource",
+        subject_id="resource-1",
+        request_id="request-1",
+        run_id="run-1",
+        thread_id="thread-1",
+    )
+
+    async def run() -> None:
+        with execution_scope(TransitionScope(run_id="run-1", thread_id="thread-1")):
+            with dispatch_scope("request-1"):
+                with pytest.raises(UseTimeCurrencyError) as exc:
+                    await wrapped("resource-1", request_id="request-1")
+            assert exc.value.reason == "subject_mismatch"
 
     asyncio.run(run())
     assert provider_calls == []
