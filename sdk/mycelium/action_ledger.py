@@ -3727,12 +3727,13 @@ def _run_ledgered(
         owner=owner,
     )
 
+    call_mapping = _canonical_call_mapping(func, args, clean_kwargs)
     token = _active_transition_var.set(
         _ActiveTransition(
             ledger,
             request_id,
             transition_binding,
-            _canonical_call_mapping(func, args, clean_kwargs),
+            call_mapping,
         )
     )
     try:
@@ -3744,9 +3745,7 @@ def _run_ledgered(
 
         # Use-phase authority + currency after claim/lease wait, before body_start.
         try:
-            auth_decision, currency_decision = enforce_use_boundary(
-                kwargs=clean_kwargs
-            )
+            auth_decision, currency_decision = enforce_use_boundary(kwargs=call_mapping)
         except (AuthorityExpiredError, UseTimeCurrencyError) as blocked:
             event = (
                 "use_time_currency"
@@ -4038,12 +4037,13 @@ async def _run_ledgered_async(
         owner=owner,
     )
 
+    call_mapping = _canonical_call_mapping(func, args, clean_kwargs)
     token = _active_transition_var.set(
         _ActiveTransition(
             ledger,
             request_id,
             transition_binding,
-            _canonical_call_mapping(func, args, clean_kwargs),
+            call_mapping,
         )
     )
     try:
@@ -4055,7 +4055,7 @@ async def _run_ledgered_async(
 
         try:
             auth_decision, currency_decision = await enforce_use_boundary_async(
-                kwargs=clean_kwargs
+                kwargs=call_mapping
             )
         except (AuthorityExpiredError, UseTimeCurrencyError) as blocked:
             event = (

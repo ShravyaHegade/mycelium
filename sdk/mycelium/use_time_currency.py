@@ -480,16 +480,19 @@ def _lookup_path(mapping: Mapping[str, Any], path: str) -> Any:
 def _bound_mapping(
     func: Callable[..., Any] | None, args: tuple[Any, ...], kwargs: Mapping[str, Any]
 ) -> dict[str, Any]:
-    mapping = dict(kwargs)
+    mapping: dict[str, Any] = {}
     if func is None:
-        return mapping
+        return dict(kwargs)
     try:
         signature = inspect.signature(func)
-        bound = signature.bind_partial(*args, **kwargs)
-        bound.apply_defaults()
+        bound = signature.bind_partial(*args)
         mapping.update(bound.arguments)
+        mapping.update(kwargs)
+        for name, parameter in signature.parameters.items():
+            if parameter.default is not inspect.Parameter.empty:
+                mapping.setdefault(name, parameter.default)
     except (TypeError, ValueError):
-        pass
+        mapping.update(kwargs)
     return mapping
 
 
@@ -1571,6 +1574,7 @@ def apply_use_time_currency(
         async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
             token = set_use_time_currency_policy(policy)
             try:
+                call_mapping = _bound_mapping(func, args, kwargs)
                 bound = authorize_use_time_facts(
                     name, args, kwargs, policy=policy, func=func
                 )
@@ -1589,7 +1593,9 @@ def apply_use_time_currency(
                         )
                     )
                 if not getattr(func, "_mycelium_ledger", False):
-                    _, use_decision = await enforce_use_boundary_async(kwargs=kwargs)
+                    _, use_decision = await enforce_use_boundary_async(
+                        kwargs=call_mapping
+                    )
                     if use_decision.decision != DECISION_SKIPPED:
                         _emit(use_decision)
                 return await func(*args, **kwargs)
@@ -1621,6 +1627,7 @@ def apply_use_time_currency(
     def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
         token = set_use_time_currency_policy(policy)
         try:
+            call_mapping = _bound_mapping(func, args, kwargs)
             bound = authorize_use_time_facts(
                 name, args, kwargs, policy=policy, func=func
             )
@@ -1639,7 +1646,7 @@ def apply_use_time_currency(
                     )
                 )
             if not getattr(func, "_mycelium_ledger", False):
-                _, use_decision = enforce_use_boundary(kwargs=kwargs)
+                _, use_decision = enforce_use_boundary(kwargs=call_mapping)
                 if use_decision.decision != DECISION_SKIPPED:
                     _emit(use_decision)
             return func(*args, **kwargs)

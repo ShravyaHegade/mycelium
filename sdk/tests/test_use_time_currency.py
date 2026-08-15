@@ -93,6 +93,25 @@ def _policy() -> UseTimeCurrencyPolicy:
     )
 
 
+def _positional_policy() -> UseTimeCurrencyPolicy:
+    return UseTimeCurrencyPolicy(
+        policy_version="test",
+        tools={
+            "apply_payment": UseTimeToolPolicy(
+                facts=(
+                    UseTimeFactSpec(
+                        name="payment.state",
+                        subject_type="payment",
+                        id_from="payment_id",
+                        validator="payment_state",
+                        compare_to_arg="expected_state",
+                    ),
+                )
+            )
+        },
+    )
+
+
 def test_capture_rejects_model_mapping_subject() -> None:
     with pytest.raises(UseTimeCurrencyError, match="host-controlled"):
         use_time_facts.capture(
@@ -716,6 +735,125 @@ def test_async_boundary_denies_expired_authority_with_async_validator() -> None:
     assert provider_calls == []
     assert storage.get(request_ids[0]).side_effect_boundary == SideEffectBoundary.NOT_CROSSED.value
     reset_authority_window_state()
+
+
+def test_sync_ledger_preserves_positional_args_at_each_use_boundary() -> None:
+    storage = InMemoryLedgerStorage()
+    observed: list[dict[str, Any]] = []
+
+    def payment_state(**kwargs: Any) -> ValidatorResult:
+        observed.append(kwargs)
+        return ValidatorResult(current=True, value="ready")
+
+    register_use_time_validator("payment_state", payment_state)
+
+    @ledger_sync(storage=storage, transition_binding=_binding())
+    def apply_payment(payment_id: str, expected_state: str) -> str:
+        with side_effect():
+            return payment_id
+
+    wrapped = apply_use_time_currency(
+        apply_payment, _positional_policy(), tool_name="apply_payment"
+    )
+    use_time_facts.capture(
+        name="payment.state",
+        subject_type="payment",
+        subject_id="pay_1",
+        value="ready",
+    )
+    assert wrapped("pay_1", "ready", request_id="positional-sync") == "pay_1"
+    assert len(observed) == 2
+    assert all(item["kwargs"]["payment_id"] == "pay_1" for item in observed)
+    assert all(item["kwargs"]["expected_state"] == "ready" for item in observed)
+
+
+def test_async_ledger_preserves_positional_args_at_each_use_boundary() -> None:
+    storage = InMemoryLedgerStorage()
+    observed: list[dict[str, Any]] = []
+
+    async def payment_state(**kwargs: Any) -> ValidatorResult:
+        observed.append(kwargs)
+        return ValidatorResult(current=True, value="ready")
+
+    register_use_time_validator("payment_state", payment_state)
+
+    @ledger(storage=storage, transition_binding=_binding())
+    async def apply_payment(payment_id: str, expected_state: str) -> str:
+        async with side_effect_async():
+            return payment_id
+
+    wrapped = apply_use_time_currency(
+        apply_payment, _positional_policy(), tool_name="apply_payment"
+    )
+    use_time_facts.capture(
+        name="payment.state",
+        subject_type="payment",
+        subject_id="pay_1",
+        value="ready",
+    )
+    assert (
+        asyncio.run(wrapped("pay_1", "ready", request_id="positional-async"))
+        == "pay_1"
+    )
+    assert len(observed) == 2
+    assert all(item["kwargs"]["payment_id"] == "pay_1" for item in observed)
+    assert all(item["kwargs"]["expected_state"] == "ready" for item in observed)
+
+
+def test_nonledger_wrappers_preserve_positional_args_at_use() -> None:
+    observed: list[dict[str, Any]] = []
+
+    def payment_state(**kwargs: Any) -> ValidatorResult:
+        observed.append(kwargs)
+        return ValidatorResult(current=True, value="ready")
+
+    register_use_time_validator("payment_state", payment_state)
+
+    def apply_payment(payment_id: str, expected_state: str) -> str:
+        return payment_id
+
+    wrapped = apply_use_time_currency(
+        apply_payment, _positional_policy(), tool_name="apply_payment"
+    )
+    use_time_facts.capture(
+        name="payment.state",
+        subject_type="payment",
+        subject_id="pay_1",
+        value="ready",
+    )
+    assert wrapped("pay_1", "ready") == "pay_1"
+    assert observed[0]["kwargs"] == {
+        "payment_id": "pay_1",
+        "expected_state": "ready",
+    }
+
+
+def test_async_nonledger_wrapper_preserves_positional_args_at_use() -> None:
+    observed: list[dict[str, Any]] = []
+
+    async def payment_state(**kwargs: Any) -> ValidatorResult:
+        observed.append(kwargs)
+        return ValidatorResult(current=True, value="ready")
+
+    register_use_time_validator("payment_state", payment_state)
+
+    async def apply_payment(payment_id: str, expected_state: str) -> str:
+        return payment_id
+
+    wrapped = apply_use_time_currency(
+        apply_payment, _positional_policy(), tool_name="apply_payment"
+    )
+    use_time_facts.capture(
+        name="payment.state",
+        subject_type="payment",
+        subject_id="pay_1",
+        value="ready",
+    )
+    assert asyncio.run(wrapped("pay_1", "ready")) == "pay_1"
+    assert observed[0]["kwargs"] == {
+        "payment_id": "pay_1",
+        "expected_state": "ready",
+    }
 
 
 def test_fingerprint_excludes_raw_values() -> None:
