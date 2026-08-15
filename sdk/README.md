@@ -85,7 +85,7 @@ integration path explicitly:
 | Runtime | Tool identity | Ledger integration | Additional integration |
 |---|---|---|---|
 | LangGraph `ToolNode` / `create_agent` | Automatic from injected `ToolRuntime` when `integrations.langgraph` is enabled | YAML, `@config.apply`, or ledger decorators | Automatic budget and completion adapters when configured |
-| CrewAI | Host-supplied `request_id` / `tool_call_id` or derived identity | Generic sync/async decorators | `instrument_crewai_llm` provides budget accounting only |
+| CrewAI | Host-supplied `request_id` (required in production); derived identity is development-only | Generic sync/async decorators | `instrument_crewai_llm` provides budget accounting only |
 | Plain Python or another Python framework | Host-supplied identity is recommended | Decorators or [manual claim/complete](#manual-integration-claim--execute--complete) | Host calls completion, budget, and scope hooks explicitly |
 | TypeScript or another non-Python runtime | No native identity adapter | No native SDK; place the guarded operation behind a Python service boundary or implement the transition protocol in the host | Host-owned |
 
