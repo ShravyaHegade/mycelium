@@ -35,9 +35,11 @@ from mycelium.action_ledger import (
     ledger_sync,
     mark_crossed,
     mark_maybe_crossed,
+    mark_maybe_crossed_async,
     record_external_operation,
     renew_lease,
     side_effect,
+    side_effect_async,
 )
 from mycelium.audit_receipt import (
     AuditReceiptEmitter,
@@ -379,7 +381,9 @@ __all__ = [
     "ledger",
     "ledger_sync",
     "side_effect",
+    "side_effect_async",
     "mark_maybe_crossed",
+    "mark_maybe_crossed_async",
     "mark_crossed",
     "record_external_operation",
     "renew_lease",

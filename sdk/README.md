@@ -768,7 +768,7 @@ The boundary drives failure classification and only ever moves forward (`not_cro
 | `maybe_crossed` (inside the block / crash) | `UNKNOWN` | hard-block → reconcile |
 | `crossed` (clean exit, or `mark_crossed()`) | `FAILED_AFTER_EFFECT` | hard-block |
 
-Because `maybe_crossed` is written durably *before* the call, a process crash mid-call leaves the entry ambiguous and a redispatch hard-blocks instead of double-spending. For finer control use `mark_maybe_crossed()` / `mark_crossed()` directly. Works the same inside `async` tools.
+Because `maybe_crossed` is written durably *before* the call, a process crash mid-call leaves the entry ambiguous and a redispatch hard-blocks instead of double-spending. For finer control use `mark_maybe_crossed()` / `mark_crossed()` directly. Async tools use `async with side_effect_async()` so async use-time validators are awaited at the final boundary.
 
 ### Read-only `SOFT_BLOCK` (v1.9.0)
 

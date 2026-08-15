@@ -14,6 +14,14 @@ from mycelium.action_ledger import (
     ledger,
     ledger_sync,
     side_effect,
+    side_effect_async,
+)
+from mycelium.authority_window import (
+    AuthorityExpiredError,
+    BoundAuthority,
+    register_authority_for_use,
+    reset_authority_window_state,
+    set_authority_clock,
 )
 from mycelium.config import ConfigError, load_config_from_string
 from mycelium.transition import (
@@ -589,7 +597,7 @@ def test_async_boundary_denies_fact_changed_after_body_start() -> None:
     provider_calls: list[str] = []
     request_ids: list[str] = []
 
-    def payment_state(**_kwargs: Any) -> ValidatorResult:
+    async def payment_state(**_kwargs: Any) -> ValidatorResult:
         return ValidatorResult(current=state["current"], value=state["current"], revision="1")
 
     register_use_time_validator("payment_state", payment_state)
@@ -600,7 +608,7 @@ def test_async_boundary_denies_fact_changed_after_body_start() -> None:
         assert active is not None
         request_ids.append(active.request_id)
         state["current"] = False
-        with side_effect():
+        async with side_effect_async():
             provider_calls.append(payment_id)
 
     wrapped = apply_use_time_currency(refund_payment, _policy(), tool_name="refund_payment")
@@ -622,6 +630,92 @@ def test_async_boundary_denies_fact_changed_after_body_start() -> None:
     asyncio.run(run())
     assert provider_calls == []
     assert storage.get(request_ids[0]).side_effect_boundary == SideEffectBoundary.NOT_CROSSED.value
+
+
+def test_async_boundary_allows_current_fact_with_async_validator() -> None:
+    storage = InMemoryLedgerStorage()
+    provider_calls: list[str] = []
+    request_ids: list[str] = []
+
+    async def payment_state(**_kwargs: Any) -> ValidatorResult:
+        return ValidatorResult(current=True, value=True, revision="1")
+
+    register_use_time_validator("payment_state", payment_state)
+
+    @ledger(storage=storage, transition_binding=_binding())
+    async def refund_payment(payment_id: str, payment_version: str) -> None:
+        active = get_active_transition()
+        assert active is not None
+        request_ids.append(active.request_id)
+        async with side_effect_async():
+            provider_calls.append(payment_id)
+
+    wrapped = apply_use_time_currency(refund_payment, _policy(), tool_name="refund_payment")
+    use_time_facts.capture(
+        name="payment.refundable",
+        subject_type="payment",
+        subject_id="pay_1",
+        value=True,
+        revision="1",
+        require_value=True,
+    )
+    asyncio.run(
+        wrapped(payment_id="pay_1", payment_version="1", request_id="boundary-allow")
+    )
+    assert provider_calls == ["pay_1"]
+    assert storage.get(request_ids[0]).side_effect_boundary == SideEffectBoundary.CROSSED.value
+
+
+def test_async_boundary_denies_expired_authority_with_async_validator() -> None:
+    reset_authority_window_state()
+    storage = InMemoryLedgerStorage()
+    clock = {"now": 1_000.0}
+    provider_calls: list[str] = []
+    request_ids: list[str] = []
+    set_authority_clock(lambda: clock["now"])
+
+    async def payment_state(**_kwargs: Any) -> ValidatorResult:
+        return ValidatorResult(current=True, value=True, revision="1")
+
+    register_use_time_validator("payment_state", payment_state)
+    register_authority_for_use(
+        BoundAuthority(
+            authority_id="auth-1",
+            authority_kind="destructive_grant",
+            expires_at=datetime.fromtimestamp(1_010.0, tz=UTC),
+            tool="refund_payment",
+        )
+    )
+
+    @ledger(storage=storage, transition_binding=_binding())
+    async def refund_payment(payment_id: str, payment_version: str) -> None:
+        active = get_active_transition()
+        assert active is not None
+        request_ids.append(active.request_id)
+        clock["now"] = 1_020.0
+        async with side_effect_async():
+            provider_calls.append(payment_id)
+
+    wrapped = apply_use_time_currency(refund_payment, _policy(), tool_name="refund_payment")
+    use_time_facts.capture(
+        name="payment.refundable",
+        subject_type="payment",
+        subject_id="pay_1",
+        value=True,
+        revision="1",
+        require_value=True,
+    )
+
+    async def run() -> None:
+        with pytest.raises(AuthorityExpiredError):
+            await wrapped(
+                payment_id="pay_1", payment_version="1", request_id="boundary-expired"
+            )
+
+    asyncio.run(run())
+    assert provider_calls == []
+    assert storage.get(request_ids[0]).side_effect_boundary == SideEffectBoundary.NOT_CROSSED.value
+    reset_authority_window_state()
 
 
 def test_fingerprint_excludes_raw_values() -> None:

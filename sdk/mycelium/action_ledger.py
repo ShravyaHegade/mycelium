@@ -15,11 +15,11 @@ import time
 import uuid
 import warnings
 from collections.abc import Awaitable, Callable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar
+from typing import TYPE_CHECKING, Any, AsyncIterator, ParamSpec, TypeVar
 
 from mycelium.reconcile import Reconciler, ReconcileResult, ReconcileStatus
 from mycelium.session import Session, _session_var
@@ -378,6 +378,17 @@ def mark_maybe_crossed() -> None:
     _advance_active_boundary(SideEffectBoundary.MAYBE_CROSSED)
 
 
+async def mark_maybe_crossed_async() -> None:
+    """Asynchronously validate and mark the active transition as ``maybe_crossed``."""
+    from mycelium.use_time_currency import enforce_use_boundary_async
+
+    active = _active_transition_var.get()
+    await enforce_use_boundary_async(
+        kwargs=active.call_kwargs if active is not None else {}
+    )
+    _advance_active_boundary(SideEffectBoundary.MAYBE_CROSSED)
+
+
 def mark_crossed() -> None:
     """Mark the active transition as ``crossed`` (effect definitely happened)."""
     _advance_active_boundary(SideEffectBoundary.CROSSED)
@@ -513,6 +524,14 @@ def side_effect() -> Iterator[None]:
     backoff, and before any provider call.
     """
     mark_maybe_crossed()
+    yield
+    mark_crossed()
+
+
+@asynccontextmanager
+async def side_effect_async() -> AsyncIterator[None]:
+    """Wrap an async tool's external operation with async final validation."""
+    await mark_maybe_crossed_async()
     yield
     mark_crossed()
 
@@ -4430,7 +4449,9 @@ __all__ = [
     "ledger_sync",
     "mark_crossed",
     "mark_maybe_crossed",
+    "mark_maybe_crossed_async",
     "record_external_operation",
     "renew_lease",
     "side_effect",
+    "side_effect_async",
 ]

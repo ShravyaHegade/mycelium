@@ -27,6 +27,7 @@ from mycelium import (
     mark_crossed,
     mark_maybe_crossed,
     side_effect,
+    side_effect_async,
 )
 from mycelium.action_ledger import get_active_transition
 
@@ -164,7 +165,7 @@ def test_async_side_effect_marks_unknown_on_error() -> None:
         active = get_active_transition()
         assert active is not None
         rids.append(active.request_id)
-        with side_effect():
+        async with side_effect_async():
             raise RuntimeError("async provider timeout")
 
     async def run() -> None:
