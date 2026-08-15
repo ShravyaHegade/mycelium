@@ -464,11 +464,6 @@ def _fact_identity(fact: UseTimeFact) -> tuple[str | None, ...]:
         fact.subject_id,
         fact.tenant,
         fact.account,
-        fact.tool,
-        fact.request_id,
-        fact.run_id,
-        fact.thread_id,
-        fact.policy_version,
     )
 
 

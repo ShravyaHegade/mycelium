@@ -1138,6 +1138,69 @@ def test_captured_fact_lookup_selects_exact_scope() -> None:
     assert bound[0].tenant == "tenant-1"
 
 
+def test_recapture_replaces_older_scoped_observation_across_metadata() -> None:
+    policy = UseTimeCurrencyPolicy(
+        policy_version="current-policy",
+        tools={
+            "read_resource": UseTimeToolPolicy(
+                facts=(
+                    UseTimeFactSpec(
+                        name="resource.current",
+                        subject_type="resource",
+                        id_from="resource_id",
+                        tenant_from="tenant_id",
+                        account_from="account_id",
+                        validator="resource_state",
+                    ),
+                )
+            )
+        },
+    )
+
+    def resource_state(**_kwargs: Any) -> ValidatorResult:
+        return ValidatorResult(current=True, value=True)
+
+    register_use_time_validator("resource_state", resource_state)
+    use_time_facts.capture(
+        name="resource.current",
+        subject_type="resource",
+        subject_id="shared-id",
+        tenant="tenant-1",
+        account="account-1",
+        value=False,
+        request_id="old-request",
+        run_id="old-run",
+        thread_id="old-thread",
+        tool="old-tool",
+        policy_version="old-policy",
+    )
+    use_time_facts.capture(
+        name="resource.current",
+        subject_type="resource",
+        subject_id="shared-id",
+        tenant="tenant-1",
+        account="account-1",
+        value=True,
+        request_id="new-request",
+        run_id="new-run",
+        thread_id="new-thread",
+        tool="new-tool",
+        policy_version="current-policy",
+    )
+    authorize_use_time_facts(
+        "read_resource",
+        (),
+        {
+            "resource_id": "shared-id",
+            "tenant_id": "tenant-1",
+            "account_id": "account-1",
+        },
+        policy=policy,
+    )
+    decision = enforce_pending_use_time_facts_at_use()
+    assert decision.decision == "allowed"
+
+
 def test_fingerprint_excludes_raw_values() -> None:
     use_time_facts.capture(
         name="payment.refundable",
