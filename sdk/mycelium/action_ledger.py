@@ -3291,26 +3291,38 @@ def _args_drift_exclude_keys(
 
 
 def _evidence_value(value: Any) -> Any:
+    from mycelium.entity_guard import get_active_entity_policy, sanitize_entity_evidence
     from mycelium.secret_protection import get_active_secret_policy, sanitize_for_evidence
 
+    result = value
     policy = get_active_secret_policy()
-    if policy is None or not policy.enabled:
-        return value
-    return sanitize_for_evidence(value)
+    if policy is not None and policy.enabled:
+        result = sanitize_for_evidence(result)
+    if get_active_entity_policy() is not None:
+        if isinstance(result, dict):
+            _args, scrubbed = sanitize_entity_evidence((), result)
+            del _args
+            return scrubbed
+    return result
 
 
 def _evidence_args(args: Any, kwargs: Any) -> tuple[list[Any], dict[str, Any]]:
+    from mycelium.entity_guard import get_active_entity_policy, sanitize_entity_evidence
     from mycelium.secret_protection import get_active_secret_policy, sanitize_secrets
 
+    out_args: list[Any] = list(args)
+    out_kwargs: dict[str, Any] = dict(kwargs)
     policy = get_active_secret_policy()
-    if policy is None or not policy.enabled:
-        return list(args), dict(kwargs)
-    safe = sanitize_secrets(
-        {"args": list(args), "kwargs": dict(kwargs)},
-        entropy_detection=policy.entropy_detection,
-        allow_fields=policy.allow_fields,
-    )
-    return list(safe["args"]), dict(safe["kwargs"])
+    if policy is not None and policy.enabled:
+        safe = sanitize_secrets(
+            {"args": out_args, "kwargs": out_kwargs},
+            entropy_detection=policy.entropy_detection,
+            allow_fields=policy.allow_fields,
+        )
+        out_args, out_kwargs = list(safe["args"]), dict(safe["kwargs"])
+    if get_active_entity_policy() is not None:
+        out_args, out_kwargs = sanitize_entity_evidence(out_args, out_kwargs)
+    return out_args, out_kwargs
 
 
 def _evidence_error(error: BaseException) -> str:
@@ -3341,9 +3353,19 @@ def _args_drift_fingerprint(
         else {key: value for key, value in kwargs.items() if key not in exclude}
     )
     policy = get_active_secret_policy()
-    if policy is not None and policy.enabled:
-        return fingerprint_args(args, filtered)
-    return args_fingerprint(args, filtered)
+    digest = (
+        fingerprint_args(args, filtered)
+        if policy is not None and policy.enabled
+        else args_fingerprint(args, filtered)
+    )
+    from mycelium.entity_guard import destination_fingerprint, get_active_entity_decision
+
+    dests = destination_fingerprint(get_active_entity_decision())
+    if not dests:
+        return digest
+    import hashlib
+
+    return hashlib.sha256(f"{digest}|{'|'.join(dests)}".encode()).hexdigest()
 
 
 def _args_drift_scope_key(kwargs: dict[str, Any]) -> str | None:

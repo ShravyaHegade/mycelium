@@ -7,7 +7,7 @@
 #   Optional:  integrations, task_ledger, state_flush, audit_receipt, outcome_emit,
 #              loop_guard, completion, state_authority, registry, runner,
 #              history_guard, message_validator, deployment, verify,
-#              secret_args — delete unused sections
+#              secret_args, entity_guard — delete unused sections
 #
 # Next steps
 #   1. Allowlist first: rename tools: / tasks: stubs, then copy those exact
@@ -81,6 +81,7 @@
 #   → completion: requires a verified terminal adapter at startup
 #   → secret_args.policy: error when secret_args is enabled and
 #     consequential tools exist (warn/redact rejected)
+#   → entity_guard.missing_policy: error when entity_guard is enabled
 #   Weaker explicit warn/derived/memory-outcome settings are rejected.
 #   unclassified_policy: warn remains an accepted product choice.
 # Verify with:
@@ -272,6 +273,36 @@ loop_guard:
 #   allow_tools: []
 #   entropy_detection: true
 # Per tool: secret_fields: [api_key]  and/or  secret_args: false
+
+# ---------------------------------------------------------------------------
+# entity_guard  (unnumbered — destination policy at the tool boundary)
+# A write may carry sensitive data only into a host-authorized destination.
+# Unknown / missing / malformed / dynamic destination → no execution.
+# The model cannot add recipients to the allowlist.
+# ---------------------------------------------------------------------------
+# entity_guard:
+#   enabled: true
+#   missing_policy: error
+#   tools:
+#     send_email:
+#       destinations:
+#         - path: recipient
+#           type: email
+#           allow:
+#             addresses: [billing@customer.com]
+#             domains: [customer.com]
+#         - path: cc
+#           type: email
+#           allow: []
+#           required: false
+#     http_post:
+#       destinations:
+#         - path: url
+#           type: https_url
+#           allow:
+#             hosts: [api.stripe.com, hooks.slack.com]
+#           reject_redirects: true
+# Per tool: entity_guard: false
 
 # ---------------------------------------------------------------------------
 # budget  (unnumbered — cost / time / step ceilings; refuse next step)

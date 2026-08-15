@@ -7,6 +7,22 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
 
 ### Added
 
+- **Entity / destination guard:** optional `entity_guard:` authorizes write
+  destinations (email, https URL, host, entity id) before ledger claim.
+  Each tool declares which argument is the destination; the host lists
+  exact allowed entities or constrained patterns. Destinations are
+  canonicalized (lowercase email/host, parsed https URL, normalized id).
+  Missing, malformed, dynamic, undeclared, or unapproved destinations
+  fail closed. Canonical destinations are bound into the operation
+  fingerprint so a retry cannot change recipients on the same
+  `request_id`. Evidence records tool, destination class / approved
+  entity id, policy version, and decision — never the sensitive payload.
+  Allowlists are host-controlled; the model cannot add recipients.
+  Omitted `entity_guard:` keeps existing behavior. Production requires
+  `missing_policy: error`. `mycelium doctor` reports coverage;
+  `mycelium verify --scenario entity-guard` proves unauthorized
+  destinations never claim.
+
 - **Secret-in-args (AF-010):** optional `secret_args:` scans tool arguments
   before claim, fingerprinting, receipts, execution, logs, and outcomes.
   Default omitted config keeps existing behavior. `policy: error` raises

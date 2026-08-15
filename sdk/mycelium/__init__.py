@@ -139,6 +139,16 @@ from mycelium.doctor import (
     run_doctor,
     run_doctor_on_config,
 )
+from mycelium.entity_guard import (
+    PAYLOAD_OMITTED,
+    EntityGuardError,
+    apply_entity_guard,
+    canonicalize_email,
+    canonicalize_entity_id,
+    canonicalize_host,
+    canonicalize_https_url,
+    enforce_entity_guard,
+)
 from mycelium.history_guard import HistoryGuard, HistoryTruncatedError
 from mycelium.loop_guard import (
     DEFAULT_CONSECUTIVE_SOFT,
@@ -469,6 +479,14 @@ __all__ = [
     "load_config_from_string",
     "protect",
     "protect_sync",
+    "PAYLOAD_OMITTED",
+    "EntityGuardError",
+    "apply_entity_guard",
+    "canonicalize_email",
+    "canonicalize_entity_id",
+    "canonicalize_host",
+    "canonicalize_https_url",
+    "enforce_entity_guard",
     "REDACTED_MARKER",
     "SecretInArgsError",
     "declare_secret_fields",

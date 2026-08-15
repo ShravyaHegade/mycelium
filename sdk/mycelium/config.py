@@ -57,6 +57,17 @@ from mycelium.completion_contract import (
     registered_terminal_adapters,
     set_active_completion_contract,
 )
+from mycelium.entity_guard import (
+    DEST_TYPES,
+    MISSING_POLICIES,
+    MISSING_POLICY_ERROR,
+    DestinationAllow,
+    DestinationSpec,
+    EntityGuardPolicy,
+    ToolDestinationPolicy,
+    apply_entity_guard,
+    entity_guard_policy_for_tool,
+)
 from mycelium.history_guard import HistoryGuard
 from mycelium.integrations.langgraph import (
     LangGraphIntegrationError,
@@ -190,6 +201,7 @@ _GUARD_MARKERS = (
     "_mycelium_scope_guarded",
     "_mycelium_state_authority",
     "_mycelium_secret_args",
+    "_mycelium_entity_guard",
     "_mycelium_langgraph_integration",
 )
 
@@ -310,6 +322,8 @@ class ToolConfig:
     secret_fields: tuple[str, ...] = ()
     # Per-tool secret_args: None=inherit global, False=disable
     secret_args: bool | None = None
+    # Per-tool entity_guard: None=inherit global, False=disable
+    entity_guard: bool | None = None
 
     def is_noop(self) -> bool:
         return (
@@ -323,6 +337,7 @@ class ToolConfig:
             and self.state_authority is None
             and not self.secret_fields
             and self.secret_args is None
+            and self.entity_guard is None
         )
 
 
@@ -373,6 +388,7 @@ class MyceliumConfig:
     deployment: dict[str, Any] | None = None
     verify: dict[str, Any] | None = None
     secret_args: dict[str, Any] | None = None
+    entity_guard: dict[str, Any] | None = None
     profile: str = PROFILE_DEVELOPMENT
     _audit_emitter: AuditReceiptEmitter | None = None
     _outcome_emitter: OutcomeEmitter | None = None
@@ -394,9 +410,9 @@ class MyceliumConfig:
         function is returned unchanged.
 
         Guard order (outermost first, after optional LangGraph instrument):
-        ``@secret_args`` -> ``@state_authority`` -> ``@scope_guard`` ->
-        ``@budget_guard`` -> ``@loop_guard`` -> ``@ledger`` -> ``@bounded`` ->
-        ``@protect`` -> ``func``
+        ``@secret_args`` -> ``@entity_guard`` -> ``@state_authority`` ->
+        ``@scope_guard`` -> ``@budget_guard`` -> ``@loop_guard`` ->
+        ``@ledger`` -> ``@bounded`` -> ``@protect`` -> ``func``
         """
         return self.apply_tool(func.__name__, func)
 
@@ -486,6 +502,20 @@ class MyceliumConfig:
             return False
         return True
 
+    def entity_guard_applies(
+        self, name: str, tool_config: ToolConfig | None = None
+    ) -> bool:
+        """Whether destination-policy checking should wrap this tool."""
+        if self.entity_guard is None:
+            return False
+        policy = entity_guard_policy_from_mapping(self.entity_guard)
+        if not policy.enabled:
+            return False
+        cfg = tool_config if tool_config is not None else self.tools.get(name)
+        if cfg is not None and cfg.entity_guard is False:
+            return False
+        return name in policy.tools
+
     def apply_tool(
         self,
         name: str,
@@ -500,6 +530,7 @@ class MyceliumConfig:
         applies_scope = self.scope_guard_applies(name, tool_config)
         applies_state = self.state_authority_applies(name, tool_config)
         applies_secret = self.secret_args_applies(name, tool_config)
+        applies_entity = self.entity_guard_applies(name, tool_config)
         if tool_config.secret_fields:
             setattr(func, "_mycelium_secret_fields", tool_config.secret_fields)
         if (
@@ -509,6 +540,7 @@ class MyceliumConfig:
             and not applies_scope
             and not applies_state
             and not applies_secret
+            and not applies_entity
         ):
             return func
         if _check_existing_config_wrapper(func, kind="tool", name=name):
@@ -611,6 +643,33 @@ class MyceliumConfig:
                 side_effect_class=tool_config.side_effect_class,
             )
 
+        # Destination policy outside claim: unauthorized recipients never execute.
+        if applies_entity:
+            from dataclasses import replace as _replace_policy
+
+            policy = entity_guard_policy_from_mapping(self.entity_guard or {})
+            if (
+                policy.policy_version == "unspecified"
+                and self.transition is not None
+            ):
+                policy = _replace_policy(
+                    policy, policy_version=self.transition.policy_version
+                )
+            if (
+                self.profile == PROFILE_PRODUCTION
+                and policy.missing_policy != MISSING_POLICY_ERROR
+            ):
+                raise ConfigError(
+                    f"profile is {PROFILE_PRODUCTION!r} but "
+                    f"entity_guard.missing_policy is {policy.missing_policy!r}; "
+                    "production requires 'error'"
+                )
+            func = apply_entity_guard(
+                func,
+                entity_guard_policy_for_tool(policy, name),
+                tool_name=name,
+            )
+
         # Secret-in-args outside every other guard: scan before claim/fingerprint.
         if applies_secret:
             from mycelium.transition import CONSEQUENTIAL_SIDE_EFFECT_CLASSES
@@ -646,6 +705,7 @@ class MyceliumConfig:
             or applies_scope
             or applies_state
             or applies_secret
+            or applies_entity
         ):
             try:
                 func = instrument_langgraph_tool(func)
@@ -2017,6 +2077,15 @@ def _parse_tool_config(
     else:
         raise ConfigError(f"tool '{name}'.secret_args must be a bool")
 
+    entity_guard_raw = raw.get("entity_guard")
+    entity_guard_cfg: bool | None
+    if entity_guard_raw is None:
+        entity_guard_cfg = None
+    elif isinstance(entity_guard_raw, bool):
+        entity_guard_cfg = entity_guard_raw
+    else:
+        raise ConfigError(f"tool '{name}'.entity_guard must be a bool")
+
     return ToolConfig(
         name=name,
         protect=protect,
@@ -2037,6 +2106,7 @@ def _parse_tool_config(
         state_authority=state_authority_cfg,
         secret_fields=secret_fields,
         secret_args=secret_args_cfg,
+        entity_guard=entity_guard_cfg,
     )
 
 
@@ -2143,6 +2213,7 @@ def _apply_action_ledger_tools(
             state_authority=existing.state_authority,
             secret_fields=existing.secret_fields,
             secret_args=existing.secret_args,
+            entity_guard=existing.entity_guard,
         )
 
 
@@ -2810,6 +2881,187 @@ def _parse_secret_args(
     return parsed
 
 
+def entity_guard_policy_from_mapping(raw: dict[str, Any]) -> EntityGuardPolicy:
+    """Build a :class:`EntityGuardPolicy` from a validated mapping."""
+    tools: dict[str, ToolDestinationPolicy] = {}
+    for name, tool_raw in (raw.get("tools") or {}).items():
+        destinations = []
+        for spec in tool_raw.get("destinations") or []:
+            allow_raw = spec.get("allow") or {}
+            destinations.append(
+                DestinationSpec(
+                    path=str(spec["path"]),
+                    dest_type=str(spec["type"]),
+                    allow=DestinationAllow(
+                        addresses=frozenset(
+                            str(item).strip().lower()
+                            for item in (allow_raw.get("addresses") or [])
+                        ),
+                        domains=frozenset(
+                            str(item).strip().lower()
+                            for item in (allow_raw.get("domains") or [])
+                        ),
+                        hosts=frozenset(
+                            str(item).strip().lower()
+                            for item in (allow_raw.get("hosts") or [])
+                        ),
+                        values=frozenset(
+                            str(item).strip() for item in (allow_raw.get("values") or [])
+                        ),
+                    ),
+                    required=bool(spec.get("required", True)),
+                    reject_redirects=bool(spec.get("reject_redirects", True)),
+                )
+            )
+        tools[str(name)] = ToolDestinationPolicy(destinations=tuple(destinations))
+    return EntityGuardPolicy(
+        enabled=bool(raw.get("enabled", True)),
+        missing_policy=str(raw.get("missing_policy", MISSING_POLICY_ERROR)),
+        policy_version=str(raw.get("policy_version") or "unspecified"),
+        tools=tools,
+    )
+
+
+def _parse_string_list(raw: Any, *, field: str) -> list[str]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list) or not all(
+        isinstance(item, str) and item.strip() for item in raw
+    ):
+        raise ConfigError(f"'{field}' must be a list of non-empty strings")
+    return [str(item).strip() for item in raw]
+
+
+def _parse_destination_spec(raw: Any, *, tool: str) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise ConfigError(f"entity_guard.tools.{tool}.destinations entries must be mappings")
+    allowed_keys = {"path", "type", "allow", "required", "reject_redirects"}
+    unknown = set(raw) - allowed_keys
+    if unknown:
+        names = ", ".join(sorted(str(name) for name in unknown))
+        raise ConfigError(
+            f"unsupported entity_guard.tools.{tool} destination option(s): {names}"
+        )
+    path = raw.get("path")
+    if not isinstance(path, str) or not path.strip():
+        raise ConfigError(f"entity_guard.tools.{tool} destination path is required")
+    dest_type = raw.get("type")
+    if dest_type not in DEST_TYPES:
+        raise ConfigError(
+            f"entity_guard.tools.{tool} destination type must be one of "
+            f"{sorted(DEST_TYPES)}, got {dest_type!r}"
+        )
+    allow_raw = raw.get("allow", {})
+    if allow_raw is None or allow_raw == []:
+        allow_raw = {}
+    if not isinstance(allow_raw, dict):
+        raise ConfigError(f"entity_guard.tools.{tool} destination allow must be a mapping")
+    allow_keys = {"addresses", "domains", "hosts", "values"}
+    unknown_allow = set(allow_raw) - allow_keys
+    if unknown_allow:
+        names = ", ".join(sorted(str(name) for name in unknown_allow))
+        raise ConfigError(
+            f"unsupported entity_guard.tools.{tool} allow option(s): {names}"
+        )
+    required = raw.get("required", True)
+    if not isinstance(required, bool):
+        raise ConfigError(f"entity_guard.tools.{tool} destination required must be a bool")
+    reject_redirects = raw.get("reject_redirects", True)
+    if not isinstance(reject_redirects, bool):
+        raise ConfigError(
+            f"entity_guard.tools.{tool} destination reject_redirects must be a bool"
+        )
+    return {
+        "path": path.strip(),
+        "type": dest_type,
+        "allow": {
+            "addresses": _parse_string_list(
+                allow_raw.get("addresses"),
+                field=f"entity_guard.tools.{tool}.allow.addresses",
+            ),
+            "domains": _parse_string_list(
+                allow_raw.get("domains"),
+                field=f"entity_guard.tools.{tool}.allow.domains",
+            ),
+            "hosts": _parse_string_list(
+                allow_raw.get("hosts"), field=f"entity_guard.tools.{tool}.allow.hosts"
+            ),
+            "values": _parse_string_list(
+                allow_raw.get("values"), field=f"entity_guard.tools.{tool}.allow.values"
+            ),
+        },
+        "required": required,
+        "reject_redirects": reject_redirects,
+    }
+
+
+def _parse_entity_guard(data: dict[str, Any], *, profile: str) -> dict[str, Any] | None:
+    """Optional destination-policy section. Omitted keeps existing behavior."""
+    raw = data.get("entity_guard")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ConfigError("'entity_guard' must be a mapping")
+    allowed_keys = {"enabled", "missing_policy", "policy_version", "tools"}
+    unknown = set(raw) - allowed_keys
+    if unknown:
+        names = ", ".join(sorted(str(name) for name in unknown))
+        raise ConfigError(f"unsupported 'entity_guard' option(s): {names}")
+
+    enabled = raw.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ConfigError("'entity_guard.enabled' must be a boolean")
+    missing_policy = raw.get("missing_policy", MISSING_POLICY_ERROR)
+    if missing_policy not in MISSING_POLICIES:
+        raise ConfigError(
+            "'entity_guard.missing_policy' must be one of "
+            f"{sorted(MISSING_POLICIES)}, got {missing_policy!r}"
+        )
+    policy_version = raw.get("policy_version")
+    if policy_version is not None and (
+        not isinstance(policy_version, str) or not policy_version.strip()
+    ):
+        raise ConfigError("'entity_guard.policy_version' must be a non-empty string")
+    tools_raw = raw.get("tools", {})
+    if not isinstance(tools_raw, dict):
+        raise ConfigError("'entity_guard.tools' must be a mapping of tool names")
+
+    tools: dict[str, Any] = {}
+    for name, tool_raw in tools_raw.items():
+        if not isinstance(name, str) or not name.strip():
+            raise ConfigError("'entity_guard.tools' keys must be non-empty tool names")
+        if not isinstance(tool_raw, dict):
+            raise ConfigError(f"entity_guard.tools.{name} must be a mapping")
+        dests_raw = tool_raw.get("destinations")
+        if not isinstance(dests_raw, list) or not dests_raw:
+            raise ConfigError(
+                f"entity_guard.tools.{name}.destinations must be a non-empty list"
+            )
+        extra = set(tool_raw) - {"destinations"}
+        if extra:
+            names = ", ".join(sorted(str(item) for item in extra))
+            raise ConfigError(
+                f"unsupported entity_guard.tools.{name} option(s): {names}"
+            )
+        tools[name.strip()] = {
+            "destinations": [
+                _parse_destination_spec(item, tool=name.strip()) for item in dests_raw
+            ]
+        }
+
+    if enabled and profile == PROFILE_PRODUCTION and missing_policy != MISSING_POLICY_ERROR:
+        _reject_weaker_production_policy("entity_guard.missing_policy", str(missing_policy))
+
+    parsed = {
+        "enabled": enabled,
+        "missing_policy": str(missing_policy),
+        "tools": tools,
+    }
+    if policy_version is not None:
+        parsed["policy_version"] = str(policy_version).strip()
+    return parsed
+
+
 def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
     if not isinstance(data, dict):
         raise ConfigError("config root must be a mapping")
@@ -3048,6 +3300,7 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
             raise ConfigError("'state_authority.exclude' must be a list of tool names")
 
     secret_args_raw = _parse_secret_args(data, profile=profile, tools=tools)
+    entity_guard_raw = _parse_entity_guard(data, profile=profile)
 
     message_validator_raw = data.get("message_validator", False)
     if isinstance(message_validator_raw, dict):
@@ -3085,6 +3338,7 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
         deployment=deployment,
         verify=verify,
         secret_args=secret_args_raw,
+        entity_guard=entity_guard_raw,
         profile=profile,
         _audit_auto=audit_auto,
     )
