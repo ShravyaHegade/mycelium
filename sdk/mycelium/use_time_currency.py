@@ -1573,6 +1573,7 @@ def apply_use_time_currency(
         @functools.wraps(func)
         async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
             token = set_use_time_currency_policy(policy)
+            pending_token = _pending_var.set(())
             try:
                 call_mapping = _bound_mapping(func, args, kwargs)
                 bound = authorize_use_time_facts(
@@ -1617,7 +1618,7 @@ def apply_use_time_currency(
                     )
                 raise
             finally:
-                clear_pending_use_time_facts()
+                _pending_var.reset(pending_token)
                 reset_use_time_currency_policy(token)
 
         async_wrapper._mycelium_use_time_currency = True  # type: ignore[attr-defined]
@@ -1626,6 +1627,7 @@ def apply_use_time_currency(
     @functools.wraps(func)
     def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
         token = set_use_time_currency_policy(policy)
+        pending_token = _pending_var.set(())
         try:
             call_mapping = _bound_mapping(func, args, kwargs)
             bound = authorize_use_time_facts(
@@ -1668,7 +1670,7 @@ def apply_use_time_currency(
                 )
             raise
         finally:
-            clear_pending_use_time_facts()
+            _pending_var.reset(pending_token)
             reset_use_time_currency_policy(token)
 
     sync_wrapper._mycelium_use_time_currency = True  # type: ignore[attr-defined]

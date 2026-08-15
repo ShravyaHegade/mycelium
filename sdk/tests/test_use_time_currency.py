@@ -112,6 +112,25 @@ def _positional_policy() -> UseTimeCurrencyPolicy:
     )
 
 
+def _nested_policy(tool: str, fact_name: str, validator: str) -> UseTimeCurrencyPolicy:
+    return UseTimeCurrencyPolicy(
+        policy_version="test",
+        tools={
+            tool: UseTimeToolPolicy(
+                facts=(
+                    UseTimeFactSpec(
+                        name=fact_name,
+                        subject_type="resource",
+                        id_from="resource_id",
+                        validator=validator,
+                        require={"value": True},
+                    ),
+                )
+            )
+        },
+    )
+
+
 def test_capture_rejects_model_mapping_subject() -> None:
     with pytest.raises(UseTimeCurrencyError, match="host-controlled"):
         use_time_facts.capture(
@@ -854,6 +873,138 @@ def test_async_nonledger_wrapper_preserves_positional_args_at_use() -> None:
         "payment_id": "pay_1",
         "expected_state": "ready",
     }
+
+
+def test_nested_sync_wrapper_restores_outer_facts_for_final_boundary() -> None:
+    storage = InMemoryLedgerStorage()
+    outer_current = {"value": True}
+    provider_calls: list[str] = []
+    request_ids: list[str] = []
+    outer_restored: list[bool] = []
+
+    def outer_state(**_kwargs: Any) -> ValidatorResult:
+        return ValidatorResult(current=outer_current["value"], value=outer_current["value"])
+
+    def inner_state(**_kwargs: Any) -> ValidatorResult:
+        return ValidatorResult(current=True, value=True)
+
+    register_use_time_validator("outer_state", outer_state)
+    register_use_time_validator("inner_state", inner_state)
+
+    def inner_tool(resource_id: str) -> str:
+        return resource_id
+
+    inner = apply_use_time_currency(
+        inner_tool,
+        _nested_policy("inner_tool", "inner.current", "inner_state"),
+        tool_name="inner_tool",
+    )
+
+    @ledger_sync(storage=storage, transition_binding=_binding())
+    def outer_tool(resource_id: str) -> None:
+        active = get_active_transition()
+        assert active is not None
+        request_ids.append(active.request_id)
+        assert inner("inner-1") == "inner-1"
+        outer_restored.append(
+            any(fact.name == "outer.current" for fact in get_pending_use_time_facts())
+        )
+        outer_current["value"] = False
+        with side_effect():
+            provider_calls.append(resource_id)
+
+    outer = apply_use_time_currency(
+        outer_tool,
+        _nested_policy("outer_tool", "outer.current", "outer_state"),
+        tool_name="outer_tool",
+    )
+    use_time_facts.capture(
+        name="outer.current",
+        subject_type="resource",
+        subject_id="outer-1",
+        value=True,
+        require_value=True,
+    )
+    use_time_facts.capture(
+        name="inner.current",
+        subject_type="resource",
+        subject_id="inner-1",
+        value=True,
+        require_value=True,
+    )
+    with pytest.raises(UseTimeCurrencyError):
+        outer("outer-1", request_id="nested-sync")
+    assert outer_restored == [True]
+    assert provider_calls == []
+    assert storage.get(request_ids[0]).side_effect_boundary == SideEffectBoundary.NOT_CROSSED.value
+
+
+def test_nested_async_wrapper_restores_outer_facts_for_final_boundary() -> None:
+    storage = InMemoryLedgerStorage()
+    outer_current = {"value": True}
+    provider_calls: list[str] = []
+    request_ids: list[str] = []
+    outer_restored: list[bool] = []
+
+    async def outer_state(**_kwargs: Any) -> ValidatorResult:
+        return ValidatorResult(current=outer_current["value"], value=outer_current["value"])
+
+    async def inner_state(**_kwargs: Any) -> ValidatorResult:
+        return ValidatorResult(current=True, value=True)
+
+    register_use_time_validator("outer_state", outer_state)
+    register_use_time_validator("inner_state", inner_state)
+
+    async def inner_tool(resource_id: str) -> str:
+        return resource_id
+
+    inner = apply_use_time_currency(
+        inner_tool,
+        _nested_policy("inner_tool", "inner.current", "inner_state"),
+        tool_name="inner_tool",
+    )
+
+    @ledger(storage=storage, transition_binding=_binding())
+    async def outer_tool(resource_id: str) -> None:
+        active = get_active_transition()
+        assert active is not None
+        request_ids.append(active.request_id)
+        assert await inner("inner-1") == "inner-1"
+        outer_restored.append(
+            any(fact.name == "outer.current" for fact in get_pending_use_time_facts())
+        )
+        outer_current["value"] = False
+        async with side_effect_async():
+            provider_calls.append(resource_id)
+
+    outer = apply_use_time_currency(
+        outer_tool,
+        _nested_policy("outer_tool", "outer.current", "outer_state"),
+        tool_name="outer_tool",
+    )
+    use_time_facts.capture(
+        name="outer.current",
+        subject_type="resource",
+        subject_id="outer-1",
+        value=True,
+        require_value=True,
+    )
+    use_time_facts.capture(
+        name="inner.current",
+        subject_type="resource",
+        subject_id="inner-1",
+        value=True,
+        require_value=True,
+    )
+
+    async def run() -> None:
+        with pytest.raises(UseTimeCurrencyError):
+            await outer("outer-1", request_id="nested-async")
+
+    asyncio.run(run())
+    assert outer_restored == [True]
+    assert provider_calls == []
+    assert storage.get(request_ids[0]).side_effect_boundary == SideEffectBoundary.NOT_CROSSED.value
 
 
 def test_fingerprint_excludes_raw_values() -> None:
