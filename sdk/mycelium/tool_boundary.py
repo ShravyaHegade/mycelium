@@ -262,9 +262,10 @@ def _validate_input(tool_name: str, schema: type[BaseModel], raw: dict[str, Any]
 def _path_is_under_allowed(path: str, allowed_paths: tuple[str, ...]) -> bool:
     """True if resolved ``path`` equals or is under an allowed root.
 
-    ``Path.resolve(strict=False)`` collapses ``.`` / ``..`` and follows every
-    symlink in the existing portion of the path. Missing descendants remain
-    supported. Resolution errors, including symlink loops, fail closed.
+    Strict resolution detects symlink loops on every supported Python version.
+    A missing component alone falls back to non-strict resolution, preserving
+    missing descendants while still following symlinks in the existing path.
+    Other resolution errors fail closed.
 
     This is pre-dispatch validation. A hostile process that can mutate the
     filesystem between validation and tool execution can still create a
@@ -272,18 +273,27 @@ def _path_is_under_allowed(path: str, allowed_paths: tuple[str, ...]) -> bool:
     sandbox or descriptor-relative file operations in the tool itself.
     """
     try:
-        candidate = Path(path).resolve(strict=False)
+        candidate = _resolve_allow_missing(path)
     except (OSError, RuntimeError, ValueError):
         return False
 
     for prefix in allowed_paths:
         try:
-            root = Path(prefix).resolve(strict=False)
+            root = _resolve_allow_missing(prefix)
             candidate.relative_to(root)
         except (OSError, RuntimeError, ValueError):
             continue
         return True
     return False
+
+
+def _resolve_allow_missing(path: str) -> Path:
+    """Resolve ``path`` while allowing missing components but rejecting loops."""
+    candidate = Path(path)
+    try:
+        return candidate.resolve(strict=True)
+    except FileNotFoundError:
+        return candidate.resolve(strict=False)
 
 
 def _validate_scope(tool_name: str, raw: dict[str, Any], config: BoundedConfig) -> None:
