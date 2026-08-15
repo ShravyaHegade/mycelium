@@ -448,17 +448,28 @@ class _UseTimeFactsAPI:
         kept = tuple(
             item
             for item in current
-            if not (
-                item.name == fact.name
-                and item.subject_type == fact.subject_type
-                and item.subject_id == fact.subject_id
-            )
+            if _fact_identity(item) != _fact_identity(fact)
         )
         _captured_var.set((*kept, fact))
         return fact
 
 
 use_time_facts = _UseTimeFactsAPI()
+
+
+def _fact_identity(fact: UseTimeFact) -> tuple[str | None, ...]:
+    return (
+        fact.name,
+        fact.subject_type,
+        fact.subject_id,
+        fact.tenant,
+        fact.account,
+        fact.tool,
+        fact.request_id,
+        fact.run_id,
+        fact.thread_id,
+        fact.policy_version,
+    )
 
 
 def _append_decision(decision: UseTimeValidation) -> UseTimeValidation:
@@ -920,7 +931,36 @@ def _evaluate_use_result(
             account=fact.account,
         )
 
-    if fact.revision is not None and result.revision is not None:
+    result_digest = result.digest()
+    if fact.revision is not None and result.revision is None or (
+        (
+            fact.value_digest is not None
+            or fact.require_value_digest is not None
+            or fact.compare_to_arg is not None
+        )
+        and result_digest is None
+    ):
+        _raise_currency(
+            tool=fact.tool,
+            fact_name=fact.name,
+            reason=REASON_UNVERIFIABLE,
+            phase=phase,
+            subject_ref=fact.subject_ref,
+            decide_revision=fact.revision,
+            use_revision=result.revision,
+            observed_at=observed,
+            max_age_seconds=fact.max_age_seconds,
+            validator=fact.validator,
+            policy_version=fact.policy_version,
+            provider_precondition=fact.provider_precondition,
+            provider_precondition_present=precond_present,
+            request_id=fact.request_id,
+            run_id=fact.run_id,
+            tenant=fact.tenant,
+            account=fact.account,
+        )
+
+    if fact.revision is not None:
         if str(fact.revision) != str(result.revision):
             _raise_currency(
                 tool=fact.tool,
@@ -942,7 +982,6 @@ def _evaluate_use_result(
                 account=fact.account,
             )
 
-    result_digest = result.digest()
     if fact.require_value_digest is not None:
         if result_digest != fact.require_value_digest:
             _raise_currency(
@@ -1086,11 +1125,7 @@ def register_fact_for_use(fact: UseTimeFact) -> UseTimeFact:
     kept = tuple(
         item
         for item in current
-        if not (
-            item.name == fact.name
-            and item.subject_type == fact.subject_type
-            and item.subject_id == fact.subject_id
-        )
+        if _fact_identity(item) != _fact_identity(fact)
     )
     _pending_var.set((*kept, fact))
     return fact
@@ -1189,15 +1224,22 @@ def authorize_use_time_facts(
                 )
             account = str(raw_account)
 
-        match = None
-        for item in captured:
-            if (
-                item.name == spec.name
-                and item.subject_type == spec.subject_type
-                and str(item.subject_id) == str(subject_id)
-            ):
-                match = item
-                break
+        candidates = tuple(
+            item
+            for item in captured
+            if item.name == spec.name
+            and item.subject_type == spec.subject_type
+            and str(item.subject_id) == str(subject_id)
+        )
+        match = next(
+            (
+                item
+                for item in candidates
+                if (not spec.tenant_from or item.tenant == tenant)
+                and (not spec.account_from or item.account == account)
+            ),
+            candidates[0] if candidates else None,
+        )
 
         revision = None
         if spec.revision_from:

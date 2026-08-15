@@ -34,6 +34,7 @@ from mycelium.transition import (
 from mycelium.use_time_currency import (
     UseTimeCurrencyError,
     UseTimeCurrencyPolicy,
+    UseTimeFact,
     UseTimeFactSpec,
     UseTimeToolPolicy,
     ValidatorResult,
@@ -44,6 +45,7 @@ from mycelium.use_time_currency import (
     enforce_use_boundary,
     get_pending_use_time_facts,
     get_use_time_decisions,
+    register_fact_for_use,
     register_use_time_validator,
     reset_use_time_currency_state,
     set_use_time_clock,
@@ -1005,6 +1007,135 @@ def test_nested_async_wrapper_restores_outer_facts_for_final_boundary() -> None:
     assert outer_restored == [True]
     assert provider_calls == []
     assert storage.get(request_ids[0]).side_effect_boundary == SideEffectBoundary.NOT_CROSSED.value
+
+
+@pytest.mark.parametrize(
+    "captured",
+    [
+        {"revision": "rev-1"},
+        {"value": True},
+    ],
+)
+def test_missing_validator_evidence_denies_before_provider(
+    captured: dict[str, Any],
+) -> None:
+    storage = InMemoryLedgerStorage()
+    provider_calls: list[str] = []
+
+    def payment_state(**_kwargs: Any) -> ValidatorResult:
+        return ValidatorResult(current=True)
+
+    register_use_time_validator("payment_state", payment_state)
+    policy = UseTimeCurrencyPolicy(
+        policy_version="test",
+        tools={
+            "apply_payment": UseTimeToolPolicy(
+                facts=(
+                    UseTimeFactSpec(
+                        name="payment.current",
+                        subject_type="payment",
+                        id_from="payment_id",
+                        validator="payment_state",
+                    ),
+                )
+            )
+        },
+    )
+
+    @ledger_sync(storage=storage, transition_binding=_binding())
+    def apply_payment(payment_id: str) -> None:
+        with side_effect():
+            provider_calls.append(payment_id)
+
+    wrapped = apply_use_time_currency(
+        apply_payment, policy, tool_name="apply_payment"
+    )
+    use_time_facts.capture(
+        name="payment.current",
+        subject_type="payment",
+        subject_id="pay-1",
+        **captured,
+    )
+    with pytest.raises(UseTimeCurrencyError) as exc:
+        wrapped("pay-1", request_id="missing-evidence")
+    assert exc.value.reason == "unverifiable"
+    assert provider_calls == []
+    entry = storage.get("missing-evidence")
+    assert entry is None or entry.side_effect_boundary == SideEffectBoundary.NOT_CROSSED.value
+
+
+def test_scoped_pending_facts_are_all_revalidated() -> None:
+    def scoped_state(*, fact: UseTimeFact, **_kwargs: Any) -> ValidatorResult:
+        return ValidatorResult(current=fact.tenant != "tenant-stale")
+
+    register_use_time_validator("scoped_state", scoped_state)
+    observed = datetime.now(UTC)
+    register_fact_for_use(
+        UseTimeFact(
+            name="resource.current",
+            subject_type="resource",
+            subject_id="shared-id",
+            observed_at=observed,
+            tenant="tenant-stale",
+            account="account-1",
+            validator="scoped_state",
+        )
+    )
+    register_fact_for_use(
+        UseTimeFact(
+            name="resource.current",
+            subject_type="resource",
+            subject_id="shared-id",
+            observed_at=observed,
+            tenant="tenant-current",
+            account="account-1",
+            validator="scoped_state",
+        )
+    )
+    assert len(get_pending_use_time_facts()) == 2
+    with pytest.raises(UseTimeCurrencyError) as exc:
+        enforce_pending_use_time_facts_at_use()
+    assert exc.value.reason == "condition_false"
+
+
+def test_captured_fact_lookup_selects_exact_scope() -> None:
+    policy = UseTimeCurrencyPolicy(
+        policy_version="test",
+        tools={
+            "read_resource": UseTimeToolPolicy(
+                facts=(
+                    UseTimeFactSpec(
+                        name="resource.current",
+                        subject_type="resource",
+                        id_from="resource_id",
+                        tenant_from="tenant_id",
+                        account_from="account_id",
+                        validator="scoped_state",
+                    ),
+                )
+            )
+        },
+    )
+    for tenant in ("tenant-1", "tenant-2"):
+        use_time_facts.capture(
+            name="resource.current",
+            subject_type="resource",
+            subject_id="shared-id",
+            tenant=tenant,
+            account="account-1",
+        )
+    bound = authorize_use_time_facts(
+        "read_resource",
+        (),
+        {
+            "resource_id": "shared-id",
+            "tenant_id": "tenant-1",
+            "account_id": "account-1",
+        },
+        policy=policy,
+    )
+    assert len(bound) == 1
+    assert bound[0].tenant == "tenant-1"
 
 
 def test_fingerprint_excludes_raw_values() -> None:
