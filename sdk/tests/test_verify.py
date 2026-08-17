@@ -457,6 +457,9 @@ def test_cli_smoke_each_scenario(tmp_path: Path) -> None:
         "reconcile",
         "secret-in-args",
         "entity-guard",
+        "destructive-confirm",
+        "authority-window",
+        "use-time-currency",
     ):
         code = main(
             [
@@ -668,6 +671,9 @@ def test_all_order_sqlite(tmp_path: Path, scenario: str) -> None:
         "reconcile",
         "secret-in-args",
         "entity-guard",
+        "destructive-confirm",
+        "authority-window",
+        "use-time-currency",
     ]
     assert all(item.status == VerificationStatus.PASS for item in report.scenarios)
     assert report.empirically_verified is True

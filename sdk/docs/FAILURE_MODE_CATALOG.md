@@ -1,4 +1,4 @@
-# Failure-mode catalog (AF-001…AF-010)
+# Failure-mode catalog (AF-001…AF-011)
 
 **The taxonomy is the product story.** Mycelium is the reliability layer for AI
 agents; these IDs are the public promise. Stable across the SDK README,
@@ -17,6 +17,8 @@ LangGraph, CrewAI, AutoGen, Cline, OpenHands, and related stacks.
 | AF-008 | Cascading permission | `scope_guard:` / `@scope_guard` |
 | AF-009 | Instruction injection | (MCP gateway revisit; not in SDK) |
 | AF-010 | Secret-in-args | `secret_args:` / `SecretInArgsError` · `secret://` references · shared sanitizer |
+| AF-011 | Destructive confirm | `destructive_confirm:` / `DestructiveGrantError` · host-issued object grant · fail closed before claim |
+| AF-012 | Use-time currency | `use_time_currency:` / `UseTimeCurrencyError` · revalidate decide-time facts at use · fail closed before side effect |
 | — | Exfil via write / destination policy | `entity_guard:` / `EntityGuardError` · host allowlist · fail closed before claim |
 
 ---
@@ -218,6 +220,75 @@ provider code; Doctor labels those paths `not_verifiable`.
 
 ---
 
+## AF-011 Destructive confirm
+
+**Class:** Unauthorized irreversible mutation
+
+**One line:** Tool permission is not object authorization. A delete, refund,
+cancel, settle, revoke, terminate, purge, or overwrite executes only when
+the host has granted that exact operation on that exact canonical object.
+
+**What users hit:** a model with `refund_payment` permission refunds the
+wrong payment, or retries a refund after an ambiguous crash because a
+second grant existed.
+
+**Guard:** optional `destructive_confirm:`. Listed tools declare the
+canonical operation, object type, and argument path for the object id.
+The host mints a `DestructiveGrant` through `issue_destructive_grant` /
+`destructive_grants.issue` and places it on `TransitionScope`. Enforcement
+runs after ordinary argument validation and before ledger claim, lease,
+tool body, or any side effect. Missing, expired, exhausted, mismatched,
+or unverifiable grants raise `DestructiveGrantError` and do not claim.
+Retries with the same stable `request_id` reuse the ledger result and do
+not consume a second use. Dual control is intentionally not implemented
+— two-person approval belongs in the host workflow that issues the grant.
+A grant authorizes an attempt; it does not prove the provider outcome.
+Omitted `destructive_confirm:` keeps existing behavior.
+
+---
+
+## Authority-window expiry (unnumbered; batch with AF-011)
+
+**Class:** Authorization timing / side-effect boundary
+
+**One line:** No consequential operation may cross its side-effect boundary
+using authority that expired after authorization but before use.
+
+**What users hit:** a host grant was valid when the tool was claimed, but
+expired while waiting for a lease, queue, backoff, or confirmation — and
+the body still ran.
+
+**Guard:** `authority_window:` plus use-time checks on registered
+`BoundAuthority` (including AF-011 destructive grants). Validate at
+authorize and again immediately before `mark_maybe_crossed` / provider /
+body. `AuthorityExpiredError` hard-blocks; no auto-renew. Completed
+ledger RETURN does not require fresh authority. Pairs with AF-012
+use-time currency for fact freshness beyond expiry.
+
+---
+
+## AF-012 Use-time currency
+
+**Class:** Authorization freshness / side-effect boundary
+
+**One line:** A decide-time fact that is stale, changed, missing,
+unverifiable, or outside its freshness window at execute cannot authorize
+a consequential side effect.
+
+**What users hit:** an account was refundable when the agent planned the
+refund, but ownership, inventory, policy, or refundability changed while
+waiting for a lease — and the body still ran on decide-time truth.
+
+**Guard:** `use_time_currency:` / `use_time_facts.capture` /
+`register_use_time_validator`. Authorize binds host facts; use revalidates
+immediately before the side-effect boundary (after authority-window
+expiry). `UseTimeCurrencyError` hard-blocks. `age >= max_age_seconds` is
+stale. No prompt scanning. Completed RETURN does not revalidate. Does not
+eliminate the remote-call race; provider preconditions narrow it when
+declared.
+
+---
+
 ## Budget enforcement (unnumbered)
 
 **Class:** Run-level reliability / blast-radius
@@ -253,3 +324,5 @@ Budget is intentionally **not** given an AF-00N id. See
   intentionally **not** given an AF-00N id. AF-010 is secret-in-args.
 - **Destination policy** ships as `entity_guard:` and is also unnumbered:
   a write may carry sensitive data only into a host-authorized destination.
+- **AF-011** is destructive confirm: tool permission is not object
+  authorization.

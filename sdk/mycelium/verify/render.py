@@ -18,6 +18,9 @@ _SCENARIO_LABELS = {
     "reconcile": "Reconcile",
     "secret-in-args": "Secret-in-args",
     "entity-guard": "Entity-guard",
+    "destructive-confirm": "Destructive-confirm",
+    "authority-window": "Authority-window",
+    "use-time-currency": "Use-time-currency",
 }
 
 

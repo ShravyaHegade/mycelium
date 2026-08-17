@@ -7,7 +7,7 @@
 #   Optional:  integrations, task_ledger, state_flush, audit_receipt, outcome_emit,
 #              loop_guard, completion, state_authority, registry, runner,
 #              history_guard, message_validator, deployment, verify,
-#              secret_args, entity_guard — delete unused sections
+#              secret_args, entity_guard, destructive_confirm — delete unused sections
 #
 # Next steps
 #   1. Allowlist first: rename tools: / tasks: stubs, then copy those exact
@@ -82,6 +82,9 @@
 #   → secret_args.policy: error when secret_args is enabled and
 #     consequential tools exist (warn/redact rejected)
 #   → entity_guard.missing_policy: error when entity_guard is enabled
+#   → destructive_confirm.missing_policy: error when destructive_confirm
+#     is enabled; production grant storage must be durable; multi-node
+#     requires redis/postgres; irreversible tools must be declared
 #   Weaker explicit warn/derived/memory-outcome settings are rejected.
 #   unclassified_policy: warn remains an accepted product choice.
 # Verify with:
@@ -303,6 +306,78 @@ loop_guard:
 #             hosts: [api.stripe.com, hooks.slack.com]
 #           reject_redirects: true
 # Per tool: entity_guard: false
+
+# ---------------------------------------------------------------------------
+# destructive_confirm  (AF-011 — object grant at the tool boundary)
+# Tool permission is not object authorization. A listed destructive tool
+# may execute only with a host-issued grant for this exact operation on
+# this exact canonical object. The model cannot mint grants. Dual control
+# is not implemented — enforce two-person approval in the host workflow
+# before issue_destructive_grant. A grant authorizes an attempt, not the
+# provider's final outcome. For keyed_mutate, reuse the same request_id
+# as the provider idempotency key when the tool declares a mapping.
+# ---------------------------------------------------------------------------
+# destructive_confirm:
+#   enabled: true
+#   missing_policy: error
+#   # storage: memory   # dev/test only; production rejects memory
+#   # path: ./mycelium-destructive-grants.json
+#   tools:
+#     refund_payment:
+#       operation: refund
+#       object:
+#         type: payment
+#         id_from: payment_id
+#       grant:
+#         bind_request_id: true
+#         max_uses: 1
+#         ttl_seconds: 300
+#     delete_file:
+#       operation: delete
+#       object:
+#         type: file
+#         id_from: file_id
+#       grant:
+#         bind_request_id: true
+#         max_uses: 1
+#         ttl_seconds: 120
+# Per tool: destructive_confirm: false
+
+# ---------------------------------------------------------------------------
+# authority_window  (use-time expiry for time-bounded authority)
+# Authorization earlier in the run is not enough. Consequential tools with
+# time-bounded authority re-check immediately before mark_maybe_crossed /
+# provider / body side effect. now >= expires_at hard-blocks. Skew only
+# narrows validity. Does not complete use-time currency (item 5).
+# ---------------------------------------------------------------------------
+# authority_window:
+#   enabled: true
+#   use_time_check: required
+#   clock_skew_tolerance_seconds: 0
+
+# ---------------------------------------------------------------------------
+# use_time_currency  (AF-012 — revalidate decide-time facts at use)
+# Decide-time truth is not execute-time authority. Declared facts are bound
+# at authorize and revalidated immediately before mark_maybe_crossed /
+# provider / body. age >= max_age_seconds is stale. Host validators only —
+# no prompt scanning. Omitted config keeps existing behavior. Production
+# requires missing_policy: error. Pairs with authority_window (item 4).
+# ---------------------------------------------------------------------------
+# use_time_currency:
+#   enabled: true
+#   missing_policy: error
+#   tools:
+#     refund_payment:
+#       facts:
+#         - name: payment.refundable
+#           subject:
+#             type: payment
+#             id_from: payment_id
+#           validator: payment_state
+#           require: {value: true}
+#           revision_from: payment_version
+#           max_age_seconds: 30
+#           bind_request_id: true
 
 # ---------------------------------------------------------------------------
 # budget  (unnumbered — cost / time / step ceilings; refuse next step)

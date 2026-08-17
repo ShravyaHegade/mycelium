@@ -14,8 +14,8 @@ import threading
 import time
 import uuid
 import warnings
-from collections.abc import Awaitable, Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -318,6 +318,7 @@ class _ActiveTransition:
     ledger: ActionLedger
     request_id: str
     binding: ToolTransitionBinding | None
+    call_kwargs: Mapping[str, Any]
 
 
 _active_transition_var: ContextVar[_ActiveTransition | None] = ContextVar(
@@ -365,7 +366,26 @@ def mark_maybe_crossed() -> None:
     raises or the process crashes after this point, the durable entry retains
     ``maybe_crossed`` so a redispatch hard-blocks instead of re-executing a
     possibly-already-applied side effect.
+
+    Time-bounded authority and use-time currency are re-validated here
+    (use phase) before the boundary advances. Expired authority or a
+    stale/changed fact hard-blocks and never marks ``maybe_crossed``.
     """
+    from mycelium.use_time_currency import enforce_use_boundary
+
+    active = _active_transition_var.get()
+    enforce_use_boundary(kwargs=active.call_kwargs if active is not None else {})
+    _advance_active_boundary(SideEffectBoundary.MAYBE_CROSSED)
+
+
+async def mark_maybe_crossed_async() -> None:
+    """Asynchronously validate and mark the active transition as ``maybe_crossed``."""
+    from mycelium.use_time_currency import enforce_use_boundary_async
+
+    active = _active_transition_var.get()
+    await enforce_use_boundary_async(
+        kwargs=active.call_kwargs if active is not None else {}
+    )
     _advance_active_boundary(SideEffectBoundary.MAYBE_CROSSED)
 
 
@@ -498,8 +518,20 @@ def side_effect() -> Iterator[None]:
         def send_payment(amount, recipient):
             with side_effect():
                 return gateway.charge(amount, recipient)
+
+    Use-time authority expiry is enforced inside :func:`mark_maybe_crossed`
+    immediately before the boundary advances — after leases, queues, and
+    backoff, and before any provider call.
     """
     mark_maybe_crossed()
+    yield
+    mark_crossed()
+
+
+@asynccontextmanager
+async def side_effect_async() -> AsyncIterator[None]:
+    """Wrap an async tool's external operation with async final validation."""
+    await mark_maybe_crossed_async()
     yield
     mark_crossed()
 
@@ -3291,6 +3323,10 @@ def _args_drift_exclude_keys(
 
 
 def _evidence_value(value: Any) -> Any:
+    from mycelium.destructive_confirm import (
+        get_active_destructive_policy,
+        sanitize_destructive_evidence,
+    )
     from mycelium.entity_guard import get_active_entity_policy, sanitize_entity_evidence
     from mycelium.secret_protection import get_active_secret_policy, sanitize_for_evidence
 
@@ -3302,11 +3338,19 @@ def _evidence_value(value: Any) -> Any:
         if isinstance(result, dict):
             _args, scrubbed = sanitize_entity_evidence((), result)
             del _args
-            return scrubbed
+            result = scrubbed
+    if get_active_destructive_policy() is not None and isinstance(result, dict):
+        _args, scrubbed = sanitize_destructive_evidence((), result)
+        del _args
+        return scrubbed
     return result
 
 
 def _evidence_args(args: Any, kwargs: Any) -> tuple[list[Any], dict[str, Any]]:
+    from mycelium.destructive_confirm import (
+        get_active_destructive_policy,
+        sanitize_destructive_evidence,
+    )
     from mycelium.entity_guard import get_active_entity_policy, sanitize_entity_evidence
     from mycelium.secret_protection import get_active_secret_policy, sanitize_secrets
 
@@ -3322,6 +3366,8 @@ def _evidence_args(args: Any, kwargs: Any) -> tuple[list[Any], dict[str, Any]]:
         out_args, out_kwargs = list(safe["args"]), dict(safe["kwargs"])
     if get_active_entity_policy() is not None:
         out_args, out_kwargs = sanitize_entity_evidence(out_args, out_kwargs)
+    if get_active_destructive_policy() is not None:
+        out_args, out_kwargs = sanitize_destructive_evidence(out_args, out_kwargs)
     return out_args, out_kwargs
 
 
@@ -3361,11 +3407,33 @@ def _args_drift_fingerprint(
     from mycelium.entity_guard import destination_fingerprint, get_active_entity_decision
 
     dests = destination_fingerprint(get_active_entity_decision())
-    if not dests:
+    from mycelium.destructive_confirm import (
+        destructive_fingerprint,
+        get_active_destructive_decision,
+        get_active_destructive_policy,
+        sanitize_destructive_evidence,
+    )
+
+    if get_active_destructive_policy() is not None:
+        scrubbed_args, scrubbed_kwargs = sanitize_destructive_evidence(args, filtered)
+        digest = (
+            fingerprint_args(tuple(scrubbed_args), scrubbed_kwargs)
+            if policy is not None and policy.enabled
+            else args_fingerprint(tuple(scrubbed_args), scrubbed_kwargs)
+        )
+    destructive = destructive_fingerprint(get_active_destructive_decision())
+    from mycelium.use_time_currency import (
+        get_pending_use_time_facts,
+        use_time_fingerprint,
+    )
+
+    currency = use_time_fingerprint(get_pending_use_time_facts())
+    extra = tuple(dests) + tuple(destructive) + tuple(currency)
+    if not extra:
         return digest
     import hashlib
 
-    return hashlib.sha256(f"{digest}|{'|'.join(dests)}".encode()).hexdigest()
+    return hashlib.sha256(f"{digest}|{'|'.join(extra)}".encode()).hexdigest()
 
 
 def _args_drift_scope_key(kwargs: dict[str, Any]) -> str | None:
@@ -3389,6 +3457,39 @@ def _args_drift_scopes_match(
     if incoming is None or stored is None:
         return False
     return incoming == stored
+
+
+def _canonical_call_mapping(
+    func: Callable[..., Any], args: tuple[Any, ...], kwargs: Mapping[str, Any]
+) -> dict[str, Any]:
+    mapping = dict(kwargs)
+    try:
+        bound = inspect.signature(func).bind_partial(*args, **kwargs)
+        bound.apply_defaults()
+        mapping.update(bound.arguments)
+    except (TypeError, ValueError):
+        pass
+    return mapping
+
+
+def _use_boundary_call_mapping(
+    func: Callable[..., Any],
+    args: tuple[Any, ...],
+    clean_kwargs: Mapping[str, Any],
+    dispatch_kwargs: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Canonical tool args for use-boundary validation.
+
+    Authorize-time ``request_id`` is retained for call comparisons / validators.
+    Configured request bindings at USE compare against the current trusted
+    ``dispatch_scope`` (see use_time_currency._current_context_ids), not this
+    frozen authorize-time copy.
+    """
+    mapping = _canonical_call_mapping(func, args, clean_kwargs)
+    request_id = dispatch_kwargs.get("request_id")
+    if isinstance(request_id, str) and request_id.strip():
+        mapping["request_id"] = request_id
+    return mapping
 
 
 def _claim_kwargs(kwargs: dict[str, Any], clean_kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -3645,21 +3746,119 @@ def _run_ledgered(
         authorized_reexec=authorized_reexec,
         owner=owner,
     )
-    ledger._emit_outcome(
-        request_id=request_id,
-        tool=tool_name,
-        event="body_start",
-        terminal_outcome=TerminalOutcome.IN_FLIGHT,
-        side_effect_class=side_effect_class,
-        tool_body_executed=True,
-        authorized_reexec=authorized_reexec,
-        owner=owner,
-    )
 
+    call_mapping = _use_boundary_call_mapping(func, args, clean_kwargs, kwargs)
     token = _active_transition_var.set(
-        _ActiveTransition(ledger, request_id, transition_binding)
+        _ActiveTransition(
+            ledger,
+            request_id,
+            transition_binding,
+            call_mapping,
+        )
     )
     try:
+        from mycelium.authority_window import AuthorityExpiredError
+        from mycelium.use_time_currency import (
+            UseTimeCurrencyError,
+            enforce_use_boundary,
+        )
+
+        # Use-phase authority + currency after claim/lease wait, before body_start.
+        try:
+            auth_decision, currency_decision = enforce_use_boundary(kwargs=call_mapping)
+        except (AuthorityExpiredError, UseTimeCurrencyError) as blocked:
+            event = (
+                "use_time_currency"
+                if isinstance(blocked, UseTimeCurrencyError)
+                else "authority_window"
+            )
+            try:
+                ledger._emit_outcome(
+                    request_id=request_id,
+                    tool=tool_name,
+                    event=event,
+                    gate="DENY",
+                    terminal_outcome=TerminalOutcome.FAILED_BEFORE_EFFECT,
+                    side_effect_class=side_effect_class,
+                    tool_body_executed=False,
+                    authorized_reexec=authorized_reexec,
+                    owner=owner,
+                    error_class=type(blocked).__name__,
+                    policy_version=(
+                        transition_binding.policy_version
+                        if transition_binding is not None
+                        else None
+                    ),
+                )
+            except Exception:
+                _logger.exception(
+                    "could not emit %s denial for %s",
+                    event,
+                    request_id,
+                )
+            raise
+
+        if getattr(auth_decision, "decision", "skipped") != "skipped":
+            try:
+                ledger._emit_outcome(
+                    request_id=request_id,
+                    tool=tool_name,
+                    event="authority_window",
+                    gate="ALLOW",
+                    terminal_outcome=TerminalOutcome.IN_FLIGHT,
+                    side_effect_class=side_effect_class,
+                    tool_body_executed=False,
+                    authorized_reexec=authorized_reexec,
+                    owner=owner,
+                    policy_version=getattr(auth_decision, "policy_version", None)
+                    or (
+                        transition_binding.policy_version
+                        if transition_binding is not None
+                        else None
+                    ),
+                )
+            except Exception:
+                _logger.exception(
+                    "could not emit authority_window allow for %s",
+                    request_id,
+                )
+
+        if currency_decision.decision != "skipped":
+            try:
+                ledger._emit_outcome(
+                    request_id=request_id,
+                    tool=tool_name,
+                    event="use_time_currency",
+                    gate="ALLOW",
+                    terminal_outcome=TerminalOutcome.IN_FLIGHT,
+                    side_effect_class=side_effect_class,
+                    tool_body_executed=False,
+                    authorized_reexec=authorized_reexec,
+                    owner=owner,
+                    policy_version=currency_decision.policy_version
+                    or (
+                        transition_binding.policy_version
+                        if transition_binding is not None
+                        else None
+                    ),
+                )
+            except Exception:
+                _logger.exception(
+                    "could not emit use_time_currency allow for %s",
+                    request_id,
+                )
+
+        ledger._emit_outcome(
+            request_id=request_id,
+            tool=tool_name,
+            event="body_start",
+            terminal_outcome=TerminalOutcome.IN_FLIGHT,
+            side_effect_class=side_effect_class,
+            tool_body_executed=True,
+            authorized_reexec=authorized_reexec,
+            owner=owner,
+        )
+
         from mycelium.secret_protection import (
             get_active_secret_policy,
             resolve_declared_secret_fields,
@@ -3672,6 +3871,18 @@ def _run_ledgered(
         )
         with _lease_auto_renew(ledger, request_id):
             result = func(*exec_args, **exec_kwargs)
+    except (AuthorityExpiredError, UseTimeCurrencyError) as blocked:
+        try:
+            _record_failure(ledger, request_id, blocked, _expected_owner=owner)
+            _emit_tool_receipt(audit_emitter, ledger, request_id)
+        except LedgerOutcomeAlreadySetError:
+            pass
+        except Exception:
+            _logger.exception(
+                "could not record use-boundary denial for %s",
+                request_id,
+            )
+        raise
     except Exception as exc:
         from mycelium.secret_protection import (
             get_active_secret_policy,
@@ -3845,21 +4056,120 @@ async def _run_ledgered_async(
         authorized_reexec=authorized_reexec,
         owner=owner,
     )
-    ledger._emit_outcome(
-        request_id=request_id,
-        tool=tool_name,
-        event="body_start",
-        terminal_outcome=TerminalOutcome.IN_FLIGHT,
-        side_effect_class=side_effect_class,
-        tool_body_executed=True,
-        authorized_reexec=authorized_reexec,
-        owner=owner,
-    )
 
+    call_mapping = _use_boundary_call_mapping(func, args, clean_kwargs, kwargs)
     token = _active_transition_var.set(
-        _ActiveTransition(ledger, request_id, transition_binding)
+        _ActiveTransition(
+            ledger,
+            request_id,
+            transition_binding,
+            call_mapping,
+        )
     )
     try:
+        from mycelium.authority_window import AuthorityExpiredError
+        from mycelium.use_time_currency import (
+            UseTimeCurrencyError,
+            enforce_use_boundary_async,
+        )
+
+        try:
+            auth_decision, currency_decision = await enforce_use_boundary_async(
+                kwargs=call_mapping
+            )
+        except (AuthorityExpiredError, UseTimeCurrencyError) as blocked:
+            event = (
+                "use_time_currency"
+                if isinstance(blocked, UseTimeCurrencyError)
+                else "authority_window"
+            )
+            try:
+                ledger._emit_outcome(
+                    request_id=request_id,
+                    tool=tool_name,
+                    event=event,
+                    gate="DENY",
+                    terminal_outcome=TerminalOutcome.FAILED_BEFORE_EFFECT,
+                    side_effect_class=side_effect_class,
+                    tool_body_executed=False,
+                    authorized_reexec=authorized_reexec,
+                    owner=owner,
+                    error_class=type(blocked).__name__,
+                    policy_version=(
+                        transition_binding.policy_version
+                        if transition_binding is not None
+                        else None
+                    ),
+                )
+            except Exception:
+                _logger.exception(
+                    "could not emit %s denial for %s",
+                    event,
+                    request_id,
+                )
+            raise
+
+        if getattr(auth_decision, "decision", "skipped") != "skipped":
+            try:
+                ledger._emit_outcome(
+                    request_id=request_id,
+                    tool=tool_name,
+                    event="authority_window",
+                    gate="ALLOW",
+                    terminal_outcome=TerminalOutcome.IN_FLIGHT,
+                    side_effect_class=side_effect_class,
+                    tool_body_executed=False,
+                    authorized_reexec=authorized_reexec,
+                    owner=owner,
+                    policy_version=getattr(auth_decision, "policy_version", None)
+                    or (
+                        transition_binding.policy_version
+                        if transition_binding is not None
+                        else None
+                    ),
+                )
+            except Exception:
+                _logger.exception(
+                    "could not emit authority_window allow for %s",
+                    request_id,
+                )
+
+        if currency_decision.decision != "skipped":
+            try:
+                ledger._emit_outcome(
+                    request_id=request_id,
+                    tool=tool_name,
+                    event="use_time_currency",
+                    gate="ALLOW",
+                    terminal_outcome=TerminalOutcome.IN_FLIGHT,
+                    side_effect_class=side_effect_class,
+                    tool_body_executed=False,
+                    authorized_reexec=authorized_reexec,
+                    owner=owner,
+                    policy_version=currency_decision.policy_version
+                    or (
+                        transition_binding.policy_version
+                        if transition_binding is not None
+                        else None
+                    ),
+                )
+            except Exception:
+                _logger.exception(
+                    "could not emit use_time_currency allow for %s",
+                    request_id,
+                )
+
+        ledger._emit_outcome(
+            request_id=request_id,
+            tool=tool_name,
+            event="body_start",
+            terminal_outcome=TerminalOutcome.IN_FLIGHT,
+            side_effect_class=side_effect_class,
+            tool_body_executed=True,
+            authorized_reexec=authorized_reexec,
+            owner=owner,
+        )
+
         from mycelium.secret_protection import (
             get_active_secret_policy,
             resolve_declared_secret_fields,
@@ -3872,6 +4182,18 @@ async def _run_ledgered_async(
         )
         with _lease_auto_renew(ledger, request_id):
             result = await func(*exec_args, **exec_kwargs)
+    except (AuthorityExpiredError, UseTimeCurrencyError) as blocked:
+        try:
+            _record_failure(ledger, request_id, blocked, _expected_owner=owner)
+            _emit_tool_receipt(audit_emitter, ledger, request_id)
+        except LedgerOutcomeAlreadySetError:
+            pass
+        except Exception:
+            _logger.exception(
+                "could not record use-boundary denial for %s",
+                request_id,
+            )
+        raise
     except Exception as exc:
         from mycelium.secret_protection import (
             get_active_secret_policy,
@@ -4147,7 +4469,9 @@ __all__ = [
     "ledger_sync",
     "mark_crossed",
     "mark_maybe_crossed",
+    "mark_maybe_crossed_async",
     "record_external_operation",
     "renew_lease",
     "side_effect",
+    "side_effect_async",
 ]

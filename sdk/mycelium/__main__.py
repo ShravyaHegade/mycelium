@@ -1127,7 +1127,8 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "Scenario to run (repeatable): redispatch, contention, "
             "worker-crash, storage-outage, ambiguous-effect, reconcile, "
-            "secret-in-args, entity-guard, or all"
+            "secret-in-args, entity-guard, destructive-confirm, "
+            "authority-window, use-time-currency, or all"
         ),
     )
     verify_parser.add_argument(

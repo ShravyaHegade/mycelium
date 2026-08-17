@@ -12,7 +12,15 @@ from langchain_core.messages import AIMessage
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, ToolRuntime
 
-from mycelium import ConfigError, get_ledger, load_config_from_string
+from mycelium import (
+    ConfigError,
+    ValidatorResult,
+    get_ledger,
+    load_config_from_string,
+    register_use_time_validator,
+    use_time_facts,
+)
+from mycelium.use_time_currency import reset_use_time_currency_state
 
 
 def _config(*, integration: str = "{enabled: true}"):
@@ -110,6 +118,60 @@ def test_apply_exposes_hidden_tool_runtime_to_langgraph() -> None:
     injected = node._injected_args["send_payment"]
     assert injected.runtime == "runtime"
     assert "runtime" in injected.all_injected_keys
+
+
+def test_use_time_only_tool_receives_langgraph_context_bindings() -> None:
+    reset_use_time_currency_state()
+    config = load_config_from_string(
+        """
+integrations:
+  langgraph: {enabled: true}
+use_time_currency:
+  policy_version: "1"
+  tools:
+    send_payment:
+      facts:
+        - name: payment.current
+          subject: {type: payment, id_from: amount}
+          validator: payment_state
+          bind_request_id: true
+          bind_run_id: true
+          bind_thread_id: true
+tools:
+  send_payment: {}
+"""
+    )
+    calls: list[float] = []
+
+    def payment_state(**_kwargs: Any) -> ValidatorResult:
+        return ValidatorResult(current=True)
+
+    register_use_time_validator("payment_state", payment_state)
+    use_time_facts.capture(
+        name="payment.current",
+        subject_type="payment",
+        subject_id="10.0",
+        request_id="call_1",
+        run_id="run_1",
+        thread_id="thread_1",
+        policy_version="1",
+    )
+
+    @config.apply
+    def send_payment(amount: float) -> dict[str, float]:
+        """Send one payment."""
+        calls.append(amount)
+        return {"amount": amount}
+
+    assert inspect.signature(send_payment).parameters["runtime"].annotation is ToolRuntime
+    graph = _graph_for(send_payment)
+    result = graph.invoke(
+        {"messages": [_tool_message()]},
+        {"configurable": {"thread_id": "thread_1"}, "run_id": "run_1"},
+    )
+    assert calls == [10.0]
+    assert result["messages"][-1].content == '{"amount": 10.0}'
+    reset_use_time_currency_state()
 
 
 def test_langgraph_redispatch_uses_same_transition_without_manual_ids() -> None:

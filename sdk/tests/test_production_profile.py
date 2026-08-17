@@ -457,6 +457,42 @@ tools:
     assert cfg.entity_guard_applies("send_email") is True
 
 
+def test_production_accepts_destructive_confirm_error_policy() -> None:
+    cfg = load_config_from_string(
+        """
+profile: production
+action_ledger:
+  storage: sqlite
+  path: ./ledger.db
+  tools: [refund_payment]
+outcome_emit:
+  storage: file
+  path: ./outcomes.jsonl
+destructive_confirm:
+  enabled: true
+  missing_policy: error
+  storage: file
+  path: ./grants.json
+  tools:
+    refund_payment:
+      operation: refund
+      object:
+        type: payment
+        id_from: payment_id
+      grant:
+        bind_request_id: true
+        max_uses: 1
+        ttl_seconds: 300
+tools:
+  refund_payment:
+    side_effect_class: irreversible
+"""
+    )
+    assert cfg.destructive_confirm is not None
+    assert cfg.destructive_confirm["missing_policy"] == "error"
+    assert cfg.destructive_confirm_applies("refund_payment") is True
+
+
 def test_existing_configs_without_profile_still_load() -> None:
     cfg = load_config_from_string(
         """

@@ -19,6 +19,9 @@ SCENARIO_ORDER = (
     "reconcile",
     "secret-in-args",
     "entity-guard",
+    "destructive-confirm",
+    "authority-window",
+    "use-time-currency",
 )
 
 ScenarioFn = Callable[["ScenarioContext"], "VerificationEvidence"]
@@ -76,12 +79,15 @@ def resolve_scenario_names(selected: list[str]) -> list[str]:
 def ensure_builtin_scenarios_registered() -> None:
     from mycelium.verify.scenarios import (  # noqa: F401
         ambiguous_effect,
+        authority_window,
         contention,
+        destructive_confirm,
         entity_guard,
         reconcile,
         redispatch,
         secret_in_args,
         storage_outage,
+        use_time_currency,
         worker_crash,
     )
 
