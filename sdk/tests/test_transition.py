@@ -57,7 +57,8 @@ def test_tool_call_id_is_in_preimage_when_present() -> None:
         policy_version="2026.07.1",
     )
     assert preimage["dispatch_id"] == "call_abc"
-    assert preimage["schema"] == "mycelium.transition/v1"
+    assert preimage["schema"] == "mycelium.transition/v2"
+    assert preimage["destination"] == []
 
 
 def test_same_inputs_produce_same_transition_key() -> None:
