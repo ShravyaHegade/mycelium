@@ -177,6 +177,7 @@ or `'mycelium-runtime[postgres]'`. See the
 - **Full API reference:** [sdk/README.md](sdk/README.md)
 - **Doctor vs Verify:** `mycelium doctor` inspects configuration; `mycelium verify` runs synthetic failure scenarios. Neither proves a real provider is correct.
 - **Release policy & checklist:** [sdk/docs/RELEASE.md](sdk/docs/RELEASE.md) (batch; calm over velocity)
+- **Security policy & private reporting:** [SECURITY.md](SECURITY.md)
 - **PyPI:** https://pypi.org/project/mycelium-runtime/
 
 ## Release process
