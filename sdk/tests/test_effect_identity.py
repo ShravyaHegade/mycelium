@@ -74,6 +74,14 @@ def _email_policy() -> EntityGuardPolicy:
     )
 
 
+def test_effect_id_aliases_exported_from_package_root() -> None:
+    from mycelium import derive_effect_id as root_effect_id
+    from mycelium import derive_effect_id_for_call as root_effect_id_for_call
+
+    assert root_effect_id is derive_effect_id
+    assert root_effect_id_for_call is derive_effect_id_for_call
+
+
 def test_v2_preimage_includes_empty_destination_by_default() -> None:
     preimage = build_transition_preimage(
         scope=TransitionScope(thread_id="t1", run_id="r1", node="pay"),
