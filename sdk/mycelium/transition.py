@@ -12,7 +12,8 @@ from typing import Any
 
 from mycelium._compat import StrEnum
 
-TRANSITION_SCHEMA = "mycelium.transition/v1"
+TRANSITION_SCHEMA = "mycelium.transition/v2"
+EFFECT_SCHEMA = TRANSITION_SCHEMA
 
 SCOPE_FIELDS = ("thread_id", "run_id", "node")
 
@@ -776,8 +777,16 @@ def build_transition_preimage(
     side_effect_class: SideEffectClass,
     agent_id: str,
     policy_version: str,
+    destination: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
-    """Build the versioned preimage hashed into a transition key."""
+    """Build the versioned preimage hashed into a transition / effect key."""
+    if destination is None:
+        from mycelium.entity_guard import (
+            destination_fingerprint,
+            get_active_entity_decision,
+        )
+
+        destination = destination_fingerprint(get_active_entity_decision())
     preimage: dict[str, Any] = {
         "schema": TRANSITION_SCHEMA,
         "scope": {
@@ -787,6 +796,7 @@ def build_transition_preimage(
         },
         "tool": tool,
         "args_fingerprint": args_fingerprint(args, kwargs),
+        "destination": list(destination),
         "side_effect_class": side_effect_class.value,
         "agent_id": agent_id,
         "policy_version": policy_version,
@@ -799,6 +809,11 @@ def build_transition_preimage(
 def derive_transition_key(preimage: dict[str, Any]) -> str:
     """Hash a transition preimage into a durable transition key."""
     return hashlib.sha256(canonical_json(preimage).encode()).hexdigest()
+
+
+def derive_effect_id(preimage: dict[str, Any]) -> str:
+    """Hash an effect preimage into a stable effect identity (transition key)."""
+    return derive_transition_key(preimage)
 
 
 def extract_provider_idempotency_key(
@@ -852,6 +867,16 @@ def derive_transition_key_for_call(
     return derive_transition_key(preimage)
 
 
+def derive_effect_id_for_call(
+    tool: str,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    binding: ToolTransitionBinding,
+) -> str:
+    """Derive the stable effect identity for a tool invocation."""
+    return derive_transition_key_for_call(tool, args, kwargs, binding)
+
+
 __all__ = [
     "CONSEQUENTIAL_SIDE_EFFECT_CLASSES",
     "LEDGER_KWARG_KEYS",
@@ -861,6 +886,7 @@ __all__ = [
     "REQUEST_IDENTITY_POLICY_REQUIRE_EXPLICIT",
     "SCOPE_FIELDS",
     "SIDE_EFFECT_CLASS_ALIASES",
+    "EFFECT_SCHEMA",
     "TRANSITION_SCHEMA",
     "SideEffectClass",
     "SideEffectBoundary",
@@ -883,6 +909,8 @@ __all__ = [
     "derive_dispatch_id",
     "parse_explicit_request_id",
     "request_id_from_argument",
+    "derive_effect_id",
+    "derive_effect_id_for_call",
     "derive_transition_key",
     "derive_transition_key_for_call",
     "dispatch_scope",
