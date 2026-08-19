@@ -992,6 +992,143 @@ def test_resumed_stale_worker_cannot_cross_provider_boundary(
     assert storage.get(request_id).side_effect_boundary == (SideEffectBoundary.NOT_CROSSED.value)
 
 
+def test_auto_renew_does_not_adopt_successor_fence() -> None:
+    from dataclasses import replace
+
+    from mycelium.action_ledger import _lease_auto_renew
+
+    storage = InMemoryLedgerStorage()
+    ledger = ActionLedger(
+        storage=storage,
+        lease_ttl=0.03,
+        lease_renew_interval=0.01,
+    )
+    worker_a = replace(
+        _make_entry("fence-auto-renew", owner="worker-A"),
+        fence=1,
+        lease_until=time.time() + 10,
+    )
+    storage.set(worker_a)
+    successor = replace(
+        worker_a,
+        owner="worker-B",
+        fence=2,
+        lease_until=time.time() + 20,
+        last_heartbeat_at=123.0,
+    )
+
+    with _lease_auto_renew(
+        ledger,
+        worker_a.request_id,
+        owner=worker_a.owner,
+        fence=worker_a.fence,
+    ):
+        storage.set(successor)
+        time.sleep(0.05)
+
+    assert storage.get(worker_a.request_id) == successor
+
+
+def test_poll_timeout_cannot_mark_successor_unknown() -> None:
+    from dataclasses import replace
+
+    storage = InMemoryLedgerStorage()
+
+    class TakeoverBeforeUnknownLedger(ActionLedger):
+        def mark_unknown(self, request_id: str, **kwargs: Any) -> LedgerEntry:
+            current = storage.get(request_id)
+            assert current is not None
+            storage.set(
+                replace(
+                    current,
+                    owner="worker-B",
+                    fence=current.fence + 1,
+                    lease_until=time.time() + 30,
+                )
+            )
+            return super().mark_unknown(request_id, **kwargs)
+
+    ledger = TakeoverBeforeUnknownLedger(storage=storage)
+    observed = replace(
+        _make_entry("fence-poll-timeout", owner="worker-A"),
+        fence=1,
+        lease_until=time.time() + 30,
+    )
+    storage.set(observed)
+
+    with pytest.raises(LedgerOutcomeAlreadySetError):
+        ledger._poll_side_effecting(
+            observed.request_id,
+            tool=observed.tool,
+            interval=0.01,
+            poll_deadline=time.time() - 1,
+        )
+
+    successor = storage.get(observed.request_id)
+    assert successor is not None
+    assert successor.owner == "worker-B"
+    assert successor.fence == 2
+    assert successor.terminal_outcome == TerminalOutcome.IN_FLIGHT.value
+
+
+def test_delayed_reconcile_cannot_complete_successor() -> None:
+    from dataclasses import replace
+
+    started = threading.Event()
+    finish = threading.Event()
+
+    class DelayedCompletedReconciler:
+        def reconcile(self, entry: LedgerEntry) -> ReconcileResult:
+            started.set()
+            assert finish.wait(timeout=2)
+            return ReconcileResult.completed({"provider": "worker-A"})
+
+    storage = InMemoryLedgerStorage()
+    ledger = ActionLedger(storage=storage, reconciler=DelayedCompletedReconciler())
+    observed = replace(
+        _make_entry(
+            "fence-delayed-reconcile",
+            terminal_outcome=TerminalOutcome.BLOCKED.value,
+            owner="worker-A",
+        ),
+        fence=1,
+        external_operation_ref="provider-A",
+    )
+    storage.set(observed)
+    results: list[LedgerEntry | None] = []
+
+    def reconcile() -> None:
+        results.append(
+            ledger._attempt_reconcile(
+                observed.request_id,
+                observed.tool,
+                (),
+                {},
+                observed,
+                _BINDING,
+            )
+        )
+
+    thread = threading.Thread(target=reconcile, daemon=True)
+    thread.start()
+    assert started.wait(timeout=2)
+    successor = replace(
+        observed,
+        status="in-flight",
+        terminal_outcome=TerminalOutcome.IN_FLIGHT.value,
+        owner="worker-B",
+        fence=2,
+        lease_until=time.time() + 30,
+        external_operation_ref=None,
+    )
+    storage.set(successor)
+    finish.set()
+    thread.join(timeout=2)
+
+    assert results == [successor]
+    assert storage.get(observed.request_id) == successor
+
+
 def test_matching_fence_allows_single_worker_flow(ledger: ActionLedger) -> None:
     """The uncontended single-worker path completes normally under fencing."""
     request_id = "fence-happy"

@@ -480,7 +480,13 @@ def _resolve_lease_renew_interval(
 
 
 @contextmanager
-def _lease_auto_renew(ledger: ActionLedger, request_id: str) -> Iterator[None]:
+def _lease_auto_renew(
+    ledger: ActionLedger,
+    request_id: str,
+    *,
+    owner: str | None,
+    fence: int,
+) -> Iterator[None]:
     """Background owner heartbeat while a ledgered tool body executes.
 
     Keeps ``lease_until`` ahead of wall clock so redispatched peers stay on
@@ -499,7 +505,12 @@ def _lease_auto_renew(ledger: ActionLedger, request_id: str) -> Iterator[None]:
     def _loop() -> None:
         while not stop.wait(interval):
             try:
-                ledger.renew_lease(request_id, lease_ttl=ledger._lease_ttl)
+                ledger.renew_lease(
+                    request_id,
+                    lease_ttl=ledger._lease_ttl,
+                    _expected_owner=owner,
+                    _expected_fence=fence,
+                )
             except LedgerError as exc:
                 _logger.warning(
                     "lease auto-renew stopped for %s: %s",
@@ -2001,6 +2012,7 @@ class ActionLedger:
         kwargs: dict[str, Any],
         binding: ToolTransitionBinding,
         result: Any,
+        observed_entry: LedgerEntry,
         _preserved_pkey_first_attempt: float | None = None,
         _cas_race_returns_none: bool = False,
     ) -> LedgerEntry | None:
@@ -2017,16 +2029,23 @@ class ActionLedger:
         polls instead of hard-blocking.
         """
         if result.status == ReconcileStatus.COMPLETED:
-            return self.complete(
-                request_id,
-                result.result,
-                _expected_from=_RESOLUTION_ACCEPTED_STORED_OUTCOMES,
-            )
+            try:
+                return self.complete(
+                    request_id,
+                    result.result,
+                    _expected_from=_RESOLUTION_ACCEPTED_STORED_OUTCOMES,
+                    _expected_owner=observed_entry.owner,
+                    _expected_fence=observed_entry.fence,
+                )
+            except LedgerOutcomeAlreadySetError:
+                if _cas_race_returns_none:
+                    return None
+                _reconcile_cas_lost.val = True
+                return self.get(request_id)
         if result.status == ReconcileStatus.NOT_EXECUTED:
             if _preserved_pkey_first_attempt is None:
-                old = self.get(request_id)
-                if old is not None and old.provider_idempotency_key is not None:
-                    _preserved_pkey_first_attempt = old.provider_key_first_attempt_at
+                if observed_entry.provider_idempotency_key is not None:
+                    _preserved_pkey_first_attempt = observed_entry.provider_key_first_attempt_at
             fresh = self._new_inflight_entry(
                 request_id,
                 tool,
@@ -2035,38 +2054,34 @@ class ActionLedger:
                 binding=binding,
                 _provider_key_first_attempt_at=_preserved_pkey_first_attempt,
             )
+            now = time.time()
+            fresh = replace(
+                fresh,
+                fence=observed_entry.fence + 1,
+                lease_until=(now + self._lease_ttl if self._lease_ttl > 0 else None),
+                last_heartbeat_at=now,
+            )
             # EXPIRED entries have stored terminal ``IN_FLIGHT`` (lease is
             # resolved at read time).  Advance past ``IN_FLIGHT`` first so the
             # CAS below cannot race on ``IN_FLIGHT → IN_FLIGHT``.
-            now = time.time()
-            stale = self.get(request_id)
-            _stale_owner: str | None = stale.owner if stale is not None else None
-            _stale_fence: int | None = stale.fence if stale is not None else None
-            if stale is not None and stale.resolved_terminal_outcome(now=now) in (
-                TerminalOutcome.EXPIRED,
-            ):
+            expected_from = _RECONCILE_NOT_EXECUTED_OUTCOMES
+            if observed_entry.resolved_terminal_outcome(now=now) in (TerminalOutcome.EXPIRED,):
                 try:
                     self.mark_blocked(
                         request_id,
                         error="reconciling expired entry as NOT_EXECUTED",
                         _expected_from=_IN_FLIGHT_OUTCOMES,
-                        _expected_owner=_stale_owner,
-                        _expected_fence=_stale_fence,
+                        _expected_owner=observed_entry.owner,
+                        _expected_fence=observed_entry.fence,
                     )
                 except LedgerOutcomeAlreadySetError:
                     pass
-                after_block = self.get(request_id)
-                if (
-                    after_block is not None
-                    and after_block.terminal_outcome != TerminalOutcome.BLOCKED.value
-                ):
-                    if _cas_race_returns_none:
-                        return None
-                    _reconcile_cas_lost.val = True
-                    return after_block
+                expected_from = frozenset({TerminalOutcome.BLOCKED.value})
             if not self._try_transition(
                 fresh,
-                expected_from=_RECONCILE_NOT_EXECUTED_OUTCOMES,
+                expected_from=expected_from,
+                expected_owner=observed_entry.owner,
+                expected_fence=observed_entry.fence,
             ):
                 if _cas_race_returns_none:
                     return None
@@ -2179,7 +2194,15 @@ class ActionLedger:
             result = self._reconciler.reconcile(existing)
         except Exception:
             return None
-        return self._apply_reconcile_result(request_id, tool, args, kwargs, binding, result)
+        return self._apply_reconcile_result(
+            request_id,
+            tool,
+            args,
+            kwargs,
+            binding,
+            result,
+            existing,
+        )
 
     async def _attempt_reconcile_async(
         self,
@@ -2205,7 +2228,15 @@ class ActionLedger:
                 result = self._reconciler.reconcile(existing)
         except Exception:
             return None
-        return self._apply_reconcile_result(request_id, tool, args, kwargs, binding, result)
+        return self._apply_reconcile_result(
+            request_id,
+            tool,
+            args,
+            kwargs,
+            binding,
+            result,
+            existing,
+        )
 
     def _consume_operator_resolution(
         self,
@@ -2240,6 +2271,7 @@ class ActionLedger:
             kwargs,
             binding,
             ReconcileResult.not_executed(),
+            existing,
             _preserved_pkey_first_attempt=_preserved,
             _cas_race_returns_none=True,
         )
@@ -2602,6 +2634,8 @@ class ActionLedger:
                         request_id,
                         error="timed out polling in-flight side-effecting transition",
                         _expected_from=_IN_FLIGHT_OUTCOMES,
+                        _expected_owner=current.owner,
+                        _expected_fence=current.fence,
                     )
                     raise LedgerHardBlockError(
                         hard_block_message(
@@ -2842,6 +2876,8 @@ class ActionLedger:
                         request_id,
                         error="timed out polling in-flight side-effecting transition",
                         _expected_from=_IN_FLIGHT_OUTCOMES,
+                        _expected_owner=current.owner,
+                        _expected_fence=current.fence,
                     )
                     raise LedgerHardBlockError(
                         hard_block_message(
@@ -4207,7 +4243,12 @@ def _run_ledgered(
         exec_args, exec_kwargs = resolve_declared_secret_fields(
             func, args, clean_kwargs, extra_fields=extra
         )
-        with _lease_auto_renew(ledger, request_id):
+        with _lease_auto_renew(
+            ledger,
+            request_id,
+            owner=owner,
+            fence=fence,
+        ):
             result = func(*exec_args, **exec_kwargs)
     except (AuthorityExpiredError, UseTimeCurrencyError) as blocked:
         try:
@@ -4546,7 +4587,12 @@ async def _run_ledgered_async(
         exec_args, exec_kwargs = resolve_declared_secret_fields(
             func, args, clean_kwargs, extra_fields=extra
         )
-        with _lease_auto_renew(ledger, request_id):
+        with _lease_auto_renew(
+            ledger,
+            request_id,
+            owner=owner,
+            fence=fence,
+        ):
             result = await func(*exec_args, **exec_kwargs)
     except (AuthorityExpiredError, UseTimeCurrencyError) as blocked:
         try:
