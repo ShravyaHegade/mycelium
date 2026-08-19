@@ -2962,7 +2962,7 @@ class ActionLedger:
             if expected_fence != _expected_fence:
                 raise LedgerError("conflicting expected fence values")
         fence = expected_fence if expected_fence is not None else _expected_fence
-        if existing.effect_protocol_required and fence is None:
+        if fence is None:
             raise LedgerError(f"Completing request {request_id!r} requires the claim fence")
         entry = replace(
             existing,
@@ -3005,6 +3005,7 @@ class ActionLedger:
         error: BaseException,
         *,
         failed_after_effect: bool = False,
+        expected_fence: int | None = None,
         _expected_from: frozenset[str] | None = None,
         _expected_owner: str | None = None,
         _expected_fence: int | None = None,
@@ -3012,7 +3013,11 @@ class ActionLedger:
         existing = self._get_entry(request_id)
         if existing is None:
             raise LedgerError(f"Cannot fail unknown request {request_id!r}")
-        if existing.effect_protocol_required and _expected_fence is None:
+        if expected_fence is not None and _expected_fence is not None:
+            if expected_fence != _expected_fence:
+                raise LedgerError("conflicting expected fence values")
+        fence = expected_fence if expected_fence is not None else _expected_fence
+        if fence is None:
             raise LedgerError(f"Failing request {request_id!r} requires the claim fence")
         terminal = (
             TerminalOutcome.FAILED_AFTER_EFFECT
@@ -3038,7 +3043,7 @@ class ActionLedger:
             entry,
             expected_from=_expected_from,
             expected_owner=_expected_owner,
-            expected_fence=_expected_fence,
+            expected_fence=fence,
         ):
             current = self._get_entry(request_id)
             raise LedgerOutcomeAlreadySetError(
@@ -3065,15 +3070,14 @@ class ActionLedger:
         existing = self._get_entry(request_id)
         if existing is None:
             raise LedgerError(f"Cannot attach receipt to unknown request {request_id!r}")
-        if existing.effect_protocol_required and expected_fence is None:
+        if expected_fence is None:
             raise LedgerError(f"Attaching a receipt to {request_id!r} requires the claim fence")
         entry = replace(existing, receipt_ref=receipt_ref)
-        fence = existing.fence if expected_fence is None else expected_fence
         if not self._try_transition(
             entry,
             expected_from=frozenset({existing.terminal_outcome}),
             expected_owner=expected_owner,
-            expected_fence=fence,
+            expected_fence=expected_fence,
         ):
             raise LedgerOutcomeAlreadySetError(
                 f"Cannot attach receipt to {request_id!r}: transition superseded"
@@ -3098,17 +3102,16 @@ class ActionLedger:
             raise LedgerError(
                 f"Cannot attach external operation ref to unknown request {request_id!r}"
             )
-        if existing.effect_protocol_required and expected_fence is None:
+        if expected_fence is None:
             raise LedgerError(
                 f"Attaching an external operation to {request_id!r} requires the claim fence"
             )
         entry = replace(existing, external_operation_ref=ref)
-        fence = existing.fence if expected_fence is None else expected_fence
         if not self._try_transition(
             entry,
             expected_from=frozenset({existing.terminal_outcome}),
             expected_owner=expected_owner,
-            expected_fence=fence,
+            expected_fence=expected_fence,
         ):
             raise LedgerOutcomeAlreadySetError(
                 f"Cannot attach external operation ref to {request_id!r}: transition superseded"
@@ -3121,6 +3124,7 @@ class ActionLedger:
         *,
         lease_ttl: float | None = None,
         now: float | None = None,
+        expected_fence: int | None = None,
         _expected_owner: str | None = None,
         _expected_fence: int | None = None,
     ) -> LedgerEntry:
@@ -3143,7 +3147,11 @@ class ActionLedger:
         existing = self._get_entry(request_id)
         if existing is None:
             raise LedgerError(f"Cannot renew lease for unknown request {request_id!r}")
-        if existing.effect_protocol_required and _expected_fence is None:
+        if expected_fence is not None and _expected_fence is not None:
+            if expected_fence != _expected_fence:
+                raise LedgerError("conflicting expected fence values")
+        fence = expected_fence if expected_fence is not None else _expected_fence
+        if fence is None:
             raise LedgerError(f"Renewing request {request_id!r} requires the claim fence")
         now = now if now is not None else time.time()
         stored = (
@@ -3171,7 +3179,7 @@ class ActionLedger:
             expected_from=_IN_FLIGHT_OUTCOMES,
             expected_owner=(existing.owner if _expected_owner is None else _expected_owner),
             require_lease_held_at=now,
-            expected_fence=(existing.fence if _expected_fence is None else _expected_fence),
+            expected_fence=fence,
         ):
             current = self._get_entry(request_id)
             if current is None:
@@ -3241,6 +3249,7 @@ class ActionLedger:
         request_id: str,
         *,
         error: str | None = None,
+        expected_fence: int | None = None,
         _expected_from: frozenset[str] | None = None,
         _expected_owner: str | None = None,
         _expected_fence: int | None = None,
@@ -3248,7 +3257,11 @@ class ActionLedger:
         existing = self._get_entry(request_id)
         if existing is None:
             raise LedgerError(f"Cannot block unknown request {request_id!r}")
-        if existing.effect_protocol_required and _expected_fence is None:
+        if expected_fence is not None and _expected_fence is not None:
+            if expected_fence != _expected_fence:
+                raise LedgerError("conflicting expected fence values")
+        fence = expected_fence if expected_fence is not None else _expected_fence
+        if fence is None:
             raise LedgerError(f"Blocking request {request_id!r} requires the claim fence")
         entry = replace(
             existing,
@@ -3263,7 +3276,7 @@ class ActionLedger:
             entry,
             expected_from=_expected_from,
             expected_owner=_expected_owner,
-            expected_fence=_expected_fence,
+            expected_fence=fence,
         ):
             current = self._get_entry(request_id)
             raise LedgerOutcomeAlreadySetError(
@@ -3278,6 +3291,7 @@ class ActionLedger:
         request_id: str,
         *,
         error: str | None = None,
+        expected_fence: int | None = None,
         _expected_from: frozenset[str] | None = None,
         _expected_owner: str | None = None,
         _expected_fence: int | None = None,
@@ -3285,7 +3299,11 @@ class ActionLedger:
         existing = self._get_entry(request_id)
         if existing is None:
             raise LedgerError(f"Cannot mark unknown request {request_id!r}")
-        if existing.effect_protocol_required and _expected_fence is None:
+        if expected_fence is not None and _expected_fence is not None:
+            if expected_fence != _expected_fence:
+                raise LedgerError("conflicting expected fence values")
+        fence = expected_fence if expected_fence is not None else _expected_fence
+        if fence is None:
             raise LedgerError(f"Marking request {request_id!r} unknown requires the claim fence")
         entry = replace(
             existing,
@@ -3300,7 +3318,7 @@ class ActionLedger:
             entry,
             expected_from=_expected_from,
             expected_owner=_expected_owner,
-            expected_fence=_expected_fence,
+            expected_fence=fence,
         ):
             current = self._get_entry(request_id)
             raise LedgerOutcomeAlreadySetError(
@@ -3472,7 +3490,7 @@ class ActionLedger:
         existing = self._get_entry(request_id)
         if existing is None:
             raise LedgerError(f"Cannot advance boundary for unknown request {request_id!r}")
-        if existing.effect_protocol_required and expected_fence is None:
+        if expected_fence is None:
             raise LedgerError(f"Advancing request {request_id!r} requires the claim fence")
         current = SideEffectBoundary(existing.side_effect_boundary)
         entry = (
@@ -3480,12 +3498,11 @@ class ActionLedger:
             if _BOUNDARY_RANK[boundary] <= _BOUNDARY_RANK[current]
             else replace(existing, side_effect_boundary=boundary.value)
         )
-        fence = existing.fence if expected_fence is None else expected_fence
         if not self._try_transition(
             entry,
             expected_from=frozenset({existing.terminal_outcome}),
             expected_owner=expected_owner,
-            expected_fence=fence,
+            expected_fence=expected_fence,
         ):
             raise LedgerOutcomeAlreadySetError(
                 f"Cannot advance boundary for {request_id!r}: transition superseded"
@@ -3511,7 +3528,7 @@ class ActionLedger:
         existing = self._get_entry(request_id)
         if existing is None:
             raise LedgerError(f"Cannot record decision for unknown request {request_id!r}")
-        if existing.effect_protocol_required and expected_fence is None:
+        if expected_fence is None:
             raise LedgerError(f"Recording a decision for {request_id!r} requires the claim fence")
         entry = replace(existing, decision=decision, effect_phase="ATTEMPTING")
         if not self._try_transition(

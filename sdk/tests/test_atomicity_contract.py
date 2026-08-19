@@ -931,6 +931,42 @@ def test_stale_fence_rejected_even_when_lease_valid(ledger: ActionLedger) -> Non
     assert stored.fence == 2
 
 
+def test_legacy_claim_mutations_require_and_reject_stale_fences(
+    ledger: ActionLedger,
+) -> None:
+    request_id = "legacy-fence-takeover"
+    worker_a = ledger.claim(request_id, "legacy_tool", (), {})
+    ledger.fail(
+        request_id,
+        RuntimeError("worker A stopped"),
+        expected_fence=worker_a.fence,
+    )
+    worker_b = ledger.claim(request_id, "legacy_tool", (), {})
+    assert worker_b.fence == worker_a.fence + 1
+
+    with pytest.raises(LedgerError, match="requires the claim fence"):
+        ledger.complete(request_id, {"worker": "A"})
+    with pytest.raises(LedgerOutcomeAlreadySetError):
+        ledger.complete(
+            request_id,
+            {"worker": "A"},
+            expected_fence=worker_a.fence,
+        )
+    with pytest.raises(LedgerOutcomeAlreadySetError):
+        ledger.fail(
+            request_id,
+            RuntimeError("stale failure"),
+            expected_fence=worker_a.fence,
+        )
+
+    completed = ledger.complete(
+        request_id,
+        {"worker": "B"},
+        expected_fence=worker_b.fence,
+    )
+    assert completed.result == {"worker": "B"}
+
+
 def test_resumed_stale_worker_cannot_commit_after_takeover(
     ledger: ActionLedger,
 ) -> None:
