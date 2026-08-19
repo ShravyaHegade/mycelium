@@ -34,6 +34,7 @@ from mycelium import (
     LedgerHardBlockError,
     LedgerOutcomeAlreadySetError,
     PredicateVerdict,
+    SideEffectBoundary,
     SideEffectClass,
     TerminalOutcome,
     ToolTransitionBinding,
@@ -458,6 +459,55 @@ def test_manual_completion_requires_fenced_attempting_phase(
         expected_fence=claimed.fence,
     )
     assert completed.effect_phase == "COMMITTED"
+
+
+def test_manual_pre_provider_mutations_require_attempting_phase(
+    ledger: ActionLedger,
+) -> None:
+    with _scope():
+        claimed = ledger.claim_side_effecting(
+            "dec-manual-provider",
+            "charge",
+            (),
+            {"request_id": "dec-manual-provider", "thread_id": "t", "run_id": "r"},
+            _BINDING,
+        )
+
+    with pytest.raises(LedgerOutcomeAlreadySetError):
+        ledger.attach_external_operation_ref(
+            claimed.request_id,
+            "pi_too_early",
+            expected_owner=claimed.owner,
+            expected_fence=claimed.fence,
+        )
+    with pytest.raises(LedgerOutcomeAlreadySetError):
+        ledger.advance_boundary(
+            claimed.request_id,
+            SideEffectBoundary.MAYBE_CROSSED,
+            expected_owner=claimed.owner,
+            expected_fence=claimed.fence,
+        )
+
+    ledger.record_decision(
+        claimed.request_id,
+        Decision(allowed=True).to_dict(),
+        expected_owner=claimed.owner,
+        expected_fence=claimed.fence,
+    )
+    attached = ledger.attach_external_operation_ref(
+        claimed.request_id,
+        "pi_after_decision",
+        expected_owner=claimed.owner,
+        expected_fence=claimed.fence,
+    )
+    advanced = ledger.advance_boundary(
+        claimed.request_id,
+        SideEffectBoundary.MAYBE_CROSSED,
+        expected_owner=claimed.owner,
+        expected_fence=claimed.fence,
+    )
+    assert attached.external_operation_ref == "pi_after_decision"
+    assert advanced.side_effect_boundary == SideEffectBoundary.MAYBE_CROSSED.value
 
 
 async def test_decision_recorded_on_async_boundary_advance(

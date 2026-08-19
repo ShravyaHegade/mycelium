@@ -43,12 +43,17 @@ def handle_stripe_event(event: dict) -> int:
         return 409                     # HARD_BLOCK: reconcile / operator release
     if entry.terminal_outcome == TerminalOutcome.COMPLETED.value:
         return 200                     # SKIP: already handled this event id
+    ledger.record_decision(
+        request_id, {"allowed": True, "verdicts": [], "denied_reasons": []},
+        expected_owner=entry.owner, expected_fence=entry.fence,
+    )
     try:
         result = fulfill_order(event)  # the side effect, once
     except Exception as exc:
-        ledger.fail(request_id, exc, failed_after_effect=False)
+        ledger.fail(request_id, exc, failed_after_effect=False,
+                    expected_fence=entry.fence)
         return 500
-    ledger.complete(request_id, result)
+    ledger.complete(request_id, result, expected_fence=entry.fence)
     return 200                         # PROCEED
 ```
 

@@ -83,13 +83,24 @@ def handle_stripe_event(event: dict) -> int:
     if entry.terminal_outcome == TerminalOutcome.COMPLETED.value:
         return 200  # SKIP: this event id was already handled; no side effect.
 
+    ledger.record_decision(
+        request_id,
+        {"allowed": True, "verdicts": [], "denied_reasons": []},
+        expected_owner=entry.owner,
+        expected_fence=entry.fence,
+    )
     try:
         result = fulfill_order(event)
     except Exception as exc:
-        ledger.fail(request_id, exc, failed_after_effect=False)
+        ledger.fail(
+            request_id,
+            exc,
+            failed_after_effect=False,
+            expected_fence=entry.fence,
+        )
         return 500
 
-    ledger.complete(request_id, result)
+    ledger.complete(request_id, result, expected_fence=entry.fence)
     return 200  # PROCEED: the work ran exactly once for this event id.
 
 

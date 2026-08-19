@@ -415,13 +415,22 @@ def send_payment(amount: float, recipient: str, *, tool_call_id: str) -> dict:
         if entry.terminal_outcome == TerminalOutcome.COMPLETED.value:
             return entry.result
 
+        ledger.record_decision(
+            request_id,
+            {"allowed": True, "verdicts": [], "denied_reasons": []},
+            expected_owner=entry.owner,
+            expected_fence=entry.fence,
+        )
         # PROCEED: we hold IN_FLIGHT — run the side effect once, then settle.
         try:
             result = gateway.charge(amount, recipient)
         except Exception as exc:
-            ledger.fail(request_id, exc, failed_after_effect=False)
+            ledger.fail(
+                request_id, exc, failed_after_effect=False,
+                expected_fence=entry.fence,
+            )
             raise
-        ledger.complete(request_id, result)
+        ledger.complete(request_id, result, expected_fence=entry.fence)
         return result
 ```
 
@@ -486,12 +495,21 @@ def handle_event(tool: str, event_id: str, do_work) -> int:
         return 409                          # HARD_BLOCK: reconcile / operator release
     if entry.terminal_outcome == TerminalOutcome.COMPLETED.value:
         return 200                          # SKIP: already handled this event id
+    ledger.record_decision(
+        request_id,
+        {"allowed": True, "verdicts": [], "denied_reasons": []},
+        expected_owner=entry.owner,
+        expected_fence=entry.fence,
+    )
     try:
         result = do_work()                  # the side effect, once
     except Exception as exc:
-        ledger.fail(request_id, exc, failed_after_effect=False)
+        ledger.fail(
+            request_id, exc, failed_after_effect=False,
+            expected_fence=entry.fence,
+        )
         return 500
-    ledger.complete(request_id, result)
+    ledger.complete(request_id, result, expected_fence=entry.fence)
     return 200                              # PROCEED
 ```
 

@@ -2034,6 +2034,11 @@ class ActionLedger:
         polls instead of hard-blocking.
         """
         if result.status == ReconcileStatus.COMPLETED:
+            if observed_entry.effect_protocol_required and (
+                observed_entry.effect_phase != "ATTEMPTING"
+                or observed_entry.decision is None
+            ):
+                return None
             try:
                 return self.complete(
                     request_id,
@@ -2964,6 +2969,12 @@ class ActionLedger:
         fence = expected_fence if expected_fence is not None else _expected_fence
         if fence is None:
             raise LedgerError(f"Completing request {request_id!r} requires the claim fence")
+        if existing.effect_protocol_required and (
+            existing.effect_phase != "ATTEMPTING" or existing.decision is None
+        ):
+            raise LedgerOutcomeAlreadySetError(
+                f"Cannot complete request {request_id!r}: no durable ATTEMPTING decision"
+            )
         entry = replace(
             existing,
             status=legacy_status_from_terminal(TerminalOutcome.COMPLETED),
@@ -2981,7 +2992,7 @@ class ActionLedger:
             expected_fence=fence,
             expected_effect_phase=(
                 "ATTEMPTING"
-                if _expected_from is None and existing.effect_protocol_required
+                if existing.effect_protocol_required
                 else None
             ),
         ):
@@ -3037,7 +3048,14 @@ class ActionLedger:
             finished_at=time.time(),
             lease_until=None,
             side_effect_boundary=boundary,
-            effect_phase="ABORTED",
+            effect_phase=(
+                existing.effect_phase
+                if failed_after_effect
+                and existing.effect_protocol_required
+                and existing.effect_phase == "ATTEMPTING"
+                and existing.decision is not None
+                else "ABORTED"
+            ),
         )
         if not self._try_transition(
             entry,
@@ -3106,12 +3124,22 @@ class ActionLedger:
             raise LedgerError(
                 f"Attaching an external operation to {request_id!r} requires the claim fence"
             )
+        if existing.effect_protocol_required and (
+            existing.effect_phase != "ATTEMPTING" or existing.decision is None
+        ):
+            raise LedgerOutcomeAlreadySetError(
+                f"Cannot attach external operation ref to {request_id!r}: "
+                "no durable ATTEMPTING decision"
+            )
         entry = replace(existing, external_operation_ref=ref)
         if not self._try_transition(
             entry,
             expected_from=frozenset({existing.terminal_outcome}),
             expected_owner=expected_owner,
             expected_fence=expected_fence,
+            expected_effect_phase=(
+                "ATTEMPTING" if existing.effect_protocol_required else None
+            ),
         ):
             raise LedgerOutcomeAlreadySetError(
                 f"Cannot attach external operation ref to {request_id!r}: transition superseded"
@@ -3270,7 +3298,13 @@ class ActionLedger:
             error=error,
             finished_at=time.time(),
             lease_until=None,
-            effect_phase="ABORTED",
+            effect_phase=(
+                existing.effect_phase
+                if existing.effect_protocol_required
+                and existing.effect_phase == "ATTEMPTING"
+                and existing.decision is not None
+                else "ABORTED"
+            ),
         )
         if not self._try_transition(
             entry,
@@ -3312,7 +3346,13 @@ class ActionLedger:
             error=error,
             finished_at=time.time(),
             lease_until=None,
-            effect_phase="ABORTED",
+            effect_phase=(
+                existing.effect_phase
+                if existing.effect_protocol_required
+                and existing.effect_phase == "ATTEMPTING"
+                and existing.decision is not None
+                else "ABORTED"
+            ),
         )
         if not self._try_transition(
             entry,
@@ -3492,6 +3532,13 @@ class ActionLedger:
             raise LedgerError(f"Cannot advance boundary for unknown request {request_id!r}")
         if expected_fence is None:
             raise LedgerError(f"Advancing request {request_id!r} requires the claim fence")
+        if existing.effect_protocol_required and (
+            existing.effect_phase != "ATTEMPTING" or existing.decision is None
+        ):
+            raise LedgerOutcomeAlreadySetError(
+                f"Cannot advance boundary for {request_id!r}: "
+                "no durable ATTEMPTING decision"
+            )
         current = SideEffectBoundary(existing.side_effect_boundary)
         entry = (
             existing
@@ -3503,6 +3550,9 @@ class ActionLedger:
             expected_from=frozenset({existing.terminal_outcome}),
             expected_owner=expected_owner,
             expected_fence=expected_fence,
+            expected_effect_phase=(
+                "ATTEMPTING" if existing.effect_protocol_required else None
+            ),
         ):
             raise LedgerOutcomeAlreadySetError(
                 f"Cannot advance boundary for {request_id!r}: transition superseded"

@@ -12,10 +12,12 @@ recorded an ``external_operation_ref`` can be resolved automatically by a
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 
 import pytest
 
 from mycelium import (
+    ActionLedger,
     InMemoryLedgerStorage,
     LedgerHardBlockError,
     ReconcileResult,
@@ -82,6 +84,51 @@ def test_reconcile_result_constructors() -> None:
     )
     assert ReconcileResult.not_executed().status == ReconcileStatus.NOT_EXECUTED
     assert ReconcileResult.unknown().status == ReconcileStatus.UNKNOWN
+
+
+def test_decisionless_effect_protocol_reconciliation_cannot_commit() -> None:
+    storage = InMemoryLedgerStorage()
+    reconciler = StubReconciler(ReconcileResult.completed({"charged": True}))
+    action_ledger = ActionLedger(storage=storage, reconciler=reconciler)
+    binding = _binding()
+    with execution_scope(_scope()):
+        claimed = action_ledger.claim_side_effecting(
+            "decisionless-reconcile",
+            "charge",
+            (10.0,),
+            {
+                "request_id": "decisionless-reconcile",
+                "thread_id": "t1",
+                "run_id": "r1",
+            },
+            binding,
+        )
+    storage.set(
+        replace(
+            claimed,
+            terminal_outcome=TerminalOutcome.UNKNOWN.value,
+            status="failed",
+            external_operation_ref="pi_decisionless",
+        )
+    )
+
+    with execution_scope(_scope()), pytest.raises(LedgerHardBlockError):
+        action_ledger.claim_side_effecting(
+            "decisionless-reconcile",
+            "charge",
+            (10.0,),
+            {
+                "request_id": "decisionless-reconcile",
+                "thread_id": "t1",
+                "run_id": "r1",
+            },
+            binding,
+        )
+
+    stored = storage.get("decisionless-reconcile")
+    assert stored is not None
+    assert stored.decision is None
+    assert stored.resolved_terminal_outcome() != TerminalOutcome.COMPLETED
 
 
 def test_reconcile_completed_returns_result_without_reexec() -> None:
