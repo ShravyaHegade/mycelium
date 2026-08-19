@@ -221,12 +221,17 @@ class TestRedisOutage:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Storage down while recording a tool failure must not mask the tool's
-        own exception (it propagates, not the storage error)."""
+        own exception (it propagates, not the storage error).
+
+        The single-point decision is recorded (via ``try_transition``) before
+        the body runs, so the outage is introduced from inside the body — after
+        the decision write succeeds — to exercise the ``_record_failure`` path.
+        """
         storage = self._storage(monkeypatch)
-        storage.fail_transition = True
 
         @ledger_sync(storage=storage, transition_binding=_binding())
         def failing_tool(amount: float) -> dict[str, bool]:
+            storage.fail_transition = True
             raise ValueError("tool broke")
 
         with execution_scope(_scope()):
@@ -423,11 +428,14 @@ class TestPostgresOutage:
     def test_failure_recording_outage_surfaces_original_exception(
         self, stub_psycopg: None
     ) -> None:
+        # The single-point decision is recorded before the body runs, so the
+        # outage is introduced from inside the body — after the decision write
+        # succeeds — to exercise the ``_record_failure`` path.
         storage = FailingPostgresStorage()
-        storage.fail_transition = True
 
         @ledger_sync(storage=storage, transition_binding=_binding())
         def failing_tool(amount: float) -> dict[str, bool]:
+            storage.fail_transition = True
             raise ValueError("tool broke")
 
         with execution_scope(_scope()):

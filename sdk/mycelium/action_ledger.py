@@ -590,6 +590,13 @@ class LedgerEntry:
     decision_id: str | None = None
     state_ref: str | None = None
 
+    # Durable record of the single-decision-point evaluation (Change 2). The
+    # serialized :class:`mycelium.decision.Decision` — every registered
+    # predicate's verdict — stamped atomically with the INTENDED -> ATTEMPTING
+    # transition under the same fenced CAS. ``None`` when no decision was
+    # recorded (timeless paths, older rows).
+    decision: dict[str, Any] | None = None
+
     # Thin handoff / causation audit (optional). Set via ``handoff_scope`` or
     # kwargs; does not grant capabilities or change claim gates.
     parent_request_id: str | None = None
@@ -653,6 +660,7 @@ class LedgerEntry:
             "released_from_outcome": self.released_from_outcome,
             "decision_id": self.decision_id,
             "state_ref": self.state_ref,
+            "decision": self.decision,
             "parent_request_id": self.parent_request_id,
             "handoff_id": self.handoff_id,
         }
@@ -711,6 +719,9 @@ class LedgerEntry:
             ),
             state_ref=(
                 str(data["state_ref"]) if data.get("state_ref") is not None else None
+            ),
+            decision=(
+                dict(data["decision"]) if data.get("decision") is not None else None
             ),
             parent_request_id=(
                 str(data["parent_request_id"])
@@ -3202,6 +3213,40 @@ class ActionLedger:
         self._set_entry(entry)
         return entry
 
+    def record_decision(
+        self,
+        request_id: str,
+        decision: dict[str, Any],
+        *,
+        expected_owner: str | None = None,
+        expected_fence: int | None = None,
+    ) -> LedgerEntry:
+        """Stamp the single-decision-point result onto the entry atomically.
+
+        The write is the ``INTENDED -> ATTEMPTING`` transition: it goes through
+        the same fenced compare-and-swap as every other in-flight mutation, so a
+        superseded worker (stale fence) cannot record a decision — and therefore
+        cannot smuggle in an effect the current-fence decision would deny. The
+        entry stays ``IN_FLIGHT``; only the durable ``decision`` field changes.
+        """
+        existing = self._get_entry(request_id)
+        if existing is None:
+            raise LedgerError(
+                f"Cannot record decision for unknown request {request_id!r}"
+            )
+        entry = replace(existing, decision=decision)
+        if not self._try_transition(
+            entry,
+            expected_from=_IN_FLIGHT_OUTCOMES,
+            expected_owner=expected_owner,
+            expected_fence=expected_fence,
+        ):
+            raise LedgerOutcomeAlreadySetError(
+                f"Cannot record decision for {request_id!r}: "
+                "transition superseded (stale fence/owner or already resolved)"
+            )
+        return entry
+
     # --- request id derivation ---
 
     def derive_request_id(
@@ -3687,6 +3732,65 @@ def _record_failure(
         )
 
 
+def _record_boundary_decision(
+    ledger: ActionLedger,
+    request_id: str,
+    *,
+    tool: str,
+    args: tuple[Any, ...],
+    kwargs: Mapping[str, Any],
+    transition_key: str | None,
+    auth_decision: Any,
+    currency_decision: Any,
+    owner: str | None,
+    fence: int | None,
+) -> None:
+    """Evaluate the registered predicates and stamp the Decision atomically.
+
+    This is the single decision point: run at the ``INTENDED -> ATTEMPTING``
+    boundary after the final-boundary checks passed and before body_start. The
+    built-in authority + currency predicates read the already-computed
+    ``auth_decision`` / ``currency_decision`` (no re-run, no double-enforcement);
+    host-registered predicates decide over the same immutable snapshot. The
+    result is written under the same fenced CAS as every in-flight mutation, so
+    a superseded worker cannot record — or act on — a stale decision.
+    """
+    from mycelium.decision import DecisionIntent, build_snapshot, get_decision_engine
+
+    intent = DecisionIntent(
+        tool=tool,
+        args=tuple(args),
+        kwargs=dict(kwargs),
+        request_id=request_id,
+        transition_key=transition_key,
+    )
+    snapshot = build_snapshot(
+        intent,
+        authority_decision=auth_decision,
+        currency_decision=currency_decision,
+    )
+    decision = get_decision_engine().evaluate(intent, snapshot)
+    try:
+        ledger.record_decision(
+            request_id,
+            decision.to_dict(),
+            expected_owner=owner,
+            expected_fence=fence,
+        )
+    except LedgerOutcomeAlreadySetError:
+        _logger.warning(
+            "could not record decision for %s: transition superseded "
+            "(stale fence/owner) — refusing to advance",
+            request_id,
+        )
+        raise
+    if not decision.allowed:
+        raise LedgerHardBlockError(
+            f"decision denied for {request_id!r}: "
+            f"{'; '.join(decision.denied_reasons) or 'policy predicate refused'}"
+        )
+
+
 def _identity_lookup_kwargs(
     func: Callable[..., Any],
     args: tuple[Any, ...],
@@ -3894,6 +3998,25 @@ def _run_ledgered(
                     "could not emit use_time_currency allow for %s",
                     request_id,
                 )
+
+        _record_boundary_decision(
+            ledger,
+            request_id,
+            tool=tool_name,
+            args=args,
+            kwargs=call_mapping,
+            transition_key=(
+                derive_transition_key_for_call(
+                    tool_name, args, dict(kwargs), transition_binding
+                )
+                if transition_binding is not None
+                else None
+            ),
+            auth_decision=auth_decision,
+            currency_decision=currency_decision,
+            owner=owner,
+            fence=fence,
+        )
 
         ledger._emit_outcome(
             request_id=request_id,
@@ -4212,6 +4335,25 @@ async def _run_ledgered_async(
                     "could not emit use_time_currency allow for %s",
                     request_id,
                 )
+
+        _record_boundary_decision(
+            ledger,
+            request_id,
+            tool=tool_name,
+            args=args,
+            kwargs=call_mapping,
+            transition_key=(
+                derive_transition_key_for_call(
+                    tool_name, args, dict(kwargs), transition_binding
+                )
+                if transition_binding is not None
+                else None
+            ),
+            auth_decision=auth_decision,
+            currency_decision=currency_decision,
+            owner=owner,
+            fence=fence,
+        )
 
         ledger._emit_outcome(
             request_id=request_id,

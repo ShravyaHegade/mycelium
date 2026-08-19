@@ -5,6 +5,20 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
 
 ## Unreleased
 
+- Single atomic decision point (effect-commit Change 2). Policy checks are
+  evaluated as pure predicates over an `(intent, snapshot)` pair at one
+  enforcement point and the resulting `Decision` is recorded atomically with
+  the `INTENDED -> ATTEMPTING` transition, under the same fenced compare-and-swap
+  that guards every in-flight mutation. New `mycelium.decision` module
+  (`Decision`, `DecisionEngine`, `DecisionIntent`, `DecisionSnapshot`,
+  `PredicateVerdict`, `build_snapshot`) with a `register_decision_predicate`
+  hook so hosts can add checks at the single point. Authority + use-time
+  currency are wired as built-in predicates (existing standalone enforcement
+  unchanged). `LedgerEntry` gains a durable `decision` field (serde
+  backward-compatible; missing -> `None`). A stale-fence worker cannot record a
+  decision and therefore cannot smuggle in an effect the current-fence decision
+  would deny.
+
 ## 1.33.0 (2026-08-15)
 
 MINOR: side-effect guardrails batch for unsafe / irreversible writes.

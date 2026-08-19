@@ -184,8 +184,9 @@ class TestFailureRecordingDuringStorageDown:
         def selective_fail(entry: LedgerEntry) -> None:
             nonlocal call_count
             call_count += 1
-            # First set is from claim (success); second set is from _record_failure
-            if call_count >= 2:
+            # set #1 = claim (success); set #2 = single-point decision record
+            # (success); set #3 = _record_failure after the tool raises (fails).
+            if call_count >= 3:
                 raise ConnectionError("storage backend unreachable")
             original_set(entry)
 
@@ -207,7 +208,8 @@ class TestFailureRecordingDuringStorageDown:
         def selective_fail(entry: LedgerEntry) -> None:
             nonlocal call_count
             call_count += 1
-            if call_count >= 2:
+            # set #1 = claim; set #2 = decision record; set #3 = _record_failure.
+            if call_count >= 3:
                 raise ConnectionError("storage backend unreachable")
             original_set(entry)
 
