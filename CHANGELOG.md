@@ -62,6 +62,15 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
   decision and therefore cannot smuggle in an effect the current-fence decision
   would deny.
 
+- Kleppmann fencing tokens (effect-commit Change 1). Every successful claim
+  atomically increments the durable `LedgerEntry.fence`, and every later
+  mutation made for that claim is guarded by the same token. Completion,
+  failure, lease renewal, heartbeat, boundary, provider-reference, decision,
+  reconciliation, and operator-resolution writes now use fenced storage CAS;
+  a worker whose lease was taken over cannot mutate the winning entry even if
+  it resumes with its old owner metadata. Legacy rows without a fence load as
+  fence zero and receive a current token when claimed.
+
 ## 1.33.0 (2026-08-15)
 
 MINOR: side-effect guardrails batch for unsafe / irreversible writes.

@@ -202,15 +202,20 @@ def test_transition_matrix(
 
     if expect_success:
         if action == "complete":
-            ledger.complete(request_id, {"ok": True})
+            ledger.complete(request_id, {"ok": True}, expected_fence=entry.fence)
         elif action == "fail_before":
-            ledger.fail(request_id, ValueError("x"))
+            ledger.fail(request_id, ValueError("x"), expected_fence=entry.fence)
         elif action == "fail_after":
-            ledger.fail(request_id, ValueError("x"), failed_after_effect=True)
+            ledger.fail(
+                request_id,
+                ValueError("x"),
+                failed_after_effect=True,
+                expected_fence=entry.fence,
+            )
         elif action == "mark_blocked":
-            ledger.mark_blocked(request_id, error="blocked")
+            ledger.mark_blocked(request_id, error="blocked", expected_fence=entry.fence)
         elif action == "mark_unknown":
-            ledger.mark_unknown(request_id, error="unknown")
+            ledger.mark_unknown(request_id, error="unknown", expected_fence=entry.fence)
         stored = ledger.get(request_id)
         assert stored is not None
         if action == "complete":
@@ -226,15 +231,24 @@ def test_transition_matrix(
     else:
         with pytest.raises(LedgerOutcomeAlreadySetError):
             if action == "complete":
-                ledger.complete(request_id, {"ok": True})
+                    ledger.complete(request_id, {"ok": True}, expected_fence=entry.fence)
             elif action == "fail_before":
-                ledger.fail(request_id, ValueError("x"))
+                    ledger.fail(request_id, ValueError("x"), expected_fence=entry.fence)
             elif action == "fail_after":
-                ledger.fail(request_id, ValueError("x"), failed_after_effect=True)
+                    ledger.fail(
+                        request_id,
+                        ValueError("x"),
+                        failed_after_effect=True,
+                        expected_fence=entry.fence,
+                    )
             elif action == "mark_blocked":
-                ledger.mark_blocked(request_id, error="blocked")
+                    ledger.mark_blocked(
+                        request_id, error="blocked", expected_fence=entry.fence
+                    )
             elif action == "mark_unknown":
-                ledger.mark_unknown(request_id, error="unknown")
+                    ledger.mark_unknown(
+                        request_id, error="unknown", expected_fence=entry.fence
+                    )
 
 
 # ---------------------------------------------------------------------------
@@ -288,13 +302,13 @@ def test_stalled_worker_cannot_overwrite_completed(ledger: ActionLedger) -> None
     """A stale worker that wakes after the transition was resolved by an
     operator or a retry must not silently overwrite the true outcome."""
     request_id = "stalled-worker"
-    _claim(ledger, request_id)
+    claimed = _claim(ledger, request_id)
 
-    ledger.complete(request_id, {"real": "result"})
+    ledger.complete(request_id, {"real": "result"}, expected_fence=claimed.fence)
 
     # Stale worker tries to fail
     with pytest.raises(LedgerOutcomeAlreadySetError):
-        ledger.fail(request_id, RuntimeError("stale"))
+        ledger.fail(request_id, RuntimeError("stale"), expected_fence=claimed.fence)
 
     stored = ledger.get(request_id)
     assert stored is not None
@@ -305,13 +319,13 @@ def test_stalled_worker_cannot_overwrite_completed(ledger: ActionLedger) -> None
 def test_stalled_worker_cannot_overwrite_failed(ledger: ActionLedger) -> None:
     """Same as above but the entry was already failed by another worker."""
     request_id = "stalled-worker-fail"
-    _claim(ledger, request_id)
+    claimed = _claim(ledger, request_id)
 
-    ledger.fail(request_id, ValueError("real failure"))
+    ledger.fail(request_id, ValueError("real failure"), expected_fence=claimed.fence)
 
     # Stale worker tries to complete
     with pytest.raises(LedgerOutcomeAlreadySetError):
-        ledger.complete(request_id, {"fake": "result"})
+        ledger.complete(request_id, {"fake": "result"}, expected_fence=claimed.fence)
 
     stored = ledger.get(request_id)
     assert stored is not None
@@ -331,7 +345,12 @@ def test_owner_mismatch_on_complete(ledger: ActionLedger) -> None:
 
     # worker-B cannot complete
     with pytest.raises(LedgerOutcomeAlreadySetError):
-        ledger.complete(request_id, {"ok": True}, _expected_owner="worker-B")
+        ledger.complete(
+            request_id,
+            {"ok": True},
+            _expected_owner="worker-B",
+            expected_fence=entry.fence,
+        )
 
 
 def test_owner_match_succeeds(ledger: ActionLedger) -> None:
@@ -340,7 +359,12 @@ def test_owner_match_succeeds(ledger: ActionLedger) -> None:
     entry = _make_entry(request_id=request_id, owner="worker-A")
     _set_entry_on_storage(ledger, request_id, entry)
 
-    ledger.complete(request_id, {"ok": True}, _expected_owner="worker-A")
+    ledger.complete(
+        request_id,
+        {"ok": True},
+        _expected_owner="worker-A",
+        expected_fence=entry.fence,
+    )
     stored = ledger.get(request_id)
     assert stored.terminal_outcome == TerminalOutcome.COMPLETED.value
 
@@ -365,7 +389,7 @@ def test_concurrent_complete_race(ledger: ActionLedger) -> None:
     reach the check phase before either writes.
     """
     request_id = "race-complete"
-    _claim(ledger, request_id)
+    claimed = _claim(ledger, request_id)
 
     results: list[Exception | str] = []
     barrier = threading.Barrier(2, timeout=5)
@@ -373,7 +397,9 @@ def test_concurrent_complete_race(ledger: ActionLedger) -> None:
     def _racer(result_value: str) -> None:
         barrier.wait()
         try:
-            ledger.complete(request_id, {"result": result_value})
+            ledger.complete(
+                request_id, {"result": result_value}, expected_fence=claimed.fence
+            )
             results.append(result_value)
         except LedgerOutcomeAlreadySetError as e:
             results.append(e)
@@ -400,7 +426,7 @@ def test_concurrent_complete_race(ledger: ActionLedger) -> None:
 def test_concurrent_complete_and_fail_race(ledger: ActionLedger) -> None:
     """Thread 1 completes, thread 2 fails — only one should win."""
     request_id = "race-complete-fail"
-    _claim(ledger, request_id)
+    claimed = _claim(ledger, request_id)
 
     success: list[str] = []
     barrier = threading.Barrier(2, timeout=5)
@@ -408,7 +434,7 @@ def test_concurrent_complete_and_fail_race(ledger: ActionLedger) -> None:
     def _completer() -> None:
         barrier.wait()
         try:
-            ledger.complete(request_id, {"ok": True})
+            ledger.complete(request_id, {"ok": True}, expected_fence=claimed.fence)
             success.append("complete")
         except LedgerOutcomeAlreadySetError:
             pass
@@ -416,7 +442,7 @@ def test_concurrent_complete_and_fail_race(ledger: ActionLedger) -> None:
     def _failer() -> None:
         barrier.wait()
         try:
-            ledger.fail(request_id, RuntimeError("fail"))
+            ledger.fail(request_id, RuntimeError("fail"), expected_fence=claimed.fence)
             success.append("fail")
         except LedgerOutcomeAlreadySetError:
             pass
@@ -455,7 +481,12 @@ def test_wrapper_owner_fencing_prevents_stale_overwrite(ledger: ActionLedger) ->
     _set_entry_on_storage(ledger, request_id, entry)
 
     # alice's owner matches — allowed
-    ledger.complete(request_id, {"ok": True}, _expected_owner="alice")
+    ledger.complete(
+        request_id,
+        {"ok": True},
+        _expected_owner="alice",
+        expected_fence=entry.fence,
+    )
     stored = ledger.get(request_id)
     assert stored.terminal_outcome == TerminalOutcome.COMPLETED.value
 
@@ -466,7 +497,12 @@ def test_wrapper_owner_fencing_prevents_stale_overwrite(ledger: ActionLedger) ->
 
     # bob (wrong owner) — refused
     with pytest.raises(LedgerOutcomeAlreadySetError):
-        ledger.complete(request_id2, {"ok": True}, _expected_owner="bob")
+        ledger.complete(
+            request_id2,
+            {"ok": True},
+            _expected_owner="bob",
+            expected_fence=entry2.fence,
+        )
     stored2 = ledger.get(request_id2)
     assert stored2.terminal_outcome == TerminalOutcome.IN_FLIGHT.value
 
@@ -658,7 +694,15 @@ def test_concurrent_reconcile_not_executed_race(
         elif entry.terminal_outcome == TerminalOutcome.IN_FLIGHT.value:
             exec_count += 1
             result_value = {"ran": True}
-            ledger_inst.complete(request_id, result_value)
+            ledger_inst.record_decision(
+                request_id,
+                {"allowed": True, "verdicts": [], "denied_reasons": []},
+                expected_owner=entry.owner,
+                expected_fence=entry.fence,
+            )
+            ledger_inst.complete(
+                request_id, result_value, expected_fence=entry.fence
+            )
             results.append(("ran_tool", result_value))
         else:
             results.append((entry.terminal_outcome or "unknown", None))
@@ -753,7 +797,15 @@ def test_concurrent_reconcile_not_executed_race_expired_seed(
         elif entry.terminal_outcome == TerminalOutcome.IN_FLIGHT.value:
             exec_count += 1
             result_value = {"ran": True}
-            ledger_inst.complete(request_id, result_value)
+            ledger_inst.record_decision(
+                request_id,
+                {"allowed": True, "verdicts": [], "denied_reasons": []},
+                expected_owner=entry.owner,
+                expected_fence=entry.fence,
+            )
+            ledger_inst.complete(
+                request_id, result_value, expected_fence=entry.fence
+            )
             results.append(("ran_tool", result_value))
         else:
             results.append((entry.terminal_outcome or "unknown", None))
@@ -880,7 +932,7 @@ def test_claim_bumps_fence_monotonically(ledger: ActionLedger) -> None:
     assert storage.get(request_id).fence == 1
 
     # A previously-failed entry is reclaimable; the next claim bumps the fence.
-    ledger.fail(request_id, RuntimeError("boom"))
+    ledger.fail(request_id, RuntimeError("boom"), expected_fence=1)
     outcome, _ = storage.try_claim_inflight(_make_entry(request_id), lease_ttl=30.0)
     assert outcome == "claimed"
     reclaimed = storage.get(request_id)
@@ -982,7 +1034,11 @@ def test_resumed_stale_worker_cannot_commit_after_takeover(
     a_owner = a_entry.owner
 
     # A's slot becomes reclaimable; worker B reclaims and bumps to fence 2.
-    ledger.fail(request_id, RuntimeError("A appeared dead"))
+    ledger.fail(
+        request_id,
+        RuntimeError("A appeared dead"),
+        expected_fence=a_entry.fence,
+    )
     b_owner = "worker-B"
     storage.try_claim_inflight(_make_entry(request_id, owner=b_owner), lease_ttl=30.0)
     b_entry = storage.get(request_id)
@@ -1018,7 +1074,11 @@ def test_resumed_stale_worker_cannot_cross_provider_boundary(
     storage.try_claim_inflight(_make_entry(request_id), lease_ttl=30.0)
     worker_a = storage.get(request_id)
     assert worker_a is not None
-    ledger.fail(request_id, RuntimeError("A appeared dead"))
+    ledger.fail(
+        request_id,
+        RuntimeError("A appeared dead"),
+        expected_fence=worker_a.fence,
+    )
     storage.try_claim_inflight(_make_entry(request_id, owner="worker-B"), lease_ttl=30.0)
 
     with pytest.raises(LedgerOutcomeAlreadySetError):
