@@ -5,6 +5,32 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
 
 ## Unreleased
 
+- Tool capability typing (effect-commit Change 3). New `ToolCapability`
+  probeability axis (`IDEMPOTENT` / `QUERYABLE` / `BLIND`), orthogonal to
+  `SideEffectClass` (idempotency): capability answers "can an in-flight effect's
+  outcome be looked up afterward?" `resolve_capability(side_effect_class,
+  explicit=None, *, has_reconciler, has_provider_key)` derives a conservative
+  default (READ / IDEMPOTENT_MUTATE -> IDEMPOTENT; KEYED_MUTATE -> QUERYABLE with
+  a provider key or reconciler, else BLIND; NON_IDEMPOTENT_MUTATE -> QUERYABLE
+  only with a reconciler, else BLIND; IRREVERSIBLE -> BLIND, never loosened). An
+  explicit declaration may tighten to BLIND freely but may only loosen when the
+  class + mechanism supports it — otherwise it raises
+  `ToolCapabilityDeclarationError` (declaration honesty). `ToolTransitionBinding`
+  gains a `capability` field (`for_tool(capability=...)`; default derived from
+  class) and YAML tool bindings accept a `capability:` key (missing -> derived).
+  Enforcement: a BLIND tool whose entry is ambiguous (UNKNOWN /
+  FAILED_AFTER_EFFECT / maybe_crossed / crossed) never auto-redispatches,
+  reclaims-for-retry, or opts into same-key UNKNOWN retry — even with a valid
+  provider idempotency key + TTL (BLIND declaration wins); it parks for operator
+  reconciliation (`release` still resolves it). A QUERYABLE tool with no probe
+  mechanism (no reconciler, no provider key) fails closed to the same parking
+  behaviour with a warning. Reconciler presence on the `ActionLedger` is the
+  concrete "queryable" mechanism: a bound `Reconciler` lets recovery resolve
+  ATTEMPTING -> COMMITTED/ABORTED by probing. Clean FAILED_BEFORE_EFFECT /
+  not_crossed retries and IDEMPOTENT tools keep existing behaviour. New public
+  exports: `ToolCapability`, `ToolCapabilityDeclarationError`,
+  `resolve_capability`.
+
 - Single atomic decision point (effect-commit Change 2). Policy checks are
   evaluated as pure predicates over an `(intent, snapshot)` pair at one
   enforcement point and the resulting `Decision` is recorded atomically with

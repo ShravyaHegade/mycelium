@@ -42,6 +42,7 @@ from mycelium.transition import (
     SideEffectBoundary,
     SideEffectClass,
     TerminalOutcome,
+    ToolCapability,
     ToolTransitionBinding,
     args_fingerprint,
     derive_dispatch_id,
@@ -2073,6 +2074,88 @@ class ActionLedger:
             return fresh
         return None
 
+    def _capability_for(self, binding: ToolTransitionBinding) -> ToolCapability:
+        """Effective capability for this ledger — reconciler presence drives QUERYABLE.
+
+        A bound :class:`~mycelium.reconcile.Reconciler` is the concrete
+        "queryable" mechanism, so it can loosen the binding's conservative floor
+        (e.g. ``NON_IDEMPOTENT_MUTATE`` BLIND → QUERYABLE). An explicit ``BLIND``
+        declaration always wins and is never loosened.
+        """
+        return binding.effective_capability(
+            has_reconciler=self._reconciler is not None
+        )
+
+    def _entry_is_ambiguous(self, entry: LedgerEntry) -> bool:
+        """Whether an effect's outcome is unknown (may or may not have happened).
+
+        A ``FAILED_BEFORE_EFFECT`` or ``EXPIRED`` entry whose boundary is still
+        ``not_crossed`` is not ambiguous — the effect provably never crossed the
+        boundary, so it stays safe to retry (or death-signal reclaim) regardless
+        of probeability. Ambiguity is ``UNKNOWN`` / ``FAILED_AFTER_EFFECT`` (the
+        outcome itself is unknown or the effect definitely fired), or *any*
+        ``maybe_crossed`` / ``crossed`` boundary. Only ambiguous entries are
+        subject to BLIND parking — that is exactly the "did the blind effect
+        happen?" case.
+        """
+        outcome = entry.resolved_terminal_outcome()
+        if outcome in (
+            TerminalOutcome.UNKNOWN,
+            TerminalOutcome.FAILED_AFTER_EFFECT,
+        ):
+            return True
+        boundary = SideEffectBoundary(entry.side_effect_boundary)
+        return boundary in (
+            SideEffectBoundary.MAYBE_CROSSED,
+            SideEffectBoundary.CROSSED,
+        )
+
+    def _blind_never_retries(
+        self,
+        tool: str,
+        binding: ToolTransitionBinding,
+        existing: LedgerEntry,
+    ) -> bool:
+        """Whether this tool must park (never auto-retry) an ambiguous entry.
+
+        BLIND: no way to probe the outcome — never auto-redispatch an entry
+        whose effect may have crossed the boundary. QUERYABLE without a
+        reconciler present fails closed to the same parking behaviour (with a
+        warning) rather than silently auto-retrying a second effect. An
+        unambiguous ``FAILED_BEFORE_EFFECT`` / ``not_crossed`` entry is never
+        parked here — it provably did not happen.
+        """
+        if not self._entry_is_ambiguous(existing):
+            return False
+        capability = self._capability_for(binding)
+        has_provider_key = binding.provider_idempotency_key_param is not None
+        # A tool that intended to be QUERYABLE but has no probe mechanism (no
+        # reconciler bound, no provider idempotency key) fails closed to BLIND
+        # parking — with a warning so the misconfiguration is visible.
+        intended_queryable = (
+            binding.explicit_capability == ToolCapability.QUERYABLE
+            or binding.capability == ToolCapability.QUERYABLE
+        )
+        if (
+            capability == ToolCapability.BLIND
+            and intended_queryable
+            and not has_provider_key
+            and self._reconciler is None
+        ):
+            warnings.warn(
+                f"tool {tool!r} declares capability=queryable but no Reconciler "
+                "is bound and no provider idempotency key is configured; "
+                "failing closed to blind behaviour — the ambiguous entry parks "
+                "for operator reconciliation instead of auto-retrying.",
+                stacklevel=2,
+            )
+            return True
+        if capability == ToolCapability.BLIND:
+            return True
+        # QUERYABLE with a provider idempotency key needs no reconciler: the
+        # same-key retry gate already validated the dedupe window.
+        return False
+
     def _attempt_reconcile(
         self,
         request_id: str,
@@ -2276,7 +2359,13 @@ class ActionLedger:
         ``try_claim_inflight`` refuses to overwrite ``UNKNOWN`` (fail-closed for
         peers). After the gate has ALLOW'd within the provider key window, this
         is the authorized transition — same shape as Reconciler ``NOT_EXECUTED``.
+
+        A BLIND tool (or a QUERYABLE tool with no reconciler) never opts into
+        same-key retry even with a valid provider key + TTL: BLIND declaration
+        wins, so it parks for operator reconciliation instead.
         """
+        if self._blind_never_retries(tool, binding, existing):
+            return None
         pkey_first = (
             existing.provider_key_first_attempt_at
             if existing.provider_idempotency_key is not None
@@ -2377,7 +2466,15 @@ class ActionLedger:
                         )
                         if reset is not None:
                             return reset
+                        if self._blind_never_retries(tool, binding, existing):
+                            return self._raise_hard_block(
+                                request_id, tool, existing, binding=binding
+                            )
                         continue
+                    if self._blind_never_retries(tool, binding, existing):
+                        return self._raise_hard_block(
+                            request_id, tool, existing, binding=binding
+                        )
                     if self._reclaim_requires_death_signal and not has_worker_death_evidence(
                         existing,
                         now=time.time(),
@@ -2434,6 +2531,16 @@ class ActionLedger:
                             )
                             continue
                     return entry
+                if gate == TransitionGate.ALLOW and self._blind_never_retries(
+                    tool, binding, existing
+                ):
+                    self._poll_side_effecting(
+                        request_id,
+                        tool=tool,
+                        interval=interval,
+                        poll_deadline=poll_deadline,
+                    )
+                    continue
                 if gate == TransitionGate.ALLOW and self._reclaim_requires_death_signal:
                     if not has_worker_death_evidence(
                         existing,
@@ -2610,7 +2717,15 @@ class ActionLedger:
                         )
                         if reset is not None:
                             return reset
+                        if self._blind_never_retries(tool, binding, existing):
+                            return self._raise_hard_block(
+                                request_id, tool, existing, binding=binding
+                            )
                         continue
+                    if self._blind_never_retries(tool, binding, existing):
+                        return self._raise_hard_block(
+                            request_id, tool, existing, binding=binding
+                        )
                     if self._reclaim_requires_death_signal and not has_worker_death_evidence(
                         existing,
                         now=time.time(),
@@ -2667,6 +2782,16 @@ class ActionLedger:
                             )
                             continue
                     return entry
+                if gate == TransitionGate.ALLOW and self._blind_never_retries(
+                    tool, binding, existing
+                ):
+                    await self._poll_side_effecting_async(
+                        request_id,
+                        tool=tool,
+                        interval=interval,
+                        poll_deadline=poll_deadline,
+                    )
+                    continue
                 if gate == TransitionGate.ALLOW and self._reclaim_requires_death_signal:
                     if not has_worker_death_evidence(
                         existing,

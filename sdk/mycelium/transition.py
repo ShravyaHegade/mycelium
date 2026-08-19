@@ -123,6 +123,40 @@ SIDE_EFFECT_CLASS_ALIASES: dict[str, SideEffectClass] = {
 }
 
 
+class ToolCapability(StrEnum):
+    """Per-tool *probeability* axis — orthogonal to :class:`SideEffectClass`.
+
+    Where ``SideEffectClass`` describes *idempotency* (is a second call safe?),
+    capability describes *probeability* (can an in-flight effect's outcome be
+    looked up afterward?). Retry/redispatch policy needs both: an irreversible
+    onchain call with no way to ask "did it happen?" must never be
+    auto-redispatched even though its idempotency class already forbids retry.
+
+    - ``idempotent`` — accepts your ``effect_id``; retries are safe (covers
+      ``read`` + ``idempotent_mutate``).
+    - ``queryable`` — the outcome can be probed by ``effect_id`` (a registered
+      :class:`~mycelium.reconcile.Reconciler` or a provider idempotency key);
+      recovery resolves ``ATTEMPTING → COMMITTED/ABORTED`` by probing.
+    - ``blind`` — neither; ``UNKNOWN`` parks for reconciliation. A blind tool is
+      **never** auto-retried.
+    """
+
+    IDEMPOTENT = "idempotent"
+    QUERYABLE = "queryable"
+    BLIND = "blind"
+
+
+class ToolCapabilityDeclarationError(Exception):
+    """Raised when an explicit capability loosens beyond what the tool supports.
+
+    Declaration honesty: an explicit capability may always *tighten* (to
+    ``BLIND``), but may only *loosen* (to ``QUERYABLE`` / ``IDEMPOTENT``) when
+    the side-effect class plus available mechanism (provider idempotency key or
+    reconciler) actually supports it. Otherwise a tool could silently opt into
+    duplicate effects.
+    """
+
+
 class TerminalOutcome(StrEnum):
     """Terminal or in-progress state of a side-effect transition."""
 
@@ -395,6 +429,97 @@ def resolve_spendability(
     return DEFAULT_SPENDABILITY[side_effect_class]
 
 
+# Ordering from loosest (safest to retry) to tightest (never retry). A higher
+# rank is a stricter promise; an explicit declaration may only move *up* this
+# scale freely (tighten), never down (loosen) beyond what the class supports.
+_CAPABILITY_RANK: dict[ToolCapability, int] = {
+    ToolCapability.IDEMPOTENT: 0,
+    ToolCapability.QUERYABLE: 1,
+    ToolCapability.BLIND: 2,
+}
+
+
+def default_capability(
+    side_effect_class: SideEffectClass,
+    *,
+    has_reconciler: bool = False,
+    has_provider_key: bool = False,
+) -> ToolCapability:
+    """Derive the *conservative* capability for a class + available mechanism.
+
+    - ``read`` / ``idempotent_mutate`` → ``IDEMPOTENT`` (retry-safe as-is).
+    - ``keyed_mutate`` → ``QUERYABLE`` when a provider idempotency key or a
+      reconciler exists, else ``BLIND``.
+    - ``non_idempotent_mutate`` → ``QUERYABLE`` only when a reconciler exists,
+      else ``BLIND``.
+    - ``irreversible`` → ``BLIND`` (never loosened by derivation).
+    """
+    if side_effect_class in (
+        SideEffectClass.READ,
+        SideEffectClass.IDEMPOTENT_MUTATE,
+    ):
+        return ToolCapability.IDEMPOTENT
+    if side_effect_class == SideEffectClass.KEYED_MUTATE:
+        if has_provider_key or has_reconciler:
+            return ToolCapability.QUERYABLE
+        return ToolCapability.BLIND
+    if side_effect_class == SideEffectClass.NON_IDEMPOTENT_MUTATE:
+        if has_reconciler:
+            return ToolCapability.QUERYABLE
+        return ToolCapability.BLIND
+    return ToolCapability.BLIND
+
+
+def resolve_capability(
+    side_effect_class: SideEffectClass,
+    explicit: ToolCapability | None = None,
+    *,
+    has_reconciler: bool = False,
+    has_provider_key: bool = False,
+) -> ToolCapability:
+    """Resolve a tool's capability from an explicit declaration or class default.
+
+    Without ``explicit`` this returns :func:`default_capability`. An explicit
+    declaration may always *tighten* to the conservative floor (e.g. down to
+    ``BLIND``), but may only *loosen* to ``QUERYABLE`` / ``IDEMPOTENT`` when the
+    class plus mechanism supports it. A dishonest loosening raises
+    :class:`ToolCapabilityDeclarationError` — a tool may never silently opt into
+    duplicate effects.
+    """
+    derived = default_capability(
+        side_effect_class,
+        has_reconciler=has_reconciler,
+        has_provider_key=has_provider_key,
+    )
+    if explicit is None:
+        return derived
+    if _CAPABILITY_RANK[explicit] >= _CAPABILITY_RANK[derived]:
+        return explicit
+    raise ToolCapabilityDeclarationError(
+        f"cannot declare capability={explicit.value!r} for "
+        f"side_effect_class={side_effect_class.value!r} "
+        f"(has_provider_key={has_provider_key}, has_reconciler={has_reconciler}); "
+        f"the conservative floor is {derived.value!r}. A looser capability "
+        "would let this tool silently opt into duplicate effects. Provide a "
+        "reconciler / provider idempotency key, or declare a tighter capability."
+    )
+
+
+def parse_capability(value: Any) -> ToolCapability:
+    """Parse and validate a ``capability`` value from YAML/API input."""
+    if isinstance(value, ToolCapability):
+        return value
+    if not isinstance(value, str):
+        raise ValueError("capability must be a string")
+    try:
+        return ToolCapability(value)
+    except ValueError as exc:
+        allowed = ", ".join(member.value for member in ToolCapability)
+        raise ValueError(
+            f"invalid capability {value!r}; expected one of: {allowed}"
+        ) from exc
+
+
 def resolve_side_effect_boundary_default(
     explicit: SideEffectBoundary | None,
 ) -> SideEffectBoundary:
@@ -499,6 +624,8 @@ class ToolTransitionBinding:
     retry_permission: RetryPermission = RetryPermission.MANUAL_RECONCILIATION_REQUIRED
     side_effect_boundary_default: SideEffectBoundary = SideEffectBoundary.NOT_CROSSED
     spendability: Spendability = Spendability.SINGLE_USE
+    capability: ToolCapability = ToolCapability.BLIND
+    explicit_capability: ToolCapability | None = None
     provider_idempotency_key_param: str | None = None
     provider_idempotency_key_ttl: float | None = None
     request_id_from: str | None = None
@@ -514,10 +641,44 @@ class ToolTransitionBinding:
         retry_permission: RetryPermission | None = None,
         side_effect_boundary: SideEffectBoundary | None = None,
         spendability: Spendability | None = None,
+        capability: ToolCapability | None = None,
         provider_idempotency_key_param: str | None = None,
         provider_idempotency_key_ttl: float | None = None,
         request_id_from: str | None = None,
     ) -> ToolTransitionBinding:
+        # Binding-level capability sees only the statically declared provider
+        # idempotency key. Reconciler presence lives on the ledger and can only
+        # *tighten to a promise* at recovery time via
+        # :meth:`effective_capability` — never loosen past this floor.
+        has_provider_key = provider_idempotency_key_param is not None
+        if capability is None:
+            resolved_capability = default_capability(
+                side_effect_class,
+                has_reconciler=False,
+                has_provider_key=has_provider_key,
+            )
+        else:
+            # A declaration that cannot be honored even with a reconciler (e.g.
+            # QUERYABLE on IRREVERSIBLE) is refused now. A declaration that would
+            # be honored only once a reconciler is bound is deferred: the floor
+            # stays conservative here and the ledger re-resolves via
+            # :meth:`effective_capability` once it knows a reconciler exists.
+            resolve_capability(
+                side_effect_class,
+                capability,
+                has_reconciler=True,
+                has_provider_key=has_provider_key,
+            )
+            floor = default_capability(
+                side_effect_class,
+                has_reconciler=False,
+                has_provider_key=has_provider_key,
+            )
+            resolved_capability = (
+                capability
+                if _CAPABILITY_RANK[capability] >= _CAPABILITY_RANK[floor]
+                else floor
+            )
         return cls(
             agent_id=agent_id,
             policy_version=policy_version,
@@ -530,10 +691,38 @@ class ToolTransitionBinding:
                 side_effect_boundary
             ),
             spendability=resolve_spendability(side_effect_class, spendability),
+            capability=resolved_capability,
+            explicit_capability=capability,
             provider_idempotency_key_param=provider_idempotency_key_param,
             provider_idempotency_key_ttl=provider_idempotency_key_ttl,
             request_id_from=request_id_from,
         )
+
+    def effective_capability(self, *, has_reconciler: bool) -> ToolCapability:
+        """Resolve the capability given whether a reconciler is bound.
+
+        This is where reconciler presence drives ``QUERYABLE`` for recovery. The
+        binding stores a conservative floor (no reconciler assumed); a ledger
+        that holds a :class:`~mycelium.reconcile.Reconciler` re-resolves here.
+        The result may only loosen from the floor when the class + mechanism
+        supports it — an explicit ``BLIND`` always wins. When a declaration's
+        loosening is not (yet) justified — e.g. explicit ``QUERYABLE`` on a plain
+        ``non_idempotent_mutate`` with no reconciler bound — this fails closed to
+        the conservative floor instead of raising (honesty already validated at
+        construction time).
+        """
+        has_provider_key = self.provider_idempotency_key_param is not None
+        floor = default_capability(
+            self.side_effect_class,
+            has_reconciler=has_reconciler,
+            has_provider_key=has_provider_key,
+        )
+        explicit = self.explicit_capability
+        if explicit is None:
+            return floor
+        if _CAPABILITY_RANK[explicit] >= _CAPABILITY_RANK[floor]:
+            return explicit
+        return floor
 
 
 @dataclass(frozen=True)
@@ -892,6 +1081,8 @@ __all__ = [
     "SideEffectBoundary",
     "RetryPermission",
     "Spendability",
+    "ToolCapability",
+    "ToolCapabilityDeclarationError",
     "DEFAULT_RETRY_PERMISSION",
     "DEFAULT_SPENDABILITY",
     "STRICT_SIDE_EFFECT_CLASSES",
@@ -925,6 +1116,9 @@ __all__ = [
     "parse_retry_permission",
     "parse_side_effect_boundary",
     "parse_spendability",
+    "parse_capability",
+    "default_capability",
+    "resolve_capability",
     "parse_terminal_outcome",
     "resolve_lease_validity",
     "provider_key_validity",

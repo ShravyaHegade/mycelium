@@ -310,6 +310,8 @@ from mycelium.transition import (
     SideEffectClass,
     Spendability,
     TerminalOutcome,
+    ToolCapability,
+    ToolCapabilityDeclarationError,
     ToolTransitionBinding,
     TransitionScope,
     derive_effect_id,
@@ -323,6 +325,7 @@ from mycelium.transition import (
     parse_explicit_request_id,
     provider_key_validity,
     request_id_from_argument,
+    resolve_capability,
     resolve_lease_validity,
 )
 from mycelium.transition_resolution import (
@@ -516,6 +519,9 @@ __all__ = [
     "SideEffectClass",
     "SideEffectBoundary",
     "Spendability",
+    "ToolCapability",
+    "ToolCapabilityDeclarationError",
+    "resolve_capability",
     "RetryPermission",
     "TerminalOutcome",
     "LeaseValidity",
