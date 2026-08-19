@@ -146,6 +146,79 @@ def test_redis_tombstone_never_regresses_fence(
     assert restored.fence == 2
 
 
+def test_redis_watch_exhaustion_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from redis.exceptions import WatchError
+
+    fake = _fake_redis(monkeypatch)
+    original_pipeline = fake.pipeline
+
+    class ConflictingPipeline:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def watch(self, *keys):
+            return None
+
+        def get(self, key):
+            return fake.get(key)
+
+        def multi(self):
+            return None
+
+        def set(self, *args, **kwargs):
+            return self
+
+        def execute(self):
+            raise WatchError("forced contention")
+
+    def force_conflicts() -> None:
+        fake.pipeline = lambda transaction=True: ConflictingPipeline()
+
+    entry = LedgerEntry(
+        request_id="redis-watch-exhaustion",
+        tool="send_payment",
+        args=[],
+        kwargs={},
+        status="in-flight",
+        terminal_outcome=TerminalOutcome.IN_FLIGHT.value,
+    )
+
+    storage = RedisLedgerStorage("redis://test", prefix="watch-set:")
+    force_conflicts()
+    with pytest.raises(RuntimeError, match="set exhausted WATCH retries"):
+        storage.set(entry)
+
+    fake.pipeline = original_pipeline
+    storage = RedisLedgerStorage("redis://test", prefix="watch-claim:")
+    force_conflicts()
+    with pytest.raises(RuntimeError, match="claim exhausted WATCH retries"):
+        storage.try_claim_inflight(entry)
+    assert fake.get("watch-claim:redis-watch-exhaustion") is None
+
+    fake.pipeline = original_pipeline
+    storage = RedisLedgerStorage("redis://test", prefix="watch-restore:")
+    storage.set(entry)
+    fake.delete("watch-restore:redis-watch-exhaustion")
+    force_conflicts()
+    with pytest.raises(RuntimeError, match="restoration exhausted WATCH retries"):
+        storage.get(entry.request_id)
+
+    fake.pipeline = original_pipeline
+    storage = RedisLedgerStorage("redis://test", prefix="watch-transition:")
+    storage.set(entry)
+    force_conflicts()
+    with pytest.raises(RuntimeError, match="transition exhausted WATCH retries"):
+        storage.try_transition(
+            entry,
+            expected_terminal_outcomes=frozenset({TerminalOutcome.IN_FLIGHT.value}),
+        )
+
+
 def test_file_storage_payment_hard_blocks_expired_lease(tmp_path: Path) -> None:
     """v1.3 transition: expired payment on file storage must hard-block."""
     storage = FileLedgerStorage(tmp_path / "ledger.json")

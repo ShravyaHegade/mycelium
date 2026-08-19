@@ -138,11 +138,17 @@ def test_simulation_scenario_passes_on_shared_backend(tmp_path: Path, scenario: 
             timeout_seconds=25,
         )
         evidence = report.scenarios[0]
-        assert evidence.status == VerificationStatus.PASS
+        assert evidence.status == VerificationStatus.PASS, evidence.observed_behavior
         assert evidence.terminal_outcome == "COMMITTED"
         decisions = " ".join(evidence.ledger_decisions)
         assert "invariant held" in decisions
+        assert "after_claim: redispatch recovered" in decisions
+        assert "after_body_start: redispatch recovered" in decisions
+        assert "after_boundary: redispatch hard-blocked before provider" in decisions
+        assert "after_effect: redispatch recovered" in decisions
+        assert decisions.count("post-recovery provider invariant held") == 4
         assert "fence takeover: B sole COMMITTED" in decisions
+        assert "provider attempt" in decisions
     finally:
         del sys.modules["verify_probe_tools"]
 

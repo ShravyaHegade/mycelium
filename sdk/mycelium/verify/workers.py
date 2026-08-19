@@ -475,6 +475,7 @@ def reconcile_worker(payload: dict[str, Any]) -> None:
         return
     status = ReconcileStatus(payload.get("reconcile_status", "NOT_EXECUTED"))
     reconciler = SyntheticReconciler(status=status)
+    provider = SyntheticProvider()
     ready = payload.get("ready_file")
     if ready:
         _append_line(ready, "ready")
@@ -485,15 +486,22 @@ def reconcile_worker(payload: dict[str, Any]) -> None:
     tool = make_tool(
         storage,
         payload["exec_file"],
+        provider=provider,
         reconciler=reconciler,
         poll_timeout=float(payload.get("poll_timeout", 8.0)),
     )
     try:
         with execution_scope(TransitionScope(thread_id="verify", run_id="verify")):
-            result = tool(1, request_id=payload["request_id"], op_id=payload.get("op_id", "op"))
+            call_kwargs = {"request_id": payload["request_id"]}
+            if not payload.get("omit_op_id"):
+                call_kwargs["op_id"] = payload.get("op_id", "op")
+            result = tool(1, **call_kwargs)
         _append_line(payload["out_file"], str(result))
     except Exception as exc:  # noqa: BLE001
         _append_line(payload["err_file"], f"{type(exc).__name__}: {exc}")
+    finally:
+        for effect_id in provider.effects:
+            _append_line(payload["effect_file"], effect_id)
 
 
 def spawn_workers(target, payloads: list[dict[str, Any]]) -> list[mp.Process]:

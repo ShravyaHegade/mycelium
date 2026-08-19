@@ -42,6 +42,7 @@ from mycelium.verify.workers import (
     join_workers,
     make_ledger,
     read_lines,
+    reconcile_worker,
     spawn_workers,
     terminate_owned,
 )
@@ -85,6 +86,7 @@ def _run_crash_sweep(
         ready_file = str(work / f"{phase}-ready.txt")
         err_file = str(work / f"{phase}-err.txt")
         effect_file = str(work / f"{phase}-fx.txt")
+        out_file = str(work / f"{phase}-out.txt")
         payload = {
             **spec,
             "phase": phase,
@@ -93,6 +95,7 @@ def _run_crash_sweep(
             "ready_file": ready_file,
             "err_file": err_file,
             "effect_file": effect_file,
+            "out_file": out_file,
             "op_id": f"op-{phase}",
         }
         procs = spawn_workers(crash_worker, [payload])
@@ -106,6 +109,43 @@ def _run_crash_sweep(
                 proc.kill()
         join_workers(procs, timeout=2.0)
         time.sleep(lease_ttl + 0.3)
+
+        if phase in {"after_claim", "after_body_start"}:
+            recovery_ledger = make_ledger(
+                iso.open_storage(),
+                binding=_idempotent_binding(),
+                lease_ttl=lease_ttl,
+            )
+            recovery_ledger.release(
+                request_id,
+                verified="not_executed",
+                by="simulation",
+                reason=f"crash injected at {phase} before provider boundary",
+            )
+
+        recovery_payload = {
+            **payload,
+            "reconcile_status": ("COMPLETED" if phase == "after_effect" else "NOT_EXECUTED"),
+            "poll_timeout": min(ctx.timeout_seconds, 8.0),
+            "omit_op_id": True,
+        }
+        recovery = spawn_workers(reconcile_worker, [recovery_payload])
+        ctx.owned_procs.extend(recovery)
+        join_workers(recovery, timeout=min(ctx.timeout_seconds, 10.0))
+        recovered = bool(read_lines(out_file))
+        if phase == "after_boundary":
+            if recovered:
+                failures.append(f"{phase}: ambiguous transition was re-executed")
+            else:
+                decisions.append(f"{phase}: redispatch hard-blocked before provider")
+        elif not recovered:
+            errors = read_lines(err_file)
+            failures.append(
+                f"{phase}: supported recovery did not resolve redispatch"
+                + (f" ({'; '.join(errors)})" if errors else "")
+            )
+        else:
+            decisions.append(f"{phase}: redispatch recovered")
         total_exec += len(read_lines(exec_file))
 
         storage = iso.open_fresh_client()
@@ -122,7 +162,9 @@ def _run_crash_sweep(
             for item in mapped:
                 failures.append(f"{phase}: {item.message}")
             limitations.extend(f"{phase}: {msg}" for msg in warnings)
-        decisions.append(f"{phase}: invariant held ({len(entries)} ledger rows)")
+        decisions.append(
+            f"{phase}: post-recovery provider invariant held ({len(provider_effects)} attempts)"
+        )
     return failures, limitations, decisions, total_exec
 
 
@@ -132,6 +174,7 @@ def _run_fence_takeover(
 ) -> tuple[list[str], list[str]]:
     failures: list[str] = []
     decisions: list[str] = []
+    provider_effects: list[tuple[str, str]] = []
     request_id = iso.track(iso.namespace.request_id("sim", "fence"))
     binding = _idempotent_binding()
     kwargs = {"request_id": request_id, "thread_id": "verify", "run_id": "verify"}
@@ -189,6 +232,26 @@ def _run_fence_takeover(
             expected_owner=entry_b.owner,
             expected_fence=fence_b,
         )
+        b.advance_boundary(
+            request_id,
+            SideEffectBoundary.MAYBE_CROSSED,
+            expected_owner=entry_b.owner,
+            expected_fence=fence_b,
+        )
+        provider_id = "fence-provider-B"
+        b.attach_external_operation_ref(
+            request_id,
+            provider_id,
+            expected_owner=entry_b.owner,
+            expected_fence=fence_b,
+        )
+        provider_effects.append((request_id, provider_id))
+        b.advance_boundary(
+            request_id,
+            SideEffectBoundary.CROSSED,
+            expected_owner=entry_b.owner,
+            expected_fence=fence_b,
+        )
         b.complete(
             request_id,
             {"charged": True},
@@ -208,8 +271,17 @@ def _run_fence_takeover(
         failures.append(f"fence takeover: final fence {final.fence} != B fence {fence_b}")
     if final.result != {"charged": True}:
         failures.append("fence takeover: stale A write leaked into final entry")
+    for violation in check_at_most_one_committed([final]):
+        failures.append(f"fence takeover: {violation.message}")
+    mapped, warnings = check_provider_mapping([final], provider_effects)
+    for violation in mapped:
+        failures.append(f"fence takeover: {violation.message}")
+    for warning in warnings:
+        failures.append(f"fence takeover: {warning}")
     if not failures:
-        decisions.append("fence takeover: B sole COMMITTED row; A stale write refused")
+        decisions.append(
+            "fence takeover: B sole COMMITTED row and provider attempt; A stale write refused"
+        )
     return failures, decisions
 
 

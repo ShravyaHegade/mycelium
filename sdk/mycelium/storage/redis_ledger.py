@@ -124,7 +124,7 @@ class RedisEntryStorage:
                     return ghost
             except WatchError:
                 continue
-        return None
+        raise RuntimeError("Redis tombstone restoration exhausted WATCH retries")
 
     def get(self, request_id: str) -> E | None:
         raw = self._client.get(self._key(request_id))
@@ -159,6 +159,7 @@ class RedisEntryStorage:
                     return
             except WatchError:
                 continue
+        raise RuntimeError("Redis ledger set exhausted WATCH retries")
 
     def try_claim_inflight(
         self,
@@ -206,16 +207,7 @@ class RedisEntryStorage:
             if reclaimed is not None:
                 return reclaimed
 
-        existing_raw = self._client.get(key)
-        if existing_raw is None:
-            restored = self._restore_from_tombstone(entry.request_id)
-            if restored is not None:
-                return "in_flight", restored
-            return "claimed", None
-        existing = self._from_dict(json.loads(existing_raw))
-        if existing.status == "completed":
-            return "completed", existing
-        return "in_flight", existing
+        raise RuntimeError("Redis claim exhausted WATCH retries")
 
     def _try_initial_claim(self, key: str, entry: E, ttl: int) -> bool:
         from redis.exceptions import WatchError
@@ -262,7 +254,7 @@ class RedisEntryStorage:
                     restored = self._restore_from_tombstone(entry.request_id, now=now)
                     if restored is not None:
                         return "in_flight", restored
-                    return ("claimed", None)
+                    return None
                 current = self._from_dict(json.loads(raw))
                 rerun = claim_inflight_outcome(current, now=time.time())
                 if rerun != "claimed":
@@ -335,7 +327,7 @@ class RedisEntryStorage:
                     return True
             except WatchError:
                 continue
-        return False
+        raise RuntimeError("Redis transition exhausted WATCH retries")
 
     def list_all(self) -> list[E]:
         pattern = f"{self._prefix}*"
