@@ -72,6 +72,24 @@ def _claim(ledger: ActionLedger, request_id: str) -> LedgerEntry:
     return ledger.claim(request_id, "test_tool", (), {})
 
 
+def _scope():
+    from mycelium.transition import execution_scope
+
+    return execution_scope(_SCOPE)
+
+
+def _replace_fence(entry: LedgerEntry, fence: int) -> LedgerEntry:
+    from dataclasses import replace
+
+    return replace(entry, fence=fence)
+
+
+def _replace_lease(entry: LedgerEntry, lease_until: float) -> LedgerEntry:
+    from dataclasses import replace
+
+    return replace(entry, lease_until=lease_until)
+
+
 def _set_entry_on_storage(
     ledger: ActionLedger, request_id: str, entry: LedgerEntry
 ) -> None:
@@ -830,5 +848,173 @@ def test_raise_hard_block_stale_snapshot_returns_inflight_held_lease() -> None:
         assert stored.lease_until == now + 3600
     finally:
         _action_ledger._reconcile_cas_lost.val = False
+
+
+# ---------------------------------------------------------------------------
+# Fencing tokens (Kleppmann monotonic fence)
+# ---------------------------------------------------------------------------
+
+
+def test_fence_round_trips_and_defaults_to_zero() -> None:
+    """fence survives to_dict/from_dict; a row without a fence loads as 0."""
+    entry = _make_entry(request_id="fence-serde")
+    entry = _replace_fence(entry, 7)
+    assert entry.to_dict()["fence"] == 7
+    assert LedgerEntry.from_dict(entry.to_dict()).fence == 7
+
+    legacy = entry.to_dict()
+    del legacy["fence"]
+    assert LedgerEntry.from_dict(legacy).fence == 0
+
+
+def test_claim_bumps_fence_monotonically(ledger: ActionLedger) -> None:
+    """First claim carries fence 1; a reclaim of a reclaimable prior bumps to 2.
+
+    Driven at the storage layer so the check is independent of the higher-level
+    reclaim policy (a NON_IDEMPOTENT_MUTATE hard-blocks rather than reclaims —
+    that safety gate is orthogonal to the monotonic fence).
+    """
+    request_id = "fence-bump"
+    storage = ledger._storage
+
+    outcome, _ = storage.try_claim_inflight(_make_entry(request_id), lease_ttl=30.0)
+    assert outcome == "claimed"
+    assert storage.get(request_id).fence == 1
+
+    # A previously-failed entry is reclaimable; the next claim bumps the fence.
+    ledger.fail(request_id, RuntimeError("boom"))
+    outcome, _ = storage.try_claim_inflight(_make_entry(request_id), lease_ttl=30.0)
+    assert outcome == "claimed"
+    reclaimed = storage.get(request_id)
+    assert reclaimed is not None
+    assert reclaimed.fence == 2
+
+
+def test_stale_fence_rejected_even_when_lease_valid(ledger: ActionLedger) -> None:
+    """A write carrying a stale fence is refused even though the lease is HELD.
+
+    This is the core fencing guarantee: lease-based reasoning would allow the
+    write (lease still valid), but the stored fence has moved on, so the CAS
+    rejects it.
+    """
+    request_id = "fence-stale-vs-lease"
+    now = time.time()
+    # Stored entry: fence 2, lease firmly HELD (an hour out).
+    _set_entry_on_storage(
+        ledger,
+        request_id,
+        LedgerEntry(
+            request_id=request_id,
+            tool="test_tool",
+            args=(),
+            kwargs={},
+            status="in-flight",
+            terminal_outcome=TerminalOutcome.IN_FLIGHT.value,
+            fence=2,
+            owner="worker-B",
+            lease_until=now + 3600,
+            idempotency_key=request_id,
+        ),
+    )
+    # Stale worker holds fence 1 (its claim was superseded).
+    with pytest.raises(LedgerOutcomeAlreadySetError):
+        ledger.complete(
+            request_id,
+            {"stale": True},
+            _expected_owner="worker-B",
+            _expected_fence=1,
+        )
+    stored = ledger.get(request_id)
+    assert stored is not None
+    assert stored.terminal_outcome == TerminalOutcome.IN_FLIGHT.value
+    assert stored.fence == 2
+
+
+def test_resumed_stale_worker_cannot_commit_after_takeover(
+    ledger: ActionLedger,
+) -> None:
+    """Worker A claims, its slot is reclaimed by worker B (fence bumps). A resumes
+    and cannot complete/commit its effect — rejected by fence, not by clock."""
+    request_id = "fence-takeover"
+    storage = ledger._storage
+
+    # Worker A wins the first claim (fence 1).
+    storage.try_claim_inflight(_make_entry(request_id), lease_ttl=30.0)
+    a_entry = storage.get(request_id)
+    assert a_entry is not None and a_entry.fence == 1
+    a_owner = a_entry.owner
+
+    # A's slot becomes reclaimable; worker B reclaims and bumps to fence 2.
+    ledger.fail(request_id, RuntimeError("A appeared dead"))
+    b_owner = "worker-B"
+    storage.try_claim_inflight(
+        _make_entry(request_id, owner=b_owner), lease_ttl=30.0
+    )
+    b_entry = storage.get(request_id)
+    assert b_entry is not None and b_entry.fence == 2
+
+    # A resumes and tries to commit with its stale fence — refused.
+    with pytest.raises(LedgerOutcomeAlreadySetError):
+        ledger.complete(
+            request_id,
+            {"from": "A"},
+            _expected_owner=a_owner,
+            _expected_fence=1,
+        )
+
+    # B (current holder, fence 2) can commit.
+    ledger.complete(
+        request_id,
+        {"from": "B"},
+        _expected_owner=b_entry.owner,
+        _expected_fence=b_entry.fence,
+    )
+    final = ledger.get(request_id)
+    assert final is not None
+    assert final.terminal_outcome == TerminalOutcome.COMPLETED.value
+    assert final.result == {"from": "B"}
+
+
+def test_matching_fence_allows_single_worker_flow(ledger: ActionLedger) -> None:
+    """The uncontended single-worker path completes normally under fencing."""
+    request_id = "fence-happy"
+    binding = _BINDING
+    kwargs = {"request_id": request_id, "thread_id": "t", "run_id": "r"}
+    with _scope():
+        claimed = ledger.claim_side_effecting(
+            request_id, "charge", (1,), dict(kwargs), binding, lease_ttl=30.0
+        )
+    ledger.complete(
+        request_id,
+        {"ok": True},
+        _expected_owner=claimed.owner,
+        _expected_fence=claimed.fence,
+    )
+    stored = ledger.get(request_id)
+    assert stored is not None
+    assert stored.terminal_outcome == TerminalOutcome.COMPLETED.value
+    assert stored.result == {"ok": True}
+
+
+def test_wrapper_single_worker_flow_unaffected_by_fence(ledger: ActionLedger) -> None:
+    """End-to-end @ledger flow through the wrapper is unchanged by fencing."""
+    from mycelium.action_ledger import ledger_sync
+
+    storage = ledger._storage
+    calls: list[int] = []
+
+    @ledger_sync(storage=storage, transition_binding=_BINDING)
+    def charge(amount: int) -> dict[str, Any]:
+        calls.append(amount)
+        return {"charged": amount}
+
+    with _scope():
+        result = charge(5, request_id="fence-wrapper")
+    assert result == {"charged": 5}
+    assert calls == [5]
+    stored = ledger.get("fence-wrapper")
+    assert stored is not None
+    assert stored.terminal_outcome == TerminalOutcome.COMPLETED.value
+    assert stored.fence == 1
 
 

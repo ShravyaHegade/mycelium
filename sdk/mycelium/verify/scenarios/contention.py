@@ -12,6 +12,7 @@ from mycelium.verify.workers import (
     contention_round_failure,
     contention_worker,
     count_executions,
+    fence_rejection_failure,
     join_workers,
     spawn_workers,
     terminate_owned,
@@ -56,6 +57,8 @@ def run_contention(ctx: ScenarioContext) -> VerificationEvidence:
     round_fail = False
     fail_reason = ""
     observed_rounds = 0
+    last_request_id: str | None = None
+    fence_fail: str | None = None
 
     spec = {
         **iso.worker_payload,
@@ -65,6 +68,7 @@ def run_contention(ctx: ScenarioContext) -> VerificationEvidence:
     try:
         for round_i in range(rounds):
             request_id = iso.track(iso.namespace.request_id("contention", f"r{round_i}"))
+            last_request_id = request_id
             exec_file = str(work / f"exec-{round_i}.txt")
             out_file = str(work / f"out-{round_i}.txt")
             err_file = str(work / f"err-{round_i}.txt")
@@ -112,7 +116,19 @@ def run_contention(ctx: ScenarioContext) -> VerificationEvidence:
     finally:
         terminate_owned([p for p in ctx.owned_procs if p.is_alive()])
 
-    ok = not round_fail and observed_rounds == rounds and max_exec == 1
+    # Fencing token proof: the winning claim carries a monotonic fence, and a
+    # superseded worker's write (fence behind the stored one) is CAS-rejected
+    # even reusing the winner's outcome/owner. This is what stops a resumed
+    # stale worker from committing after its slot was taken over.
+    if not round_fail and last_request_id is not None:
+        fence_fail = fence_rejection_failure(iso.open_storage(), last_request_id)
+
+    ok = (
+        not round_fail
+        and observed_rounds == rounds
+        and max_exec == 1
+        and fence_fail is None
+    )
     limitations: list[str] = []
     if iso.backend in {"file", "sqlite"}:
         limitations.append("single-node verification only")
@@ -125,21 +141,27 @@ def run_contention(ctx: ScenarioContext) -> VerificationEvidence:
         attempts=rounds * workers,
         body_executions=max_exec,
         duration=time.time() - started,
-        expected_behavior="exactly one body execution in every round",
+        expected_behavior=(
+            "exactly one body execution in every round, and a superseded "
+            "worker's stale-fence write is rejected by the storage CAS"
+        ),
         observed_behavior=(
             fail_reason
+            or fence_fail
             or (
                 f"max body_executions={max_exec} over {observed_rounds}/{rounds} "
-                f"round(s), workers={workers}"
+                f"round(s), workers={workers}; stale-fence write rejected"
             )
         ),
         artifacts=[str(work)],
         limitations=limitations,
         status=VerificationStatus.PASS if ok else VerificationStatus.FAIL,
         summary=(
-            f"one winner across {rounds} rounds"
+            f"one winner across {rounds} rounds; fencing rejects stale writes"
             if ok
-            else fail_reason or f"duplicate execution under contention (max={max_exec})"
+            else fail_reason
+            or fence_fail
+            or f"duplicate execution under contention (max={max_exec})"
         ),
         remediation=(
             "" if ok else "Use an atomic shared backend (postgres/redis/file lock) for claims."

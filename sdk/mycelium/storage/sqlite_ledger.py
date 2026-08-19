@@ -106,8 +106,8 @@ class SqliteEntryStorage:
         lease_ttl: float = 3600.0,
     ) -> tuple[ClaimOutcome, E | None]:
         now = time.time()
-        leased = with_lease(entry, now=now, lease_ttl=lease_ttl)
-        payload = json.dumps(leased.to_dict(), default=str)
+        fresh = with_lease(entry, now=now, lease_ttl=lease_ttl)
+        fresh_payload = json.dumps(fresh.to_dict(), default=str)
 
         with self._lock:
             with self._connect() as conn:
@@ -117,7 +117,7 @@ class SqliteEntryStorage:
                     cur = conn.execute(
                         f"INSERT OR IGNORE INTO {self._table} (request_id, payload) "
                         "VALUES (?, ?)",
-                        (entry.request_id, payload),
+                        (entry.request_id, fresh_payload),
                     )
                     if cur.rowcount == 1:
                         conn.commit()
@@ -132,7 +132,7 @@ class SqliteEntryStorage:
                         conn.execute(
                             f"INSERT INTO {self._table} (request_id, payload) "
                             "VALUES (?, ?)",
-                            (entry.request_id, payload),
+                            (entry.request_id, fresh_payload),
                         )
                         conn.commit()
                         return "claimed", None
@@ -146,9 +146,12 @@ class SqliteEntryStorage:
                         conn.commit()
                         return "in_flight", existing
 
+                    reclaimed = with_lease(
+                        entry, now=now, lease_ttl=lease_ttl, prior=existing
+                    )
                     conn.execute(
                         f"UPDATE {self._table} SET payload = ? WHERE request_id = ?",
-                        (payload, entry.request_id),
+                        (json.dumps(reclaimed.to_dict(), default=str), entry.request_id),
                     )
                     conn.commit()
                     return "claimed", None
@@ -163,6 +166,7 @@ class SqliteEntryStorage:
         expected_terminal_outcomes: frozenset[str],
         expected_owner: str | None = None,
         require_lease_held_at: float | None = None,
+        expected_fence: int | None = None,
     ) -> bool:
         if not expected_terminal_outcomes:
             return False
@@ -178,6 +182,10 @@ class SqliteEntryStorage:
         if expected_owner is not None:
             sql += " AND json_extract(payload, '$.owner') = ?"
             params.append(expected_owner)
+        if expected_fence is not None:
+            # COALESCE so old rows (payload without a fence) read as 0.
+            sql += " AND COALESCE(json_extract(payload, '$.fence'), 0) = ?"
+            params.append(expected_fence)
         if require_lease_held_at is not None:
             sql += (
                 " AND (json_extract(payload, '$.lease_until') IS NULL "
@@ -241,12 +249,14 @@ class SqliteLedgerStorage:
         expected_terminal_outcomes: frozenset[str],
         expected_owner: str | None = None,
         require_lease_held_at: float | None = None,
+        expected_fence: int | None = None,
     ) -> bool:
         return self._inner.try_transition(
             entry,
             expected_terminal_outcomes=expected_terminal_outcomes,
             expected_owner=expected_owner,
             require_lease_held_at=require_lease_held_at,
+            expected_fence=expected_fence,
         )
 
 

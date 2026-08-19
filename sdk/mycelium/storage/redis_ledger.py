@@ -202,8 +202,6 @@ class RedisEntryStorage:
         from mycelium.storage._helpers import claim_inflight_outcome, with_lease
 
         now = time.time()
-        leased = with_lease(entry, now=now, lease_ttl=lease_ttl)
-        payload = json.dumps(leased.to_dict(), default=str)
         try:
             with self._client.pipeline(transaction=True) as pipe:
                 pipe.watch(key)
@@ -218,6 +216,9 @@ class RedisEntryStorage:
                 rerun = claim_inflight_outcome(current, now=time.time())
                 if rerun != "claimed":
                     return rerun, current
+                # Reclaim: bump the fence past the superseded claim.
+                leased = with_lease(entry, now=now, lease_ttl=lease_ttl, prior=current)
+                payload = json.dumps(leased.to_dict(), default=str)
                 pipe.multi()
                 if ttl > 0:
                     pipe.set(key, payload, ex=ttl)
@@ -236,6 +237,7 @@ class RedisEntryStorage:
         expected_terminal_outcomes: frozenset[str],
         expected_owner: str | None = None,
         require_lease_held_at: float | None = None,
+        expected_fence: int | None = None,
     ) -> bool:
         from redis.exceptions import WatchError
 
@@ -258,6 +260,10 @@ class RedisEntryStorage:
                     if existing.get("terminal_outcome") not in expected_terminal_outcomes:
                         return False
                     if expected_owner is not None and existing.get("owner") != expected_owner:
+                        return False
+                    if expected_fence is not None and int(
+                        existing.get("fence") or 0
+                    ) != expected_fence:
                         return False
                     if require_lease_held_at is not None and not lease_allows_renew(
                         existing.get("lease_until"),
@@ -326,12 +332,14 @@ class RedisLedgerStorage:
         expected_terminal_outcomes: frozenset[str],
         expected_owner: str | None = None,
         require_lease_held_at: float | None = None,
+        expected_fence: int | None = None,
     ) -> bool:
         return self._inner.try_transition(
             entry,
             expected_terminal_outcomes=expected_terminal_outcomes,
             expected_owner=expected_owner,
             require_lease_held_at=require_lease_held_at,
+            expected_fence=expected_fence,
         )
 
 
@@ -375,12 +383,14 @@ class RedisTaskLedgerStorage:
         expected_terminal_outcomes: frozenset[str],
         expected_owner: str | None = None,
         require_lease_held_at: float | None = None,
+        expected_fence: int | None = None,
     ) -> bool:
         return self._inner.try_transition(
             entry,
             expected_terminal_outcomes=expected_terminal_outcomes,
             expected_owner=expected_owner,
             require_lease_held_at=require_lease_held_at,
+            expected_fence=expected_fence,
         )
 
     def list_all(self) -> list[Any]:

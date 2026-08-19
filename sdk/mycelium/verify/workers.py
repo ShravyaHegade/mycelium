@@ -274,6 +274,50 @@ def concurrent_reconcile_failure(
     return None
 
 
+def fence_rejection_failure(storage: Any, request_id: str) -> str | None:
+    """Prove a stale-fence write is CAS-rejected on the winning entry.
+
+    A superseded worker carries a fence below the stored one. Even reusing the
+    winner's own outcome/owner, a write stamped with ``stored_fence - 1`` must
+    be refused by the storage CAS. Returns a failure reason, or ``None`` when
+    the fence gate empirically rejects the stale write.
+    """
+    from dataclasses import replace
+
+    from mycelium.transition import TerminalOutcome
+
+    entry = storage.get(request_id)
+    if entry is None:
+        return f"winning entry {request_id!r} missing; cannot prove fence"
+    stored_fence = getattr(entry, "fence", None)
+    if stored_fence is None:
+        return "winning entry carries no fence token"
+    if stored_fence < 1:
+        return f"winning entry fence={stored_fence}, expected >= 1 after a claim"
+
+    stale = replace(entry, fence=stored_fence - 1, result={"stale": True})
+    accepted = storage.try_transition(
+        stale,
+        expected_terminal_outcomes=frozenset(
+            {
+                TerminalOutcome.IN_FLIGHT.value,
+                TerminalOutcome.COMPLETED.value,
+            }
+        ),
+        expected_fence=stored_fence - 1,
+    )
+    if accepted:
+        return (
+            f"stale-fence write accepted (stored fence={stored_fence}); "
+            "fencing gate did not reject the superseded worker"
+        )
+
+    after = storage.get(request_id)
+    if after is None or getattr(after, "fence", None) != stored_fence:
+        return "stored fence mutated after a stale-fence write was refused"
+    return None
+
+
 def storage_from_payload(payload: dict[str, Any]) -> IsolationGateStorage:
     backend = payload["backend"]
     if backend == "file":
@@ -474,6 +518,7 @@ __all__ = [
     "concurrent_reconcile_failure",
     "count_executions",
     "crash_worker",
+    "fence_rejection_failure",
     "join_workers",
     "make_ledger",
     "make_tool",

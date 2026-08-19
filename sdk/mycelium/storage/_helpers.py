@@ -19,13 +19,37 @@ class EntryProtocol(Protocol):
     def to_dict(self) -> dict[str, Any]: ...
 
 
+def entry_fence(entry: Any) -> int | None:
+    """Return an entry's fence token, or ``None`` when the type has no fence.
+
+    ``TaskLedgerEntry`` and other fenceless dataclasses return ``None`` so the
+    shared storage code leaves them untouched.
+    """
+    fields = getattr(entry, "__dataclass_fields__", {})
+    if "fence" not in fields:
+        return None
+    return int(getattr(entry, "fence", 0) or 0)
+
+
+def next_fence(prior: Any | None) -> int:
+    """Monotonic successor of the prior stored entry's fence (0 → 1, N → N+1)."""
+    prior_fence = entry_fence(prior) if prior is not None else None
+    return (prior_fence or 0) + 1
+
+
 def with_lease(
     entry: E,
     *,
     now: float,
     lease_ttl: float,
+    prior: Any | None = None,
 ) -> E:
-    """Return a copy of an in-flight entry with ``lease_until`` set when supported."""
+    """Return a copy of an in-flight entry with ``lease_until`` set when supported.
+
+    When the entry type carries a fence (``LedgerEntry``), the claim also bumps
+    the fence to ``next_fence(prior)`` so a second concurrent claim on the same
+    request_id gets a strictly higher token than the first.
+    """
     from dataclasses import replace
 
     from mycelium.transition import TerminalOutcome, legacy_status_from_terminal
@@ -41,6 +65,8 @@ def with_lease(
         updates["terminal_outcome"] = TerminalOutcome.IN_FLIGHT.value
     if "status" in fields:
         updates["status"] = legacy_status_from_terminal(TerminalOutcome.IN_FLIGHT)
+    if "fence" in fields:
+        updates["fence"] = next_fence(prior)
     return replace(entry, **updates)
 
 
@@ -113,7 +139,7 @@ def default_try_claim_inflight(
         return "completed", existing
     if outcome == "in_flight":
         return "in_flight", existing
-    leased = with_lease(entry, now=now, lease_ttl=lease_ttl)
+    leased = with_lease(entry, now=now, lease_ttl=lease_ttl, prior=existing)
     storage.set(leased)
     return "claimed", None
 
