@@ -5,6 +5,23 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
 
 ## Unreleased
 
+- Deterministic simulation proof (effect-commit Change 4). New
+  `mycelium.verify.invariants` module (`InvariantViolation`,
+  `committed_effect_ids`, `check_at_most_one_committed`,
+  `check_provider_mapping`) enforcing the at-most-one-COMMITTED invariant:
+  for every effect id at most one `COMPLETED` ledger row may exist, and every
+  provider effect must map to at most one COMMITTED row (a provider effect with
+  no COMMITTED row is a limitation/warning, never a violation). New
+  `simulation` verify scenario (registered in `SCENARIO_ORDER`; multiprocess
+  backends only, SKIP on memory): a crash sweep crashes a synthetic worker at
+  every boundary phase (`after_claim` / `after_body_start` / `after_boundary` /
+  `after_effect`) against a shared durable backend and re-checks the invariant
+  against the reconstructed ledger, plus a two-worker fence-takeover proof where
+  a lease-expired entry is reclaimed by worker B (fence N+1) and worker A's
+  stale-fence `complete()` is rejected by the fencing CAS while B completes
+  alone. Scoped to the scenario's own request ids so an `--scenario all` run
+  stays independent.
+
 - Tool capability typing (effect-commit Change 3). New `ToolCapability`
   probeability axis (`IDEMPOTENT` / `QUERYABLE` / `BLIND`), orthogonal to
   `SideEffectClass` (idempotency): capability answers "can an in-flight effect's
