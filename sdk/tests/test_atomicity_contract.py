@@ -27,6 +27,7 @@ from mycelium import (
     FileLedgerStorage,
     InMemoryLedgerStorage,
     LedgerEntry,
+    LedgerError,
     LedgerOutcomeAlreadySetError,
     ReconcileResult,
     RedisLedgerStorage,
@@ -911,9 +912,12 @@ def test_stale_fence_rejected_even_when_lease_valid(ledger: ActionLedger) -> Non
             owner="worker-B",
             lease_until=now + 3600,
             idempotency_key=request_id,
+            effect_protocol_required=True,
         ),
     )
     # Stale worker holds fence 1 (its claim was superseded).
+    with pytest.raises(LedgerError, match="requires the claim fence"):
+        ledger.complete(request_id, {"stale": True})
     with pytest.raises(LedgerOutcomeAlreadySetError):
         ledger.complete(
             request_id,
@@ -1056,13 +1060,12 @@ def test_poll_timeout_cannot_mark_successor_unknown() -> None:
     )
     storage.set(observed)
 
-    with pytest.raises(LedgerOutcomeAlreadySetError):
-        ledger._poll_side_effecting(
-            observed.request_id,
-            tool=observed.tool,
-            interval=0.01,
-            poll_deadline=time.time() - 1,
-        )
+    ledger._poll_side_effecting(
+        observed.request_id,
+        tool=observed.tool,
+        interval=0.01,
+        poll_deadline=time.time() - 1,
+    )
 
     successor = storage.get(observed.request_id)
     assert successor is not None
@@ -1138,6 +1141,12 @@ def test_matching_fence_allows_single_worker_flow(ledger: ActionLedger) -> None:
         claimed = ledger.claim_side_effecting(
             request_id, "charge", (1,), dict(kwargs), binding, lease_ttl=30.0
         )
+    ledger.record_decision(
+        request_id,
+        {"allowed": True, "verdicts": [], "denied_reasons": []},
+        expected_owner=claimed.owner,
+        expected_fence=claimed.fence,
+    )
     ledger.complete(
         request_id,
         {"ok": True},

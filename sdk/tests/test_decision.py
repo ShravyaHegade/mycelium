@@ -329,6 +329,43 @@ def test_decision_atomically_advances_phase_once(ledger: ActionLedger) -> None:
         )
 
 
+def test_manual_completion_requires_fenced_attempting_phase(
+    ledger: ActionLedger,
+) -> None:
+    from mycelium import LedgerError
+
+    with _scope():
+        claimed = ledger.claim_side_effecting(
+            "dec-manual",
+            "charge",
+            (),
+            {"request_id": "dec-manual", "thread_id": "t", "run_id": "r"},
+            _BINDING,
+        )
+    with pytest.raises(LedgerError, match="requires the claim fence"):
+        ledger.complete("dec-manual", {"ok": True})
+    with pytest.raises(LedgerOutcomeAlreadySetError):
+        ledger.complete(
+            "dec-manual",
+            {"ok": True},
+            expected_fence=claimed.fence,
+        )
+
+    decision = Decision(allowed=True).to_dict()
+    ledger.record_decision(
+        "dec-manual",
+        decision,
+        expected_owner=claimed.owner,
+        expected_fence=claimed.fence,
+    )
+    completed = ledger.complete(
+        "dec-manual",
+        {"ok": True},
+        expected_fence=claimed.fence,
+    )
+    assert completed.effect_phase == "COMMITTED"
+
+
 async def test_decision_recorded_on_async_boundary_advance(
     ledger: ActionLedger,
 ) -> None:

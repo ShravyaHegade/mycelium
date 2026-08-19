@@ -183,6 +183,12 @@ def _run_fence_takeover(
         decisions.append("fence takeover: stale A rejected by fence CAS")
 
     with execution_scope(TransitionScope(thread_id="verify", run_id="verify")):
+        b.record_decision(
+            request_id,
+            {"allowed": True, "verdicts": [], "denied_reasons": []},
+            expected_owner=entry_b.owner,
+            expected_fence=fence_b,
+        )
         b.complete(
             request_id,
             {"charged": True},

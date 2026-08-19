@@ -629,6 +629,7 @@ class LedgerEntry:
     # recorded (timeless paths, older rows).
     decision: dict[str, Any] | None = None
     effect_phase: str = "INTENDED"
+    effect_protocol_required: bool = False
 
     # Thin handoff / causation audit (optional). Set via ``handoff_scope`` or
     # kwargs; does not grant capabilities or change claim gates.
@@ -695,6 +696,7 @@ class LedgerEntry:
             "state_ref": self.state_ref,
             "decision": self.decision,
             "effect_phase": self.effect_phase,
+            "effect_protocol_required": self.effect_protocol_required,
             "parent_request_id": self.parent_request_id,
             "handoff_id": self.handoff_id,
         }
@@ -746,6 +748,7 @@ class LedgerEntry:
             state_ref=(str(data["state_ref"]) if data.get("state_ref") is not None else None),
             decision=(dict(data["decision"]) if data.get("decision") is not None else None),
             effect_phase=str(data.get("effect_phase") or "INTENDED"),
+            effect_protocol_required=bool(data.get("effect_protocol_required", False)),
             parent_request_id=(
                 str(data["parent_request_id"])
                 if data.get("parent_request_id") is not None
@@ -1686,6 +1689,7 @@ class ActionLedger:
             state_ref=str(state_ref_raw) if state_ref_raw is not None else None,
             parent_request_id=str(parent_raw) if parent_raw is not None else None,
             handoff_id=str(handoff_raw) if handoff_raw is not None else None,
+            effect_protocol_required=binding is not None,
         )
 
     def claim(
@@ -2647,13 +2651,16 @@ class ActionLedger:
             if poll_deadline is not None and time.time() >= poll_deadline:
                 current = self.get(request_id)
                 if current is not None:
-                    self.mark_unknown(
-                        request_id,
-                        error="timed out polling in-flight side-effecting transition",
-                        _expected_from=_IN_FLIGHT_OUTCOMES,
-                        _expected_owner=current.owner,
-                        _expected_fence=current.fence,
-                    )
+                    try:
+                        self.mark_unknown(
+                            request_id,
+                            error="timed out polling in-flight side-effecting transition",
+                            _expected_from=_IN_FLIGHT_OUTCOMES,
+                            _expected_owner=current.owner,
+                            _expected_fence=current.fence,
+                        )
+                    except LedgerOutcomeAlreadySetError:
+                        return
                     raise LedgerHardBlockError(
                         hard_block_message(
                             current,
@@ -2895,13 +2902,16 @@ class ActionLedger:
             if poll_deadline is not None and time.time() >= poll_deadline:
                 current = self.get(request_id)
                 if current is not None:
-                    self.mark_unknown(
-                        request_id,
-                        error="timed out polling in-flight side-effecting transition",
-                        _expected_from=_IN_FLIGHT_OUTCOMES,
-                        _expected_owner=current.owner,
-                        _expected_fence=current.fence,
-                    )
+                    try:
+                        self.mark_unknown(
+                            request_id,
+                            error="timed out polling in-flight side-effecting transition",
+                            _expected_from=_IN_FLIGHT_OUTCOMES,
+                            _expected_owner=current.owner,
+                            _expected_fence=current.fence,
+                        )
+                    except LedgerOutcomeAlreadySetError:
+                        return
                     raise LedgerHardBlockError(
                         hard_block_message(
                             current,
@@ -2939,6 +2949,7 @@ class ActionLedger:
         request_id: str,
         result: Any,
         *,
+        expected_fence: int | None = None,
         _expected_from: frozenset[str] | None = None,
         _expected_owner: str | None = None,
         _expected_fence: int | None = None,
@@ -2946,6 +2957,12 @@ class ActionLedger:
         existing = self._get_entry(request_id)
         if existing is None:
             raise LedgerError(f"Cannot complete unknown request {request_id!r}")
+        if expected_fence is not None and _expected_fence is not None:
+            if expected_fence != _expected_fence:
+                raise LedgerError("conflicting expected fence values")
+        fence = expected_fence if expected_fence is not None else _expected_fence
+        if existing.effect_protocol_required and fence is None:
+            raise LedgerError(f"Completing request {request_id!r} requires the claim fence")
         entry = replace(
             existing,
             status=legacy_status_from_terminal(TerminalOutcome.COMPLETED),
@@ -2960,7 +2977,12 @@ class ActionLedger:
             entry,
             expected_from=_expected_from,
             expected_owner=_expected_owner,
-            expected_fence=_expected_fence,
+            expected_fence=fence,
+            expected_effect_phase=(
+                "ATTEMPTING"
+                if _expected_from is None and existing.effect_protocol_required
+                else None
+            ),
         ):
             current = self._get_entry(request_id)
             raise LedgerOutcomeAlreadySetError(
@@ -2989,6 +3011,8 @@ class ActionLedger:
         existing = self._get_entry(request_id)
         if existing is None:
             raise LedgerError(f"Cannot fail unknown request {request_id!r}")
+        if existing.effect_protocol_required and _expected_fence is None:
+            raise LedgerError(f"Failing request {request_id!r} requires the claim fence")
         terminal = (
             TerminalOutcome.FAILED_AFTER_EFFECT
             if failed_after_effect
@@ -3040,6 +3064,8 @@ class ActionLedger:
         existing = self._get_entry(request_id)
         if existing is None:
             raise LedgerError(f"Cannot attach receipt to unknown request {request_id!r}")
+        if existing.effect_protocol_required and expected_fence is None:
+            raise LedgerError(f"Attaching a receipt to {request_id!r} requires the claim fence")
         entry = replace(existing, receipt_ref=receipt_ref)
         fence = existing.fence if expected_fence is None else expected_fence
         if not self._try_transition(
@@ -3070,6 +3096,10 @@ class ActionLedger:
         if existing is None:
             raise LedgerError(
                 f"Cannot attach external operation ref to unknown request {request_id!r}"
+            )
+        if existing.effect_protocol_required and expected_fence is None:
+            raise LedgerError(
+                f"Attaching an external operation to {request_id!r} requires the claim fence"
             )
         entry = replace(existing, external_operation_ref=ref)
         fence = existing.fence if expected_fence is None else expected_fence
@@ -3112,6 +3142,8 @@ class ActionLedger:
         existing = self._get_entry(request_id)
         if existing is None:
             raise LedgerError(f"Cannot renew lease for unknown request {request_id!r}")
+        if existing.effect_protocol_required and _expected_fence is None:
+            raise LedgerError(f"Renewing request {request_id!r} requires the claim fence")
         now = now if now is not None else time.time()
         stored = (
             existing.terminal_outcome
@@ -3215,6 +3247,8 @@ class ActionLedger:
         existing = self._get_entry(request_id)
         if existing is None:
             raise LedgerError(f"Cannot block unknown request {request_id!r}")
+        if existing.effect_protocol_required and _expected_fence is None:
+            raise LedgerError(f"Blocking request {request_id!r} requires the claim fence")
         entry = replace(
             existing,
             status=legacy_status_from_terminal(TerminalOutcome.BLOCKED),
@@ -3250,6 +3284,8 @@ class ActionLedger:
         existing = self._get_entry(request_id)
         if existing is None:
             raise LedgerError(f"Cannot mark unknown request {request_id!r}")
+        if existing.effect_protocol_required and _expected_fence is None:
+            raise LedgerError(f"Marking request {request_id!r} unknown requires the claim fence")
         entry = replace(
             existing,
             status=legacy_status_from_terminal(TerminalOutcome.UNKNOWN),
@@ -3435,6 +3471,8 @@ class ActionLedger:
         existing = self._get_entry(request_id)
         if existing is None:
             raise LedgerError(f"Cannot advance boundary for unknown request {request_id!r}")
+        if existing.effect_protocol_required and expected_fence is None:
+            raise LedgerError(f"Advancing request {request_id!r} requires the claim fence")
         current = SideEffectBoundary(existing.side_effect_boundary)
         entry = (
             existing
@@ -3472,6 +3510,8 @@ class ActionLedger:
         existing = self._get_entry(request_id)
         if existing is None:
             raise LedgerError(f"Cannot record decision for unknown request {request_id!r}")
+        if existing.effect_protocol_required and expected_fence is None:
+            raise LedgerError(f"Recording a decision for {request_id!r} requires the claim fence")
         entry = replace(existing, decision=decision, effect_phase="ATTEMPTING")
         if not self._try_transition(
             entry,

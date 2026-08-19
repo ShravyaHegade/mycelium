@@ -436,6 +436,12 @@ def crash_worker(payload: dict[str, Any]) -> None:
             if phase == "after_claim":
                 _append_line(payload["ready_file"], "after_claim")
                 os._exit(1)
+            ledger.record_decision(
+                request_id,
+                {"allowed": True, "verdicts": [], "denied_reasons": []},
+                expected_owner=claimed.owner,
+                expected_fence=claimed.fence,
+            )
             _append_count(payload["exec_file"])
             if phase == "after_body_start":
                 _append_line(payload["ready_file"], "after_body_start")
@@ -450,7 +456,12 @@ def crash_worker(payload: dict[str, Any]) -> None:
                 _append_line(payload["ready_file"], "after_effect")
                 time.sleep(60)
                 os._exit(1)
-            ledger.complete(request_id, {"charged": True})
+            ledger.complete(
+                request_id,
+                {"charged": True},
+                expected_fence=claimed.fence,
+                _expected_owner=claimed.owner,
+            )
         finally:
             _active_transition_var.reset(token)
 
