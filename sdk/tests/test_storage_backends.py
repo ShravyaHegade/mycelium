@@ -98,7 +98,9 @@ def test_redis_storage_atomic_claim(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(LedgerPendingError):
         ledger.claim("req-redis", "send_payment", (), {"amount": 1})
 
-    completed = ledger.complete("req-redis", {"ok": True})
+    completed = ledger.complete(
+        "req-redis", {"ok": True}, expected_fence=first.fence
+    )
     assert completed.status == "completed"
 
     replay = ledger.claim("req-redis", "send_payment", (), {"amount": 1})
@@ -110,8 +112,8 @@ def test_redis_storage_retries_after_failed_claim(monkeypatch: pytest.MonkeyPatc
     _fake_redis(monkeypatch)
     storage = RedisLedgerStorage("redis://test")
     ledger = ActionLedger(storage=storage)
-    ledger.claim("req-fail", "send_payment", (), {})
-    ledger.fail("req-fail", RuntimeError("boom"))
+    claimed = ledger.claim("req-fail", "send_payment", (), {})
+    ledger.fail("req-fail", RuntimeError("boom"), expected_fence=claimed.fence)
 
     retry = ledger.claim("req-fail", "send_payment", (), {})
     assert retry.status == "in-flight"
@@ -371,7 +373,10 @@ def test_redis_storage_read_only_returns_completed(
         {"query": "billing"},
     )
     assert claimed.status == "in-flight"
-    ledger.complete(request_id, {"query": "billing", "hits": 1})
+    ledger.complete(
+        request_id, {"query": "billing", "hits": 1},
+        expected_fence=claimed.fence,
+    )
 
     replay = ledger.claim_read_only(
         request_id,
@@ -402,7 +407,7 @@ def test_postgres_storage_atomic_claim() -> None:
     with pytest.raises(LedgerPendingError):
         ledger.claim(request_id, "send_payment", (), {"amount": 99})
 
-    ledger.complete(request_id, {"paid": True})
+    ledger.complete(request_id, {"paid": True}, expected_fence=first.fence)
     replay = ledger.claim(request_id, "send_payment", (), {"amount": 99})
     assert replay.status == "completed"
     assert replay.result == {"paid": True}
@@ -448,7 +453,9 @@ def test_sqlite_storage_atomic_claim(tmp_path: Path) -> None:
     with pytest.raises(LedgerPendingError):
         ledger.claim("req-sqlite", "send_payment", (), {"amount": 1})
 
-    completed = ledger.complete("req-sqlite", {"ok": True})
+    completed = ledger.complete(
+        "req-sqlite", {"ok": True}, expected_fence=first.fence
+    )
     assert completed.status == "completed"
 
     replay = ledger.claim("req-sqlite", "send_payment", (), {"amount": 1})

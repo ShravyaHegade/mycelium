@@ -632,18 +632,30 @@ def test_postgres_release_not_executed_round_trip() -> None:
 def _seed_file_ledger(path: Path) -> str:
     storage = FileLedgerStorage(path)
     ledger_inst = ActionLedger(storage=storage)
-    ledger_inst.claim("req-cli", "send_payment", (), {"amount": 10})
-    ledger_inst.attach_external_operation_ref("req-cli", "pi_cli_1")
-    ledger_inst.mark_blocked("req-cli", error="stale lease; maybe crossed")
+    claimed = ledger_inst.claim("req-cli", "send_payment", (), {"amount": 10})
+    ledger_inst.attach_external_operation_ref(
+        "req-cli", "pi_cli_1", expected_fence=claimed.fence
+    )
+    ledger_inst.mark_blocked(
+        "req-cli", error="stale lease; maybe crossed", expected_fence=claimed.fence
+    )
     return "req-cli"
 
 
 def _seed_sqlite_ledger(path: Path) -> str:
     storage = SqliteLedgerStorage(path)
     ledger_inst = ActionLedger(storage=storage)
-    ledger_inst.claim("req-cli-sqlite", "send_payment", (), {"amount": 10})
-    ledger_inst.attach_external_operation_ref("req-cli-sqlite", "pi_cli_sqlite")
-    ledger_inst.mark_blocked("req-cli-sqlite", error="stale lease; maybe crossed")
+    claimed = ledger_inst.claim(
+        "req-cli-sqlite", "send_payment", (), {"amount": 10}
+    )
+    ledger_inst.attach_external_operation_ref(
+        "req-cli-sqlite", "pi_cli_sqlite", expected_fence=claimed.fence
+    )
+    ledger_inst.mark_blocked(
+        "req-cli-sqlite",
+        error="stale lease; maybe crossed",
+        expected_fence=claimed.fence,
+    )
     return "req-cli-sqlite"
 
 

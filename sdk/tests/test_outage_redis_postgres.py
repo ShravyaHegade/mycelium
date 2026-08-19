@@ -204,10 +204,14 @@ class TestRedisOutage:
         storage = self._storage(monkeypatch)
         ledger_inst = ActionLedger(storage=storage)
         # Claim succeeds while the backend is up, then it goes down mid-flight.
-        ledger_inst.claim("req-redis-complete", "send_payment", (), {"amount": 10})
+        claimed = ledger_inst.claim(
+            "req-redis-complete", "send_payment", (), {"amount": 10}
+        )
         storage.fail_transition = True
         with pytest.raises(LedgerStorageUnavailableError, match="try_transition"):
-            ledger_inst.complete("req-redis-complete", {"ok": True})
+            ledger_inst.complete(
+                "req-redis-complete", {"ok": True}, expected_fence=claimed.fence
+            )
         storage.fail_transition = False
         stored = storage.get("req-redis-complete")
         assert stored is not None
@@ -406,10 +410,14 @@ class TestPostgresOutage:
     def test_complete_during_outage_keeps_inflight(self, stub_psycopg: None) -> None:
         storage = FailingPostgresStorage()
         ledger_inst = ActionLedger(storage=storage)
-        ledger_inst.claim("req-pg-complete", "send_payment", (), {"amount": 10})
+        claimed = ledger_inst.claim(
+            "req-pg-complete", "send_payment", (), {"amount": 10}
+        )
         storage.fail_transition = True
         with pytest.raises(LedgerStorageUnavailableError, match="try_transition"):
-            ledger_inst.complete("req-pg-complete", {"ok": True})
+            ledger_inst.complete(
+                "req-pg-complete", {"ok": True}, expected_fence=claimed.fence
+            )
         storage.fail_transition = False
         stored = storage.get("req-pg-complete")
         assert stored is not None

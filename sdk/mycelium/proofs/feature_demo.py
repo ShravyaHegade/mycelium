@@ -101,8 +101,8 @@ def prove_lease_auto_renew() -> dict[str, Any]:
     @ledger_sync(
         storage=storage,
         transition_binding=binding,
-        lease_ttl=0.08,
-        lease_renew_interval=0.02,
+        lease_ttl=0.3,
+        lease_renew_interval=0.03,
     )
     def slow_charge(amount: float) -> dict[str, float]:
         started.set()
@@ -119,7 +119,7 @@ def prove_lease_auto_renew() -> dict[str, Any]:
     def run_peer() -> None:
         try:
             assert started.wait(timeout=2.0)
-            time.sleep(0.12)  # past original ttl without renew → would be EXPIRED
+            time.sleep(0.45)  # past original ttl without renew → would be EXPIRED
             entries = storage.list_all()
             assert len(entries) == 1
             peer_validity.append(entries[0].lease_validity())

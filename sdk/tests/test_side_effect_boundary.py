@@ -44,24 +44,37 @@ def test_advance_boundary_is_monotonic() -> None:
     storage = InMemoryLedgerStorage()
     action_ledger = ActionLedger(storage=storage)
     rid = "rid-monotonic"
-    action_ledger.claim_side_effecting(rid, "t", (), {}, _binding())
+    claimed = action_ledger.claim_side_effecting(rid, "t", (), {}, _binding())
+    action_ledger.record_decision(
+        rid,
+        {"allowed": True, "verdicts": [], "denied_reasons": []},
+        expected_fence=claimed.fence,
+    )
 
-    action_ledger.advance_boundary(rid, SideEffectBoundary.MAYBE_CROSSED)
+    action_ledger.advance_boundary(
+        rid, SideEffectBoundary.MAYBE_CROSSED, expected_fence=claimed.fence
+    )
     assert (
         storage.get(rid).side_effect_boundary == SideEffectBoundary.MAYBE_CROSSED.value
     )
 
     # Regressing is a no-op.
-    action_ledger.advance_boundary(rid, SideEffectBoundary.NOT_CROSSED)
+    action_ledger.advance_boundary(
+        rid, SideEffectBoundary.NOT_CROSSED, expected_fence=claimed.fence
+    )
     assert (
         storage.get(rid).side_effect_boundary == SideEffectBoundary.MAYBE_CROSSED.value
     )
 
-    action_ledger.advance_boundary(rid, SideEffectBoundary.CROSSED)
+    action_ledger.advance_boundary(
+        rid, SideEffectBoundary.CROSSED, expected_fence=claimed.fence
+    )
     assert storage.get(rid).side_effect_boundary == SideEffectBoundary.CROSSED.value
 
     # Cannot fall back from crossed.
-    action_ledger.advance_boundary(rid, SideEffectBoundary.MAYBE_CROSSED)
+    action_ledger.advance_boundary(
+        rid, SideEffectBoundary.MAYBE_CROSSED, expected_fence=claimed.fence
+    )
     assert storage.get(rid).side_effect_boundary == SideEffectBoundary.CROSSED.value
 
 

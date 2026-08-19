@@ -212,8 +212,15 @@ def _reclaim_file_worker(payload: dict[str, Any]) -> None:
             _append_line(payload["out_file"], json.dumps({"cached": entry.result}))
             return
         if outcome == TerminalOutcome.IN_FLIGHT:
+            ledger.record_decision(
+                request_id,
+                {"allowed": True, "verdicts": [], "denied_reasons": []},
+                expected_fence=entry.fence,
+            )
             _append_count(payload["exec_file"])
-            ledger.complete(request_id, {"charged": True})
+            ledger.complete(
+                request_id, {"charged": True}, expected_fence=entry.fence
+            )
             _append_line(payload["out_file"], json.dumps({"ran": True}))
             return
         _append_line(payload["err_file"], f"unexpected outcome {outcome.value}")
