@@ -90,12 +90,19 @@ class PredicateVerdict:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> PredicateVerdict:
+        if not isinstance(data, Mapping):
+            raise TypeError("predicate verdict must be a mapping")
+        if not isinstance(data.get("name"), str) or not data["name"]:
+            raise ValueError("predicate verdict name must be a non-empty string")
+        if not isinstance(data.get("allowed"), bool):
+            raise ValueError("predicate verdict allowed must be a boolean")
+        reason = data.get("reason")
+        if reason is not None and not isinstance(reason, str):
+            raise ValueError("predicate verdict reason must be a string or null")
         return cls(
-            name=str(data["name"]),
-            allowed=bool(data["allowed"]),
-            reason=(
-                str(data["reason"]) if data.get("reason") is not None else None
-            ),
+            name=data["name"],
+            allowed=data["allowed"],
+            reason=reason,
         )
 
 
@@ -138,13 +145,30 @@ class Decision:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> Decision:
+        if not isinstance(data, Mapping):
+            raise TypeError("decision must be a mapping")
+        if set(data) != {"allowed", "verdicts", "denied_reasons"}:
+            raise ValueError("decision must contain allowed, verdicts, and denied_reasons")
+        if not isinstance(data["allowed"], bool):
+            raise ValueError("decision allowed must be a boolean")
+        if not isinstance(data["verdicts"], (list, tuple)):
+            raise ValueError("decision verdicts must be a list")
+        if not isinstance(data["denied_reasons"], (list, tuple)) or any(
+            not isinstance(reason, str) for reason in data["denied_reasons"]
+        ):
+            raise ValueError("decision denied_reasons must be a list of strings")
+        verdicts = tuple(
+            PredicateVerdict.from_dict(item) for item in data["verdicts"]
+        )
+        allowed = data["allowed"]
+        if verdicts and allowed != all(verdict.allowed for verdict in verdicts):
+            raise ValueError("decision allowed conflicts with predicate verdicts")
+        if allowed and data["denied_reasons"]:
+            raise ValueError("allowed decision cannot contain denied reasons")
         return cls(
-            allowed=bool(data["allowed"]),
-            verdicts=tuple(
-                PredicateVerdict.from_dict(item)
-                for item in (data.get("verdicts") or [])
-            ),
-            denied_reasons=tuple(str(r) for r in (data.get("denied_reasons") or [])),
+            allowed=allowed,
+            verdicts=verdicts,
+            denied_reasons=tuple(data["denied_reasons"]),
         )
 
 

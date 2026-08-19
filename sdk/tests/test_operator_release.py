@@ -230,6 +230,40 @@ def test_release_completed_returns_result_without_reexecution(storage) -> None:
         assert calls == [7.0]  # body never re-ran
 
 
+def test_release_completed_rejects_decisionless_effect_protocol(storage) -> None:
+    ledger_inst = ActionLedger(storage=storage)
+    with execution_scope(_scope()):
+        claimed = ledger_inst.claim_side_effecting(
+            "release-decisionless",
+            "charge",
+            (),
+            {
+                "request_id": "release-decisionless",
+                "thread_id": "t1",
+                "run_id": "r1",
+            },
+            _binding(),
+        )
+    ledger_inst.mark_unknown(
+        claimed.request_id,
+        error="worker disappeared",
+        expected_fence=claimed.fence,
+    )
+
+    with pytest.raises(LedgerReleaseRefusedError, match="allowed durable ATTEMPTING"):
+        ledger_inst.release(
+            claimed.request_id,
+            verified="completed",
+            result={"charged": True},
+            by="ops@example.com",
+            reason="provider reports success",
+        )
+
+    stored = storage.get(claimed.request_id)
+    assert stored is not None
+    assert stored.resolved_terminal_outcome() != TerminalOutcome.COMPLETED
+
+
 def test_release_is_one_shot(storage) -> None:
     ledger_inst = ActionLedger(storage=storage)
     storage.set(

@@ -510,6 +510,73 @@ def test_manual_pre_provider_mutations_require_attempting_phase(
     assert advanced.side_effect_boundary == SideEffectBoundary.MAYBE_CROSSED.value
 
 
+def test_manual_decisions_fail_closed_when_malformed_or_denied(
+    ledger: ActionLedger,
+) -> None:
+    from mycelium import LedgerError
+
+    with _scope():
+        malformed = ledger.claim_side_effecting(
+            "dec-manual-malformed",
+            "charge",
+            (),
+            {"request_id": "dec-manual-malformed", "thread_id": "t", "run_id": "r"},
+            _BINDING,
+        )
+    for invalid in (
+        {},
+        {"allowed": "true", "verdicts": [], "denied_reasons": []},
+    ):
+        with pytest.raises(LedgerError, match="Invalid decision"):
+            ledger.record_decision(
+                malformed.request_id,
+                invalid,
+                expected_owner=malformed.owner,
+                expected_fence=malformed.fence,
+            )
+    assert ledger.get(malformed.request_id).effect_phase == "INTENDED"
+
+    with _scope():
+        denied = ledger.claim_side_effecting(
+            "dec-manual-denied",
+            "charge",
+            (),
+            {"request_id": "dec-manual-denied", "thread_id": "t", "run_id": "r"},
+            _BINDING,
+        )
+    denied_decision = Decision(
+        allowed=False,
+        verdicts=(PredicateVerdict("policy", False, "denied"),),
+        denied_reasons=("denied",),
+    )
+    recorded = ledger.record_decision(
+        denied.request_id,
+        denied_decision.to_dict(),
+        expected_owner=denied.owner,
+        expected_fence=denied.fence,
+    )
+    assert recorded.effect_phase == "ABORTED"
+    with pytest.raises(LedgerOutcomeAlreadySetError):
+        ledger.advance_boundary(
+            denied.request_id,
+            SideEffectBoundary.MAYBE_CROSSED,
+            expected_owner=denied.owner,
+            expected_fence=denied.fence,
+        )
+    with pytest.raises(LedgerOutcomeAlreadySetError):
+        ledger.complete(
+            denied.request_id,
+            {"ok": True},
+            expected_fence=denied.fence,
+        )
+    aborted = ledger.fail(
+        denied.request_id,
+        RuntimeError("decision denied"),
+        expected_fence=denied.fence,
+    )
+    assert aborted.effect_phase == "ABORTED"
+
+
 async def test_decision_recorded_on_async_boundary_advance(
     ledger: ActionLedger,
 ) -> None:

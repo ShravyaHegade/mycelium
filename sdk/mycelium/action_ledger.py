@@ -759,6 +759,17 @@ class LedgerEntry:
         )
 
 
+def _has_allowed_attempting_decision(entry: LedgerEntry) -> bool:
+    if entry.effect_phase != "ATTEMPTING" or entry.decision is None:
+        return False
+    from mycelium.decision import Decision
+
+    try:
+        return Decision.from_dict(entry.decision).allowed
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
 class LedgerStorage:
     """Backend interface for durable action ledger records."""
 
@@ -1583,6 +1594,13 @@ class ActionLedger:
                     "Use mark_worker_dead() first, or wait for the grace window."
                 )
         if verified == OPERATOR_RESOLUTION_COMPLETED:
+            if existing.effect_protocol_required and not _has_allowed_attempting_decision(
+                existing
+            ):
+                raise LedgerReleaseRefusedError(
+                    f"Cannot release request {request_id!r} as completed: "
+                    "no allowed durable ATTEMPTING decision"
+                )
             entry = replace(
                 existing,
                 status=legacy_status_from_terminal(TerminalOutcome.COMPLETED),
@@ -2034,9 +2052,8 @@ class ActionLedger:
         polls instead of hard-blocking.
         """
         if result.status == ReconcileStatus.COMPLETED:
-            if observed_entry.effect_protocol_required and (
-                observed_entry.effect_phase != "ATTEMPTING"
-                or observed_entry.decision is None
+            if observed_entry.effect_protocol_required and not (
+                _has_allowed_attempting_decision(observed_entry)
             ):
                 return None
             try:
@@ -2969,9 +2986,7 @@ class ActionLedger:
         fence = expected_fence if expected_fence is not None else _expected_fence
         if fence is None:
             raise LedgerError(f"Completing request {request_id!r} requires the claim fence")
-        if existing.effect_protocol_required and (
-            existing.effect_phase != "ATTEMPTING" or existing.decision is None
-        ):
+        if existing.effect_protocol_required and not _has_allowed_attempting_decision(existing):
             raise LedgerOutcomeAlreadySetError(
                 f"Cannot complete request {request_id!r}: no durable ATTEMPTING decision"
             )
@@ -3124,9 +3139,7 @@ class ActionLedger:
             raise LedgerError(
                 f"Attaching an external operation to {request_id!r} requires the claim fence"
             )
-        if existing.effect_protocol_required and (
-            existing.effect_phase != "ATTEMPTING" or existing.decision is None
-        ):
+        if existing.effect_protocol_required and not _has_allowed_attempting_decision(existing):
             raise LedgerOutcomeAlreadySetError(
                 f"Cannot attach external operation ref to {request_id!r}: "
                 "no durable ATTEMPTING decision"
@@ -3532,9 +3545,7 @@ class ActionLedger:
             raise LedgerError(f"Cannot advance boundary for unknown request {request_id!r}")
         if expected_fence is None:
             raise LedgerError(f"Advancing request {request_id!r} requires the claim fence")
-        if existing.effect_protocol_required and (
-            existing.effect_phase != "ATTEMPTING" or existing.decision is None
-        ):
+        if existing.effect_protocol_required and not _has_allowed_attempting_decision(existing):
             raise LedgerOutcomeAlreadySetError(
                 f"Cannot advance boundary for {request_id!r}: "
                 "no durable ATTEMPTING decision"
@@ -3580,7 +3591,17 @@ class ActionLedger:
             raise LedgerError(f"Cannot record decision for unknown request {request_id!r}")
         if expected_fence is None:
             raise LedgerError(f"Recording a decision for {request_id!r} requires the claim fence")
-        entry = replace(existing, decision=decision, effect_phase="ATTEMPTING")
+        from mycelium.decision import Decision
+
+        try:
+            parsed = Decision.from_dict(decision)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise LedgerError(f"Invalid decision for request {request_id!r}: {exc}") from exc
+        entry = replace(
+            existing,
+            decision=parsed.to_dict(),
+            effect_phase="ATTEMPTING" if parsed.allowed else "ABORTED",
+        )
         if not self._try_transition(
             entry,
             expected_from=_IN_FLIGHT_OUTCOMES,
