@@ -19,6 +19,7 @@ from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar
 
 from mycelium.reconcile import Reconciler, ReconcileResult, ReconcileStatus
@@ -4015,7 +4016,7 @@ def _record_boundary_decision(
     currency_decision: Any,
     owner: str | None,
     fence: int | None,
-) -> None:
+) -> Any:
     """Evaluate the registered predicates and stamp the Decision atomically.
 
     This is the single decision point: run at the ``INTENDED -> ATTEMPTING``
@@ -4055,6 +4056,39 @@ def _record_boundary_decision(
             request_id,
         )
         raise
+    return decision
+
+
+def _boundary_denial_facts(
+    blocked: Exception,
+    *,
+    authority_offset: int,
+    currency_offset: int,
+) -> tuple[Any, Any]:
+    from mycelium.authority_window import (
+        AuthorityExpiredError,
+        get_authority_decisions,
+    )
+    from mycelium.use_time_currency import get_use_time_decisions
+
+    authority = get_authority_decisions()[authority_offset:]
+    currency = get_use_time_decisions()[currency_offset:]
+    auth_decision = authority[-1] if authority else None
+    currency_decision = currency[-1] if currency else None
+    denied = SimpleNamespace(
+        decision="denied",
+        reason=getattr(blocked, "reason", None)
+        or getattr(blocked, "violation", None)
+        or type(blocked).__name__,
+    )
+    if isinstance(blocked, AuthorityExpiredError) and auth_decision is None:
+        auth_decision = denied
+    elif currency_decision is None:
+        currency_decision = denied
+    return auth_decision, currency_decision
+
+
+def _raise_denied_decision(request_id: str, decision: Any) -> None:
     if not decision.allowed:
         raise LedgerHardBlockError(
             f"decision denied for {request_id!r}: "
@@ -4177,16 +4211,28 @@ def _run_ledgered(
         )
     )
     try:
-        from mycelium.authority_window import AuthorityExpiredError
+        from mycelium.authority_window import (
+            AuthorityExpiredError,
+            get_authority_decisions,
+        )
         from mycelium.use_time_currency import (
             UseTimeCurrencyError,
             enforce_use_boundary,
+            get_use_time_decisions,
         )
 
-        # Use-phase authority + currency after claim/lease wait, before body_start.
+        blocked: AuthorityExpiredError | UseTimeCurrencyError | None = None
+        authority_offset = len(get_authority_decisions())
+        currency_offset = len(get_use_time_decisions())
         try:
             auth_decision, currency_decision = enforce_use_boundary(kwargs=call_mapping)
-        except (AuthorityExpiredError, UseTimeCurrencyError) as blocked:
+        except (AuthorityExpiredError, UseTimeCurrencyError) as exc:
+            blocked = exc
+            auth_decision, currency_decision = _boundary_denial_facts(
+                blocked,
+                authority_offset=authority_offset,
+                currency_offset=currency_offset,
+            )
             event = (
                 "use_time_currency"
                 if isinstance(blocked, UseTimeCurrencyError)
@@ -4216,9 +4262,8 @@ def _run_ledgered(
                     event,
                     request_id,
                 )
-            raise
 
-        if getattr(auth_decision, "decision", "skipped") != "skipped":
+        if getattr(auth_decision, "decision", "skipped") == "allowed":
             try:
                 ledger._emit_outcome(
                     request_id=request_id,
@@ -4243,7 +4288,7 @@ def _run_ledgered(
                     request_id,
                 )
 
-        if currency_decision.decision != "skipped":
+        if getattr(currency_decision, "decision", "skipped") == "allowed":
             try:
                 ledger._emit_outcome(
                     request_id=request_id,
@@ -4268,7 +4313,7 @@ def _run_ledgered(
                     request_id,
                 )
 
-        _record_boundary_decision(
+        decision = _record_boundary_decision(
             ledger,
             request_id,
             tool=tool_name,
@@ -4284,6 +4329,9 @@ def _run_ledgered(
             owner=owner,
             fence=fence,
         )
+        if blocked is not None:
+            raise blocked
+        _raise_denied_decision(request_id, decision)
 
         ledger._emit_outcome(
             request_id=request_id,
@@ -4522,15 +4570,28 @@ async def _run_ledgered_async(
         )
     )
     try:
-        from mycelium.authority_window import AuthorityExpiredError
+        from mycelium.authority_window import (
+            AuthorityExpiredError,
+            get_authority_decisions,
+        )
         from mycelium.use_time_currency import (
             UseTimeCurrencyError,
             enforce_use_boundary_async,
+            get_use_time_decisions,
         )
 
+        blocked: AuthorityExpiredError | UseTimeCurrencyError | None = None
+        authority_offset = len(get_authority_decisions())
+        currency_offset = len(get_use_time_decisions())
         try:
             auth_decision, currency_decision = await enforce_use_boundary_async(kwargs=call_mapping)
-        except (AuthorityExpiredError, UseTimeCurrencyError) as blocked:
+        except (AuthorityExpiredError, UseTimeCurrencyError) as exc:
+            blocked = exc
+            auth_decision, currency_decision = _boundary_denial_facts(
+                blocked,
+                authority_offset=authority_offset,
+                currency_offset=currency_offset,
+            )
             event = (
                 "use_time_currency"
                 if isinstance(blocked, UseTimeCurrencyError)
@@ -4560,9 +4621,8 @@ async def _run_ledgered_async(
                     event,
                     request_id,
                 )
-            raise
 
-        if getattr(auth_decision, "decision", "skipped") != "skipped":
+        if getattr(auth_decision, "decision", "skipped") == "allowed":
             try:
                 ledger._emit_outcome(
                     request_id=request_id,
@@ -4587,7 +4647,7 @@ async def _run_ledgered_async(
                     request_id,
                 )
 
-        if currency_decision.decision != "skipped":
+        if getattr(currency_decision, "decision", "skipped") == "allowed":
             try:
                 ledger._emit_outcome(
                     request_id=request_id,
@@ -4612,7 +4672,7 @@ async def _run_ledgered_async(
                     request_id,
                 )
 
-        _record_boundary_decision(
+        decision = _record_boundary_decision(
             ledger,
             request_id,
             tool=tool_name,
@@ -4628,6 +4688,9 @@ async def _run_ledgered_async(
             owner=owner,
             fence=fence,
         )
+        if blocked is not None:
+            raise blocked
+        _raise_denied_decision(request_id, decision)
 
         ledger._emit_outcome(
             request_id=request_id,

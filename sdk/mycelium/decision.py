@@ -279,13 +279,11 @@ def _verdict_from_validation(name: str, validation: Any) -> PredicateVerdict:
     object reaches here it is ``allowed`` or ``skipped`` (both permit the
     effect). A missing validation (check not wired for this tool) is a permit.
     """
-    from mycelium.use_time_currency import DECISION_DENIED
-
     if validation is None:
         return PredicateVerdict(name=name, allowed=True, reason=None)
     decision = getattr(validation, "decision", None)
     reason = getattr(validation, "reason", None)
-    allowed = decision != DECISION_DENIED
+    allowed = decision in {"allowed", "skipped"}
     return PredicateVerdict(name=name, allowed=allowed, reason=None if allowed else reason)
 
 

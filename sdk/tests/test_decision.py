@@ -18,6 +18,7 @@ verify:
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime, timezone
 from typing import Any
 
 import pytest
@@ -60,9 +61,16 @@ def _scope():
 
 @pytest.fixture(autouse=True)
 def _clean_engine():
+    from mycelium.authority_window import reset_authority_window_state
+    from mycelium.use_time_currency import reset_use_time_currency_state
+
     reset_decision_engine()
+    reset_authority_window_state()
+    reset_use_time_currency_state()
     yield
     reset_decision_engine()
+    reset_authority_window_state()
+    reset_use_time_currency_state()
 
 
 @pytest.fixture
@@ -273,6 +281,88 @@ def test_plugin_denial_hard_blocks_with_decision_recorded(
     assert "amount too large" in decision.denied_reasons
 
 
+def test_authority_denial_is_recorded_before_sync_abort(
+    ledger: ActionLedger,
+) -> None:
+    from mycelium.action_ledger import ledger_sync
+    from mycelium.authority_window import (
+        AuthorityExpiredError,
+        BoundAuthority,
+        register_authority_for_use,
+        set_authority_clock,
+    )
+
+    body_ran: list[bool] = []
+    set_authority_clock(lambda: 2_000.0)
+    register_authority_for_use(
+        BoundAuthority(
+            authority_id="expired-auth",
+            authority_kind="test",
+            expires_at=datetime.fromtimestamp(1_000.0, tz=timezone.utc),
+            tool="charge",
+        )
+    )
+
+    @ledger_sync(storage=ledger._storage, transition_binding=_BINDING)
+    def charge(amount: int) -> None:
+        body_ran.append(True)
+
+    with _scope(), pytest.raises(AuthorityExpiredError):
+        charge(amount=5, request_id="dec-authority-denied")
+
+    stored = ledger.get("dec-authority-denied")
+    assert stored is not None
+    assert body_ran == []
+    decision = Decision.from_dict(stored.decision)
+    assert decision.allowed is False
+    assert decision.predicate_results["authority_window"] is False
+    assert "expired" in decision.denied_reasons
+
+
+async def test_currency_denial_is_recorded_before_async_abort(
+    ledger: ActionLedger,
+) -> None:
+    from mycelium.action_ledger import ledger as ledger_async
+    from mycelium.use_time_currency import (
+        UseTimeCurrencyError,
+        UseTimeFact,
+        ValidatorResult,
+        register_fact_for_use,
+        register_use_time_validator,
+    )
+
+    body_ran: list[bool] = []
+    register_use_time_validator(
+        "stale_state",
+        lambda **kwargs: ValidatorResult(current=False, reason="changed"),
+    )
+    register_fact_for_use(
+        UseTimeFact(
+            name="charge.current",
+            subject_type="charge",
+            subject_id="charge-1",
+            observed_at=datetime.now(timezone.utc),
+            tool="charge",
+            validator="stale_state",
+        )
+    )
+
+    @ledger_async(storage=ledger._storage, transition_binding=_BINDING)
+    async def charge(amount: int) -> None:
+        body_ran.append(True)
+
+    with _scope(), pytest.raises(UseTimeCurrencyError):
+        await charge(amount=5, request_id="dec-currency-denied")
+
+    stored = ledger.get("dec-currency-denied")
+    assert stored is not None
+    assert body_ran == []
+    decision = Decision.from_dict(stored.decision)
+    assert decision.allowed is False
+    assert decision.predicate_results["use_time_currency"] is False
+    assert "changed" in decision.denied_reasons
+
+
 # ---------------------------------------------------------------------------
 # Stale-fence rejection
 # ---------------------------------------------------------------------------
@@ -289,7 +379,11 @@ def test_stale_fence_worker_cannot_record_decision(ledger: ActionLedger) -> None
     current = storage.get("dec-fence")
     storage.set(replace(current, fence=2))
 
-    decision = Decision(allowed=True, verdicts=(PredicateVerdict("x", True),))
+    decision = Decision(
+        allowed=False,
+        verdicts=(PredicateVerdict("authority_window", False, "expired"),),
+        denied_reasons=("expired",),
+    )
     with pytest.raises(LedgerOutcomeAlreadySetError):
         ledger.record_decision(
             "dec-fence",
