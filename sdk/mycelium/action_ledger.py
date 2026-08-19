@@ -2388,6 +2388,8 @@ class ActionLedger:
         kwargs: dict[str, Any],
         existing: LedgerEntry,
         binding: ToolTransitionBinding,
+        *,
+        lease_ttl: float,
     ) -> LedgerEntry | None:
         """CAS-reset ``UNKNOWN`` → fresh in-flight for opt-in same-key retry.
 
@@ -2414,9 +2416,18 @@ class ActionLedger:
             binding=binding,
             _provider_key_first_attempt_at=pkey_first,
         )
+        now = time.time()
+        fresh = replace(
+            fresh,
+            fence=existing.fence + 1,
+            lease_until=(now + lease_ttl if lease_ttl > 0 else None),
+            last_heartbeat_at=now,
+        )
         if not self._try_transition(
             fresh,
             expected_from=_UNKNOWN_SAME_KEY_RETRY_OUTCOMES,
+            expected_owner=existing.owner,
+            expected_fence=existing.fence,
         ):
             return None
         _outcome_reexec_authorized.set(True)
@@ -2494,7 +2505,13 @@ class ActionLedger:
                         return settled
                     if existing.resolved_terminal_outcome() == TerminalOutcome.UNKNOWN:
                         reset = self._reset_unknown_for_same_key_retry(
-                            request_id, tool, args, kwargs, existing, binding
+                            request_id,
+                            tool,
+                            args,
+                            kwargs,
+                            existing,
+                            binding,
+                            lease_ttl=ttl,
                         )
                         if reset is not None:
                             return reset
@@ -2741,7 +2758,13 @@ class ActionLedger:
                         return settled
                     if existing.resolved_terminal_outcome() == TerminalOutcome.UNKNOWN:
                         reset = self._reset_unknown_for_same_key_retry(
-                            request_id, tool, args, kwargs, existing, binding
+                            request_id,
+                            tool,
+                            args,
+                            kwargs,
+                            existing,
+                            binding,
+                            lease_ttl=ttl,
                         )
                         if reset is not None:
                             return reset
