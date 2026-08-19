@@ -22,6 +22,7 @@ def _entry(
     *,
     terminal: str,
     ref: str | None = None,
+    effect_id: str | None = None,
 ) -> LedgerEntry:
     return LedgerEntry(
         request_id=request_id,
@@ -31,6 +32,7 @@ def _entry(
         status="completed" if terminal == "COMPLETED" else "failed",
         terminal_outcome=terminal,
         external_operation_ref=ref,
+        idempotency_key=effect_id or request_id,
     )
 
 
@@ -44,15 +46,26 @@ def test_clean_single_commit_no_violations() -> None:
 
 def test_duplicate_commit_is_violation() -> None:
     entries = [
-        _entry("r1", terminal="COMPLETED", ref="op-1"),
-        _entry("r2", terminal="COMPLETED", ref="op-1"),
+        _entry("r1", terminal="COMPLETED", ref="provider-1", effect_id="op-1"),
+        _entry("r2", terminal="COMPLETED", ref="provider-2", effect_id="op-1"),
     ]
     violations = check_at_most_one_committed(entries)
     assert len(violations) == 1
     assert violations[0].effect_id == "op-1"
     assert "committed 2 times" in violations[0].message
-    mapped, _warnings = check_provider_mapping(entries, ["op-1"])
+    mapped, _warnings = check_provider_mapping(
+        entries, [("op-1", "provider-1"), ("op-1", "provider-2")]
+    )
     assert len(mapped) == 1
+
+
+def test_duplicate_provider_executions_are_violation() -> None:
+    entries = [_entry("r1", terminal="COMPLETED", ref="provider-1")]
+    violations, _warnings = check_provider_mapping(
+        entries, [("r1", "provider-1"), ("r1", "provider-2")]
+    )
+    assert len(violations) == 1
+    assert "executed by provider 2 times" in violations[0].message
 
 
 def test_unknown_parked_is_warning_not_violation() -> None:
@@ -79,7 +92,7 @@ def test_unattributed_entries_are_ignored() -> None:
         _entry("r1", terminal="COMPLETED", ref=None),
         _entry("r2", terminal="COMPLETED", ref=None),
     ]
-    assert committed_effect_ids(entries) == {}
+    assert committed_effect_ids(entries) == {"r1": ["r1"], "r2": ["r2"]}
 
 
 def test_failed_after_effect_not_committed() -> None:
@@ -113,9 +126,7 @@ tools:
 
 
 @pytest.mark.parametrize("scenario", ["simulation"])
-def test_simulation_scenario_passes_on_shared_backend(
-    tmp_path: Path, scenario: str
-) -> None:
+def test_simulation_scenario_passes_on_shared_backend(tmp_path: Path, scenario: str) -> None:
     mod = types.ModuleType("verify_probe_tools")
     mod.charge = lambda order_id: {"charged": True}  # type: ignore[attr-defined]
     sys.modules["verify_probe_tools"] = mod

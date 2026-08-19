@@ -81,9 +81,7 @@ def _seed_ambiguous_payment(
     """
     # Match decorator call shape: send_payment(10.0) → args=(10.0,), kwargs={}
     with execution_scope(_scope()):
-        derived = ActionLedger(
-            storage=InMemoryLedgerStorage()
-        ).derive_request_id(
+        derived = ActionLedger(storage=InMemoryLedgerStorage()).derive_request_id(
             tool_name, (10.0,), {}, transition_binding=_binding()
         )
     rid = request_id or derived
@@ -147,6 +145,7 @@ class FailingRedisStorage(RedisLedgerStorage):
         expected_owner: str | None = None,
         require_lease_held_at: float | None = None,
         expected_fence: int | None = None,
+        expected_effect_phase: str | None = None,
     ) -> bool:
         if self.fail_transition:
             raise ConnectionError("storage backend unreachable")
@@ -156,6 +155,7 @@ class FailingRedisStorage(RedisLedgerStorage):
             expected_owner=expected_owner,
             require_lease_held_at=require_lease_held_at,
             expected_fence=expected_fence,
+            expected_effect_phase=expected_effect_phase,
         )
 
     def list_all(self) -> list[LedgerEntry]:
@@ -184,9 +184,7 @@ class TestRedisOutage:
                 "req-redis-claim", "send_payment", (), {"amount": 10}, _binding()
             )
 
-    def test_tool_never_runs_on_storage_down_claim(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_tool_never_runs_on_storage_down_claim(self, monkeypatch: pytest.MonkeyPatch) -> None:
         storage = self._storage(monkeypatch)
         storage.fail_claim = True
         called = False
@@ -202,9 +200,7 @@ class TestRedisOutage:
                 send_payment(10.0)
         assert not called
 
-    def test_complete_during_outage_keeps_inflight(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_complete_during_outage_keeps_inflight(self, monkeypatch: pytest.MonkeyPatch) -> None:
         storage = self._storage(monkeypatch)
         ledger_inst = ActionLedger(storage=storage)
         # Claim succeeds while the backend is up, then it goes down mid-flight.
@@ -245,9 +241,7 @@ class TestRedisOutage:
         fails: must raise LedgerStorageUnavailableError, not return a result,
         and must NOT mark the entry COMPLETED (fail-closed, no phantom)."""
         storage = self._storage(monkeypatch)
-        reconciler = _StubReconciler(
-            ReconcileResult.completed({"charged": True, "id": "pi_x"})
-        )
+        reconciler = _StubReconciler(ReconcileResult.completed({"charged": True, "id": "pi_x"}))
         # Seed an expired, ambiguous transition so the redispatch gate is
         # HARD_BLOCK -> reconcile, not a fresh claim that just runs the tool.
         rid = _seed_ambiguous_payment(storage, "send_payment", op_ref="pi_x")
@@ -354,6 +348,7 @@ class FailingPostgresStorage:
         expected_owner: str | None = None,
         require_lease_held_at: float | None = None,
         expected_fence: int | None = None,
+        expected_effect_phase: str | None = None,
     ) -> bool:
         if self.fail_transition:
             raise ConnectionError("storage backend unreachable")
@@ -363,6 +358,7 @@ class FailingPostgresStorage:
             expected_owner=expected_owner,
             require_lease_held_at=require_lease_held_at,
             expected_fence=expected_fence,
+            expected_effect_phase=expected_effect_phase,
         )
 
     def list_all(self) -> list[LedgerEntry]:
@@ -377,22 +373,16 @@ def stub_psycopg(monkeypatch: pytest.MonkeyPatch) -> None:
     constructed without the (uninstalled) psycopg package."""
     import mycelium.storage.postgres_ledger as pg_mod
 
-    monkeypatch.setattr(
-        pg_mod, "_require_psycopg", lambda: (_DownPsycopg(), _StubSQL())
-    )
+    monkeypatch.setattr(pg_mod, "_require_psycopg", lambda: (_DownPsycopg(), _StubSQL()))
 
 
 class TestPostgresOutage:
-    def test_claim_during_outage_raises_storage_unavailable(
-        self, stub_psycopg: None
-    ) -> None:
+    def test_claim_during_outage_raises_storage_unavailable(self, stub_psycopg: None) -> None:
         from mycelium import PostgresLedgerStorage
 
         storage = PostgresLedgerStorage("postgresql://outage:5432/mycelium")
         ledger_inst = ActionLedger(storage=storage)
-        with pytest.raises(
-            LedgerStorageUnavailableError, match=r"during (get|try_claim_inflight)"
-        ):
+        with pytest.raises(LedgerStorageUnavailableError, match=r"during (get|try_claim_inflight)"):
             ledger_inst.claim_side_effecting(
                 "req-pg-claim", "send_payment", (), {"amount": 10}, _binding()
             )
@@ -425,9 +415,7 @@ class TestPostgresOutage:
         assert stored is not None
         assert stored.resolved_terminal_outcome() == TerminalOutcome.IN_FLIGHT
 
-    def test_failure_recording_outage_surfaces_original_exception(
-        self, stub_psycopg: None
-    ) -> None:
+    def test_failure_recording_outage_surfaces_original_exception(self, stub_psycopg: None) -> None:
         # The single-point decision is recorded before the body runs, so the
         # outage is introduced from inside the body — after the decision write
         # succeeds — to exercise the ``_record_failure`` path.
@@ -442,13 +430,9 @@ class TestPostgresOutage:
             with pytest.raises(ValueError, match="tool broke"):
                 failing_tool(10.0)
 
-    def test_mid_reconcile_storage_outage_fail_closed(
-        self, stub_psycopg: None
-    ) -> None:
+    def test_mid_reconcile_storage_outage_fail_closed(self, stub_psycopg: None) -> None:
         storage = FailingPostgresStorage()
-        reconciler = _StubReconciler(
-            ReconcileResult.completed({"charged": True, "id": "pi_x"})
-        )
+        reconciler = _StubReconciler(ReconcileResult.completed({"charged": True, "id": "pi_x"}))
         rid = _seed_ambiguous_payment(storage, "send_payment", op_ref="pi_x")
 
         storage.fail_transition = True

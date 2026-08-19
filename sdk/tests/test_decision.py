@@ -103,10 +103,12 @@ def test_ledger_entry_decision_round_trips_and_defaults_to_none() -> None:
         status="in-flight",
     )
     assert entry.decision is None
+    assert entry.effect_phase == "INTENDED"
     decision = Decision(allowed=True, verdicts=(PredicateVerdict("x", True),))
     stamped = replace(entry, decision=decision.to_dict())
     round_tripped = LedgerEntry.from_dict(stamped.to_dict())
     assert round_tripped.decision == decision.to_dict()
+    assert round_tripped.effect_phase == "INTENDED"
 
     legacy = entry.to_dict()
     del legacy["decision"]
@@ -189,6 +191,7 @@ def test_decision_recorded_on_successful_boundary_advance(ledger: ActionLedger) 
     stored = ledger.get("dec-ok")
     assert stored is not None
     assert stored.terminal_outcome == TerminalOutcome.COMPLETED.value
+    assert stored.effect_phase == "COMMITTED"
     assert stored.decision is not None
     decision = Decision.from_dict(stored.decision)
     assert decision.allowed is True
@@ -204,9 +207,7 @@ def test_plugin_predicate_evaluated_and_recorded_end_to_end(
     storage = ledger._storage
     seen: list[DecisionIntent] = []
 
-    def amount_policy(
-        intent: DecisionIntent, snapshot: DecisionSnapshot
-    ) -> PredicateVerdict:
+    def amount_policy(intent: DecisionIntent, snapshot: DecisionSnapshot) -> PredicateVerdict:
         seen.append(intent)
         amount = intent.kwargs.get("amount", 0)
         return PredicateVerdict(
@@ -243,9 +244,7 @@ def test_plugin_denial_hard_blocks_with_decision_recorded(
     storage = ledger._storage
     body_ran: list[int] = []
 
-    def deny_over_100(
-        intent: DecisionIntent, snapshot: DecisionSnapshot
-    ) -> PredicateVerdict:
+    def deny_over_100(intent: DecisionIntent, snapshot: DecisionSnapshot) -> PredicateVerdict:
         amount = intent.kwargs.get("amount", 0)
         return PredicateVerdict(
             name="amount_policy",
@@ -309,6 +308,25 @@ def test_stale_fence_worker_cannot_record_decision(ledger: ActionLedger) -> None
         expected_fence=2,
     )
     assert storage.get("dec-fence").decision == decision.to_dict()
+
+
+def test_decision_atomically_advances_phase_once(ledger: ActionLedger) -> None:
+    claimed = ledger.claim("dec-phase", "charge", (), {})
+    decision = Decision(allowed=True).to_dict()
+    attempting = ledger.record_decision(
+        "dec-phase",
+        decision,
+        expected_owner=claimed.owner,
+        expected_fence=claimed.fence,
+    )
+    assert attempting.effect_phase == "ATTEMPTING"
+    with pytest.raises(LedgerOutcomeAlreadySetError):
+        ledger.record_decision(
+            "dec-phase",
+            decision,
+            expected_owner=claimed.owner,
+            expected_fence=claimed.fence,
+        )
 
 
 async def test_decision_recorded_on_async_boundary_advance(

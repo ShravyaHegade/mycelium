@@ -85,6 +85,7 @@ class IsolationGateStorage:
         expected_owner: str | None = None,
         require_lease_held_at: float | None = None,
         expected_fence: int | None = None,
+        expected_effect_phase: str | None = None,
     ) -> bool:
         self._guard(entry.request_id)
         return self._inner.try_transition(
@@ -93,6 +94,7 @@ class IsolationGateStorage:
             expected_owner=expected_owner,
             require_lease_held_at=require_lease_held_at,
             expected_fence=expected_fence,
+            expected_effect_phase=expected_effect_phase,
         )
 
     def list_all(self) -> list[LedgerEntry]:
@@ -156,6 +158,7 @@ class FaultInjectingStorage:
         expected_owner: str | None = None,
         require_lease_held_at: float | None = None,
         expected_fence: int | None = None,
+        expected_effect_phase: str | None = None,
     ) -> bool:
         self._maybe_fail(self.fail_transition, "try_transition")
         return self._inner.try_transition(
@@ -164,6 +167,7 @@ class FaultInjectingStorage:
             expected_owner=expected_owner,
             require_lease_held_at=require_lease_held_at,
             expected_fence=expected_fence,
+            expected_effect_phase=expected_effect_phase,
         )
 
     def list_all(self) -> list[LedgerEntry]:
@@ -444,6 +448,7 @@ class _PostgresPrefixedStorage:
         expected_owner: str | None = None,
         require_lease_held_at: float | None = None,
         expected_fence: int | None = None,
+        expected_effect_phase: str | None = None,
     ) -> bool:
         return self._inner.try_transition(
             entry,
@@ -451,6 +456,7 @@ class _PostgresPrefixedStorage:
             expected_owner=expected_owner,
             require_lease_held_at=require_lease_held_at,
             expected_fence=expected_fence,
+            expected_effect_phase=expected_effect_phase,
         )
 
     def list_all(self) -> list[LedgerEntry]:

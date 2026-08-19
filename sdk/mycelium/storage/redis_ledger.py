@@ -238,6 +238,7 @@ class RedisEntryStorage:
         expected_owner: str | None = None,
         require_lease_held_at: float | None = None,
         expected_fence: int | None = None,
+        expected_effect_phase: str | None = None,
     ) -> bool:
         from redis.exceptions import WatchError
 
@@ -261,9 +262,15 @@ class RedisEntryStorage:
                         return False
                     if expected_owner is not None and existing.get("owner") != expected_owner:
                         return False
-                    if expected_fence is not None and int(
-                        existing.get("fence") or 0
-                    ) != expected_fence:
+                    if (
+                        expected_fence is not None
+                        and int(existing.get("fence") or 0) != expected_fence
+                    ):
+                        return False
+                    if (
+                        expected_effect_phase is not None
+                        and (existing.get("effect_phase") or "INTENDED") != expected_effect_phase
+                    ):
                         return False
                     if require_lease_held_at is not None and not lease_allows_renew(
                         existing.get("lease_until"),
@@ -333,6 +340,7 @@ class RedisLedgerStorage:
         expected_owner: str | None = None,
         require_lease_held_at: float | None = None,
         expected_fence: int | None = None,
+        expected_effect_phase: str | None = None,
     ) -> bool:
         return self._inner.try_transition(
             entry,
@@ -340,6 +348,7 @@ class RedisLedgerStorage:
             expected_owner=expected_owner,
             require_lease_held_at=require_lease_held_at,
             expected_fence=expected_fence,
+            expected_effect_phase=expected_effect_phase,
         )
 
 
@@ -384,6 +393,7 @@ class RedisTaskLedgerStorage:
         expected_owner: str | None = None,
         require_lease_held_at: float | None = None,
         expected_fence: int | None = None,
+        expected_effect_phase: str | None = None,
     ) -> bool:
         return self._inner.try_transition(
             entry,
@@ -391,6 +401,7 @@ class RedisTaskLedgerStorage:
             expected_owner=expected_owner,
             require_lease_held_at=require_lease_held_at,
             expected_fence=expected_fence,
+            expected_effect_phase=expected_effect_phase,
         )
 
     def list_all(self) -> list[Any]:

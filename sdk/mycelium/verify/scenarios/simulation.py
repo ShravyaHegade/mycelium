@@ -23,6 +23,7 @@ from typing import Any
 
 from mycelium.action_ledger import LedgerOutcomeAlreadySetError
 from mycelium.transition import (
+    SideEffectBoundary,
     SideEffectClass,
     TerminalOutcome,
     ToolTransitionBinding,
@@ -108,17 +109,16 @@ def _run_crash_sweep(
         total_exec += len(read_lines(exec_file))
 
         storage = iso.open_fresh_client()
-        entries = [
-            e
-            for e in storage.list_all()
-            if e.request_id in scenario_request_ids
-        ]
+        entries = [e for e in storage.list_all() if e.request_id in scenario_request_ids]
         violations = check_at_most_one_committed(entries)
         for item in violations:
             failures.append(f"{phase}: {item.message}")
         provider_effects = read_lines(effect_file)
         if provider_effects:
-            mapped, warnings = check_provider_mapping(entries, provider_effects)
+            mapped, warnings = check_provider_mapping(
+                entries,
+                [(request_id, provider_id) for provider_id in provider_effects],
+            )
             for item in mapped:
                 failures.append(f"{phase}: {item.message}")
             limitations.extend(f"{phase}: {msg}" for msg in warnings)
@@ -138,25 +138,34 @@ def _run_fence_takeover(
 
     a = make_ledger(iso.open_storage(), binding=binding, lease_ttl=0.3)
     with execution_scope(TransitionScope(thread_id="verify", run_id="verify")):
-        entry_a = a.claim_side_effecting(
-            request_id, SYNTHETIC_TOOL, (1,), kwargs, binding
-        )
+        entry_a = a.claim_side_effecting(request_id, SYNTHETIC_TOOL, (1,), kwargs, binding)
     fence_a = entry_a.fence
     owner_a = entry_a.owner
     time.sleep(0.7)
 
     b = make_ledger(iso.open_storage(), binding=binding, lease_ttl=30.0)
     with execution_scope(TransitionScope(thread_id="verify", run_id="verify")):
-        entry_b = b.claim_side_effecting(
-            request_id, SYNTHETIC_TOOL, (1,), kwargs, binding
-        )
+        entry_b = b.claim_side_effecting(request_id, SYNTHETIC_TOOL, (1,), kwargs, binding)
     fence_b = entry_b.fence
     if fence_b <= fence_a:
-        failures.append(
-            f"fence takeover: B fence {fence_b} not above A fence {fence_a}"
-        )
+        failures.append(f"fence takeover: B fence {fence_b} not above A fence {fence_a}")
         return failures, decisions
     decisions.append(f"fence takeover: A={fence_a} -> B={fence_b}")
+
+    try:
+        with execution_scope(TransitionScope(thread_id="verify", run_id="verify")):
+            a.advance_boundary(
+                request_id,
+                SideEffectBoundary.MAYBE_CROSSED,
+                expected_owner=owner_a,
+                expected_fence=fence_a,
+            )
+        failures.append(
+            f"fence takeover: stale worker A crossed provider boundary with "
+            f"fence {fence_a} while stored fence is {fence_b}"
+        )
+    except LedgerOutcomeAlreadySetError:
+        decisions.append("fence takeover: stale A rejected before provider boundary")
 
     try:
         with execution_scope(TransitionScope(thread_id="verify", run_id="verify")):
@@ -187,13 +196,10 @@ def _run_fence_takeover(
         return failures, decisions
     if final.resolved_terminal_outcome() != TerminalOutcome.COMPLETED:
         failures.append(
-            f"fence takeover: final outcome {final.terminal_outcome!r}, "
-            "expected COMPLETED"
+            f"fence takeover: final outcome {final.terminal_outcome!r}, expected COMPLETED"
         )
     if final.fence != fence_b:
-        failures.append(
-            f"fence takeover: final fence {final.fence} != B fence {fence_b}"
-        )
+        failures.append(f"fence takeover: final fence {final.fence} != B fence {fence_b}")
     if final.result != {"charged": True}:
         failures.append("fence takeover: stale A write leaked into final entry")
     if not failures:
@@ -271,8 +277,6 @@ def run_simulation(ctx: ScenarioContext) -> VerificationEvidence:
         artifacts=[str(work)],
         limitations=limitations,
         status=VerificationStatus.PASS if ok else VerificationStatus.FAIL,
-        summary=(
-            "at-most-one-COMMITTED invariant held" if ok else "; ".join(failures)[:200]
-        ),
+        summary=("at-most-one-COMMITTED invariant held" if ok else "; ".join(failures)[:200]),
         remediation="" if ok else "Inspect the invariant violations above.",
     )

@@ -411,7 +411,7 @@ def crash_worker(payload: dict[str, Any]) -> None:
     phase = payload["phase"]
     request_id = payload["request_id"]
     with execution_scope(TransitionScope(thread_id="verify", run_id="verify")):
-        ledger.claim_side_effecting(
+        claimed = ledger.claim_side_effecting(
             request_id,
             SYNTHETIC_TOOL,
             (1,),
@@ -423,7 +423,14 @@ def crash_worker(payload: dict[str, Any]) -> None:
             binding,
         )
         token = _active_transition_var.set(
-            _ActiveTransition(ledger, request_id, binding, {})
+            _ActiveTransition(
+                ledger,
+                request_id,
+                binding,
+                {},
+                claimed.owner,
+                claimed.fence,
+            )
         )
         try:
             if phase == "after_claim":
