@@ -185,7 +185,14 @@ def test_owner_crash_expired_envelope_does_not_reexecute_crossed() -> None:
         binding,
         lease_ttl=0.05,
     )
-    ledger.advance_boundary(request_id, SideEffectBoundary.CROSSED)
+    ledger.record_decision(
+        request_id,
+        {"allowed": True, "verdicts": [], "denied_reasons": []},
+        expected_fence=claimed.fence,
+    )
+    ledger.advance_boundary(
+        request_id, SideEffectBoundary.CROSSED, expected_fence=claimed.fence
+    )
     time.sleep(0.1)  # lease lapses → EXPIRED
 
     assert claimed.resolved_terminal_outcome() in (

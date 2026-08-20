@@ -287,7 +287,11 @@ result, messages = await runner.run_with_llm_retry(
 
 ## Quickstart: idempotency & audit receipts (core — transition envelope)
 
-Stop duplicate payments, emails, and API calls when the framework retries. Five **effect-semantic** `side_effect_class` values plus optional `spendability` (`multi_use` / `single_use` / `non_replayable`): reads poll in-flight duplicates; mutating tools hard-block ambiguous states instead of blind re-execute.
+Stop duplicate payments, emails, and API calls when the framework retries. Five
+**effect-semantic** `side_effect_class` values describe retry safety, while
+`capability` (`idempotent` / `queryable` / `blind`) describes whether recovery
+can determine what happened. Reads poll in-flight duplicates; ambiguous blind
+effects park instead of being re-executed.
 
 ### Tool-level idempotency
 
@@ -415,13 +419,22 @@ def send_payment(amount: float, recipient: str, *, tool_call_id: str) -> dict:
         if entry.terminal_outcome == TerminalOutcome.COMPLETED.value:
             return entry.result
 
+        ledger.record_decision(
+            request_id,
+            {"allowed": True, "verdicts": [], "denied_reasons": []},
+            expected_owner=entry.owner,
+            expected_fence=entry.fence,
+        )
         # PROCEED: we hold IN_FLIGHT — run the side effect once, then settle.
         try:
             result = gateway.charge(amount, recipient)
         except Exception as exc:
-            ledger.fail(request_id, exc, failed_after_effect=False)
+            ledger.fail(
+                request_id, exc, failed_after_effect=False,
+                expected_fence=entry.fence,
+            )
             raise
-        ledger.complete(request_id, result)
+        ledger.complete(request_id, result, expected_fence=entry.fence)
         return result
 ```
 
@@ -429,8 +442,16 @@ def send_payment(amount: float, recipient: str, *, tool_call_id: str) -> dict:
 |------|---------|
 | `claim_side_effecting(...)` | May I run? Resolves gates (`RETURN` / `POLL` / `HARD_BLOCK` / …). Raises on hard-block. |
 | `COMPLETED` → return `entry.result` | Partner-facing **SKIP** — already done. |
-| Else run body + `complete(...)` | Partner-facing **PROCEED** then settle. |
-| `fail(...)` | Settle a failure; use `failed_after_effect=True` if the provider may have accepted. |
+| `record_decision(...)` | Atomically records the final allow/deny result and advances `INTENDED → ATTEMPTING`. |
+| Else run body + `complete(..., expected_fence=entry.fence)` | Partner-facing **PROCEED** then settle. |
+| `fail(..., expected_fence=entry.fence)` | Settle a failure; use `failed_after_effect=True` if the provider may have accepted. |
+
+The decorators evaluate registered decision predicates at this single boundary
+and record their verdicts automatically. A manual integration must record its
+equivalent final decision before the external effect. Every mutation made on
+behalf of a claim—including decision, boundary, heartbeat, provider-reference,
+failure, and completion writes—must carry that claim's `entry.fence`; after a
+takeover increments the stored fence, stale-worker writes are rejected.
 
 The `side_effect()` / `record_external_operation()` boundary helpers only take effect inside `@ledger` / `@ledger_sync` tool bodies; in this manual path they are ignored. Durability still holds from the claim itself: if the process dies after claiming, the entry expires and a redispatch hard-blocks rather than re-running.
 
@@ -486,12 +507,21 @@ def handle_event(tool: str, event_id: str, do_work) -> int:
         return 409                          # HARD_BLOCK: reconcile / operator release
     if entry.terminal_outcome == TerminalOutcome.COMPLETED.value:
         return 200                          # SKIP: already handled this event id
+    ledger.record_decision(
+        request_id,
+        {"allowed": True, "verdicts": [], "denied_reasons": []},
+        expected_owner=entry.owner,
+        expected_fence=entry.fence,
+    )
     try:
         result = do_work()                  # the side effect, once
     except Exception as exc:
-        ledger.fail(request_id, exc, failed_after_effect=False)
+        ledger.fail(
+            request_id, exc, failed_after_effect=False,
+            expected_fence=entry.fence,
+        )
         return 500
-    ledger.complete(request_id, result)
+    ledger.complete(request_id, result, expected_fence=entry.fence)
     return 200                              # PROCEED
 ```
 
@@ -706,16 +736,17 @@ see [examples/langgraph_redis_crash/](examples/langgraph_redis_crash/).
 
 ### Transition envelope fields
 
-Six fields decide whether an unresolved prior execution is merely **wasteful** (safe to retry/poll) or **unsafe** (must not re-run). Priority order:
+Seven fields decide whether an unresolved prior execution is merely **wasteful** (safe to retry/poll) or **unsafe** (must not re-run). Priority order:
 
 | # | Field | Role |
 |---|-------|------|
 | 1 | `side_effect_class` | What kind of effect (`read`, `keyed_mutate`, `non_idempotent_mutate`, …) |
-| 2 | `spendability` | How many times the same intent may spend (`multi_use` / `single_use` / `non_replayable`) |
-| 3 | `side_effect_boundary` | Whether the external call was crossed (`not_crossed` / `maybe_crossed` / `crossed`) |
-| 4 | `terminal_outcome` | Where the prior attempt ended (`IN_FLIGHT`, `COMPLETED`, `UNKNOWN`, `EXPIRED`, …) |
-| 5 | `external_operation_ref` | Provider handle for read-only reconcile (id or idempotency key) |
-| 6 | `retry_permission` | Whether automatic retry is allowed (and same-key enforcement when opted in) |
+| 2 | `capability` | Whether recovery is intrinsically safe, can query the outcome, or is blind (`idempotent` / `queryable` / `blind`) |
+| 3 | `spendability` | How many times the same intent may spend (`multi_use` / `single_use` / `non_replayable`) |
+| 4 | `side_effect_boundary` | Whether the external call was crossed (`not_crossed` / `maybe_crossed` / `crossed`) |
+| 5 | `terminal_outcome` | Where the prior attempt ended (`IN_FLIGHT`, `COMPLETED`, `UNKNOWN`, `EXPIRED`, …) |
+| 6 | `external_operation_ref` | Provider handle for read-only reconcile (id or idempotency key) |
+| 7 | `retry_permission` | Whether automatic retry is allowed (and same-key enforcement when opted in) |
 
 **Invariant:** for a given tool class, the fields that class **requires** must already be **supported and recorded** on the transition before a redispatch is treated as a safe retry. Reads need a lighter set (class + terminal + lease). Payment / write / email / subagent need spendability, boundary, terminal outcome, and usually an external receipt/ref — without them, a second dispatch is an **unsupported second transition**, not a retry.
 
@@ -732,6 +763,26 @@ Also on the durable record: `transition_key`, `idempotency_key`, `owner`, `lease
 | `irreversible` | wire / on-chain burn | hard-block → human |
 
 Legacy aliases (`read_only`, `payment`, `subagent`, …) still parse. Set per tool in YAML with `side_effect_class`. Required when `transition:` is configured and the tool is ledgered.
+
+### Tool capabilities
+
+`capability` is orthogonal to `side_effect_class`: the class answers whether a
+second call is safe, while capability answers whether an unfinished call's
+outcome can be established.
+
+| Capability | Recovery contract |
+|------------|-------------------|
+| `idempotent` | Repeating the operation is intrinsically safe. Derived for `read` and `idempotent_mutate`. |
+| `queryable` | A reconciler or provider idempotency key can establish/deduplicate the outcome. Derived for supported classes when that mechanism is configured. |
+| `blind` | The outcome cannot be probed; ambiguous entries never auto-redispatch and park for operator reconciliation. |
+
+Configure it per tool with `capability:` or in code with
+`ToolTransitionBinding.for_tool(..., capability=ToolCapability.QUERYABLE)`.
+Omitting it derives the conservative value from the side-effect class and the
+configured provider key/reconciler. An explicit declaration may tighten to
+`blind`, but cannot claim a looser capability than the available mechanism
+supports. Declaring `queryable` without a usable probe fails closed to blind
+parking; `irreversible` always remains blind.
 
 ### Spendability
 
@@ -1897,7 +1948,10 @@ $ mycelium verify --config mycelium.yaml --scenario all --strict --json
 
 Scenarios: `redispatch`, `contention`, `storage-outage`, `worker-crash`,
 `ambiguous-effect`, `reconcile`, `secret-in-args`, `entity-guard`,
-`destructive-confirm`, `authority-window`, or `all` (that order). Verify never executes
+`destructive-confirm`, `authority-window`, `use-time-currency`, `simulation`,
+or `all` (that order). The durable-backend-only `simulation` scenario sweeps
+crash boundaries, checks the at-most-one-COMMITTED invariant, and proves that a
+takeover fence rejects the superseded worker. Verify never executes
 application tools, never calls an LLM, never contacts a real business provider,
 and never inspects or alters existing production transitions. Test data uses a
 unique `mycelium:verify:<uuid>:` namespace and is deleted unless

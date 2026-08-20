@@ -54,9 +54,11 @@ class RedisEntryStorage:
         base = self._prefix.rstrip(":")
         return f"{base}-tomb:{request_id}"
 
-    def _write_tombstone(self, entry: E) -> None:
-        payload = json.dumps(entry.to_dict(), default=str)
-        self._client.set(self._tombstone_key(entry.request_id), payload)
+    @staticmethod
+    def _fence_from_payload(raw: str | None) -> int:
+        if raw is None:
+            return 0
+        return int(json.loads(raw).get("fence") or 0)
 
     def _read_tombstone(self, request_id: str) -> E | None:
         raw = self._client.get(self._tombstone_key(request_id))
@@ -97,14 +99,32 @@ class RedisEntryStorage:
         return replace(entry, **updates) if updates else entry
 
     def _restore_from_tombstone(self, request_id: str, *, now: float | None = None) -> E | None:
-        tomb = self._read_tombstone(request_id)
-        if tomb is None:
-            return None
+        from redis.exceptions import WatchError
+
+        key = self._key(request_id)
+        tomb_key = self._tombstone_key(request_id)
         now = now if now is not None else time.time()
-        ghost = self._ghost_from_tombstone(tomb, now=now)
-        # Persist ghost back to the primary key so subsequent gets/claims see it.
-        self.set(ghost)
-        return ghost
+        for _ in range(32):
+            try:
+                with self._client.pipeline(transaction=True) as pipe:
+                    pipe.watch(key, tomb_key)
+                    primary_raw = pipe.get(key)
+                    if primary_raw is not None:
+                        return self._from_dict(json.loads(primary_raw))
+                    tomb_raw = pipe.get(tomb_key)
+                    if tomb_raw is None:
+                        return None
+                    tomb = self._from_dict(json.loads(tomb_raw))
+                    ghost = self._ghost_from_tombstone(tomb, now=now)
+                    payload = json.dumps(ghost.to_dict(), default=str)
+                    pipe.multi()
+                    pipe.set(key, payload)
+                    pipe.set(tomb_key, payload)
+                    pipe.execute()
+                    return ghost
+            except WatchError:
+                continue
+        raise RuntimeError("Redis tombstone restoration exhausted WATCH retries")
 
     def get(self, request_id: str) -> E | None:
         raw = self._client.get(self._key(request_id))
@@ -113,16 +133,33 @@ class RedisEntryStorage:
         return self._restore_from_tombstone(request_id)
 
     def set(self, entry: E) -> None:
+        from redis.exceptions import WatchError
+
         payload = json.dumps(entry.to_dict(), default=str)
         key = self._key(entry.request_id)
-        if entry.status == "in-flight" and self._in_flight_ttl:
-            self._client.set(key, payload, ex=int(self._in_flight_ttl))
-        else:
-            self._client.set(key, payload)
-            if entry.status != "in-flight":
-                self._client.persist(key)
-        # Durable memory that this request_id was ever claimed — survives TTL.
-        self._write_tombstone(entry)
+        tomb_key = self._tombstone_key(entry.request_id)
+        incoming_fence = int(getattr(entry, "fence", 0) or 0)
+        for _ in range(32):
+            try:
+                with self._client.pipeline(transaction=True) as pipe:
+                    pipe.watch(key, tomb_key)
+                    stored_fence = max(
+                        self._fence_from_payload(pipe.get(key)),
+                        self._fence_from_payload(pipe.get(tomb_key)),
+                    )
+                    if stored_fence > incoming_fence:
+                        return
+                    pipe.multi()
+                    if entry.status == "in-flight" and self._in_flight_ttl:
+                        pipe.set(key, payload, ex=int(self._in_flight_ttl))
+                    else:
+                        pipe.set(key, payload)
+                    pipe.set(tomb_key, payload)
+                    pipe.execute()
+                    return
+            except WatchError:
+                continue
+        raise RuntimeError("Redis ledger set exhausted WATCH retries")
 
     def try_claim_inflight(
         self,
@@ -154,13 +191,7 @@ class RedisEntryStorage:
                     continue
 
                 leased = with_lease(entry, now=time.time(), lease_ttl=lease_ttl)
-                payload = json.dumps(leased.to_dict(), default=str)
-                if ttl > 0:
-                    claimed = self._client.set(key, payload, nx=True, ex=ttl)
-                else:
-                    claimed = self._client.set(key, payload, nx=True)
-                if claimed:
-                    self._write_tombstone(leased)
+                if self._try_initial_claim(key, leased, ttl):
                     return "claimed", None
                 continue
 
@@ -176,16 +207,28 @@ class RedisEntryStorage:
             if reclaimed is not None:
                 return reclaimed
 
-        existing_raw = self._client.get(key)
-        if existing_raw is None:
-            restored = self._restore_from_tombstone(entry.request_id)
-            if restored is not None:
-                return "in_flight", restored
-            return "claimed", None
-        existing = self._from_dict(json.loads(existing_raw))
-        if existing.status == "completed":
-            return "completed", existing
-        return "in_flight", existing
+        raise RuntimeError("Redis claim exhausted WATCH retries")
+
+    def _try_initial_claim(self, key: str, entry: E, ttl: int) -> bool:
+        from redis.exceptions import WatchError
+
+        tomb_key = self._tombstone_key(entry.request_id)
+        payload = json.dumps(entry.to_dict(), default=str)
+        try:
+            with self._client.pipeline(transaction=True) as pipe:
+                pipe.watch(key, tomb_key)
+                if pipe.get(key) is not None or pipe.get(tomb_key) is not None:
+                    return False
+                pipe.multi()
+                if ttl > 0:
+                    pipe.set(key, payload, ex=ttl)
+                else:
+                    pipe.set(key, payload)
+                pipe.set(tomb_key, payload)
+                pipe.execute()
+                return True
+        except WatchError:
+            return False
 
     def _try_reclaim(
         self,
@@ -202,8 +245,6 @@ class RedisEntryStorage:
         from mycelium.storage._helpers import claim_inflight_outcome, with_lease
 
         now = time.time()
-        leased = with_lease(entry, now=now, lease_ttl=lease_ttl)
-        payload = json.dumps(leased.to_dict(), default=str)
         try:
             with self._client.pipeline(transaction=True) as pipe:
                 pipe.watch(key)
@@ -213,18 +254,21 @@ class RedisEntryStorage:
                     restored = self._restore_from_tombstone(entry.request_id, now=now)
                     if restored is not None:
                         return "in_flight", restored
-                    return ("claimed", None)
+                    return None
                 current = self._from_dict(json.loads(raw))
                 rerun = claim_inflight_outcome(current, now=time.time())
                 if rerun != "claimed":
                     return rerun, current
+                # Reclaim: bump the fence past the superseded claim.
+                leased = with_lease(entry, now=now, lease_ttl=lease_ttl, prior=current)
+                payload = json.dumps(leased.to_dict(), default=str)
                 pipe.multi()
                 if ttl > 0:
                     pipe.set(key, payload, ex=ttl)
                 else:
                     pipe.set(key, payload)
+                pipe.set(self._tombstone_key(entry.request_id), payload)
                 pipe.execute()
-                self._write_tombstone(leased)
                 return ("claimed", None)
         except WatchError:
             return None
@@ -236,6 +280,8 @@ class RedisEntryStorage:
         expected_terminal_outcomes: frozenset[str],
         expected_owner: str | None = None,
         require_lease_held_at: float | None = None,
+        expected_fence: int | None = None,
+        expected_effect_phase: str | None = None,
     ) -> bool:
         from redis.exceptions import WatchError
 
@@ -259,6 +305,16 @@ class RedisEntryStorage:
                         return False
                     if expected_owner is not None and existing.get("owner") != expected_owner:
                         return False
+                    if (
+                        expected_fence is not None
+                        and int(existing.get("fence") or 0) != expected_fence
+                    ):
+                        return False
+                    if (
+                        expected_effect_phase is not None
+                        and (existing.get("effect_phase") or "INTENDED") != expected_effect_phase
+                    ):
+                        return False
                     if require_lease_held_at is not None and not lease_allows_renew(
                         existing.get("lease_until"),
                         now=require_lease_held_at,
@@ -266,12 +322,12 @@ class RedisEntryStorage:
                         return False
                     pipe.multi()
                     pipe.set(key, payload)
+                    pipe.set(self._tombstone_key(entry.request_id), payload)
                     pipe.execute()
-                    self._write_tombstone(entry)
                     return True
             except WatchError:
                 continue
-        return False
+        raise RuntimeError("Redis transition exhausted WATCH retries")
 
     def list_all(self) -> list[E]:
         pattern = f"{self._prefix}*"
@@ -326,12 +382,16 @@ class RedisLedgerStorage:
         expected_terminal_outcomes: frozenset[str],
         expected_owner: str | None = None,
         require_lease_held_at: float | None = None,
+        expected_fence: int | None = None,
+        expected_effect_phase: str | None = None,
     ) -> bool:
         return self._inner.try_transition(
             entry,
             expected_terminal_outcomes=expected_terminal_outcomes,
             expected_owner=expected_owner,
             require_lease_held_at=require_lease_held_at,
+            expected_fence=expected_fence,
+            expected_effect_phase=expected_effect_phase,
         )
 
 
@@ -375,12 +435,16 @@ class RedisTaskLedgerStorage:
         expected_terminal_outcomes: frozenset[str],
         expected_owner: str | None = None,
         require_lease_held_at: float | None = None,
+        expected_fence: int | None = None,
+        expected_effect_phase: str | None = None,
     ) -> bool:
         return self._inner.try_transition(
             entry,
             expected_terminal_outcomes=expected_terminal_outcomes,
             expected_owner=expected_owner,
             require_lease_held_at=require_lease_held_at,
+            expected_fence=expected_fence,
+            expected_effect_phase=expected_effect_phase,
         )
 
     def list_all(self) -> list[Any]:

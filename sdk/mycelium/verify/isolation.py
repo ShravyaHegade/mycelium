@@ -84,6 +84,8 @@ class IsolationGateStorage:
         expected_terminal_outcomes: frozenset[str],
         expected_owner: str | None = None,
         require_lease_held_at: float | None = None,
+        expected_fence: int | None = None,
+        expected_effect_phase: str | None = None,
     ) -> bool:
         self._guard(entry.request_id)
         return self._inner.try_transition(
@@ -91,6 +93,8 @@ class IsolationGateStorage:
             expected_terminal_outcomes=expected_terminal_outcomes,
             expected_owner=expected_owner,
             require_lease_held_at=require_lease_held_at,
+            expected_fence=expected_fence,
+            expected_effect_phase=expected_effect_phase,
         )
 
     def list_all(self) -> list[LedgerEntry]:
@@ -115,6 +119,8 @@ class FaultInjectingStorage:
         self.fail_list_all = False
         self.fail_nth_set: int | None = None
         self._set_count = 0
+        self.fail_nth_transition: int | None = None
+        self._transition_count = 0
 
     @property
     def inner_type(self) -> str:
@@ -153,13 +159,23 @@ class FaultInjectingStorage:
         expected_terminal_outcomes: frozenset[str],
         expected_owner: str | None = None,
         require_lease_held_at: float | None = None,
+        expected_fence: int | None = None,
+        expected_effect_phase: str | None = None,
     ) -> bool:
-        self._maybe_fail(self.fail_transition, "try_transition")
+        self._transition_count += 1
+        nth = self.fail_nth_transition
+        self._maybe_fail(
+            self.fail_transition
+            or (nth is not None and self._transition_count >= nth),
+            "try_transition",
+        )
         return self._inner.try_transition(
             entry,
             expected_terminal_outcomes=expected_terminal_outcomes,
             expected_owner=expected_owner,
             require_lease_held_at=require_lease_held_at,
+            expected_fence=expected_fence,
+            expected_effect_phase=expected_effect_phase,
         )
 
     def list_all(self) -> list[LedgerEntry]:
@@ -439,12 +455,16 @@ class _PostgresPrefixedStorage:
         expected_terminal_outcomes: frozenset[str],
         expected_owner: str | None = None,
         require_lease_held_at: float | None = None,
+        expected_fence: int | None = None,
+        expected_effect_phase: str | None = None,
     ) -> bool:
         return self._inner.try_transition(
             entry,
             expected_terminal_outcomes=expected_terminal_outcomes,
             expected_owner=expected_owner,
             require_lease_held_at=require_lease_held_at,
+            expected_fence=expected_fence,
+            expected_effect_phase=expected_effect_phase,
         )
 
     def list_all(self) -> list[LedgerEntry]:

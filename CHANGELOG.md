@@ -5,6 +5,72 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
 
 ## Unreleased
 
+- Deterministic simulation proof (effect-commit Change 4). New
+  `mycelium.verify.invariants` module (`InvariantViolation`,
+  `committed_effect_ids`, `check_at_most_one_committed`,
+  `check_provider_mapping`) enforcing the at-most-one-COMMITTED invariant:
+  for every effect id at most one `COMPLETED` ledger row may exist, and every
+  provider effect must map to at most one COMMITTED row (a provider effect with
+  no COMMITTED row is a limitation/warning, never a violation). New
+  `simulation` verify scenario (registered in `SCENARIO_ORDER`; multiprocess
+  backends only, SKIP on memory): a crash sweep crashes a synthetic worker at
+  every boundary phase (`after_claim` / `after_body_start` / `after_boundary` /
+  `after_effect`) against a shared durable backend and re-checks the invariant
+  against the reconstructed ledger, plus a two-worker fence-takeover proof where
+  a lease-expired entry is reclaimed by worker B (fence N+1) and worker A's
+  stale-fence `complete()` is rejected by the fencing CAS while B completes
+  alone. Scoped to the scenario's own request ids so an `--scenario all` run
+  stays independent.
+
+- Tool capability typing (effect-commit Change 3). New `ToolCapability`
+  probeability axis (`IDEMPOTENT` / `QUERYABLE` / `BLIND`), orthogonal to
+  `SideEffectClass` (idempotency): capability answers "can an in-flight effect's
+  outcome be looked up afterward?" `resolve_capability(side_effect_class,
+  explicit=None, *, has_reconciler, has_provider_key)` derives a conservative
+  default (READ / IDEMPOTENT_MUTATE -> IDEMPOTENT; KEYED_MUTATE -> QUERYABLE with
+  a provider key or reconciler, else BLIND; NON_IDEMPOTENT_MUTATE -> QUERYABLE
+  only with a reconciler, else BLIND; IRREVERSIBLE -> BLIND, never loosened). An
+  explicit declaration may tighten to BLIND freely but may only loosen when the
+  class + mechanism supports it — otherwise it raises
+  `ToolCapabilityDeclarationError` (declaration honesty). `ToolTransitionBinding`
+  gains a `capability` field (`for_tool(capability=...)`; default derived from
+  class) and YAML tool bindings accept a `capability:` key (missing -> derived).
+  Enforcement: a BLIND tool whose entry is ambiguous (UNKNOWN /
+  FAILED_AFTER_EFFECT / maybe_crossed / crossed) never auto-redispatches,
+  reclaims-for-retry, or opts into same-key UNKNOWN retry — even with a valid
+  provider idempotency key + TTL (BLIND declaration wins); it parks for operator
+  reconciliation (`release` still resolves it). A QUERYABLE tool with no probe
+  mechanism (no reconciler, no provider key) fails closed to the same parking
+  behaviour with a warning. Reconciler presence on the `ActionLedger` is the
+  concrete "queryable" mechanism: a bound `Reconciler` lets recovery resolve
+  ATTEMPTING -> COMMITTED/ABORTED by probing. Clean FAILED_BEFORE_EFFECT /
+  not_crossed retries and IDEMPOTENT tools keep existing behaviour. New public
+  exports: `ToolCapability`, `ToolCapabilityDeclarationError`,
+  `resolve_capability`.
+
+- Single atomic decision point (effect-commit Change 2). Policy checks are
+  evaluated as pure predicates over an `(intent, snapshot)` pair at one
+  enforcement point and the resulting `Decision` is recorded atomically with
+  the `INTENDED -> ATTEMPTING` transition, under the same fenced compare-and-swap
+  that guards every in-flight mutation. New `mycelium.decision` module
+  (`Decision`, `DecisionEngine`, `DecisionIntent`, `DecisionSnapshot`,
+  `PredicateVerdict`, `build_snapshot`) with a `register_decision_predicate`
+  hook so hosts can add checks at the single point. Authority + use-time
+  currency are wired as built-in predicates (existing standalone enforcement
+  unchanged). `LedgerEntry` gains a durable `decision` field (serde
+  backward-compatible; missing -> `None`). A stale-fence worker cannot record a
+  decision and therefore cannot smuggle in an effect the current-fence decision
+  would deny.
+
+- Kleppmann fencing tokens (effect-commit Change 1). Every successful claim
+  atomically increments the durable `LedgerEntry.fence`, and every later
+  mutation made for that claim is guarded by the same token. Completion,
+  failure, lease renewal, heartbeat, boundary, provider-reference, decision,
+  reconciliation, and operator-resolution writes now use fenced storage CAS;
+  a worker whose lease was taken over cannot mutate the winning entry even if
+  it resumes with its old owner metadata. Legacy rows without a fence load as
+  fence zero and receive a current token when claimed.
+
 ## 1.33.0 (2026-08-15)
 
 MINOR: side-effect guardrails batch for unsafe / irreversible writes.

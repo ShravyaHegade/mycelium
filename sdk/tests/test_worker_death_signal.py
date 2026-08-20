@@ -436,7 +436,9 @@ def test_claim_maintains_heartbeat_on_renew() -> None:
     assert entry.last_heartbeat_at >= t0
 
     t1 = time.time() + 10
-    renewed = ledger_inst.renew_lease("req-hb", now=t1)
+    renewed = ledger_inst.renew_lease(
+        "req-hb", now=t1, expected_fence=entry.fence
+    )
     assert renewed.last_heartbeat_at == t1
     assert renewed.lease_until is not None
     assert renewed.lease_until > t1

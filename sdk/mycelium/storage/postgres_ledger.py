@@ -66,8 +66,7 @@ class PostgresEntryStorage:
         if self._schema_ready:
             return
         query = self._sql.SQL(
-            "CREATE TABLE IF NOT EXISTS {} ("
-            "request_id TEXT PRIMARY KEY, payload JSONB NOT NULL)"
+            "CREATE TABLE IF NOT EXISTS {} (request_id TEXT PRIMARY KEY, payload JSONB NOT NULL)"
         ).format(self._table_id())
         with self._psycopg.connect(self._dsn) as conn:
             conn.execute(query)
@@ -76,9 +75,9 @@ class PostgresEntryStorage:
 
     def get(self, request_id: str) -> E | None:
         self._ensure_schema()
-        query = self._sql.SQL(
-            "SELECT payload FROM {} WHERE request_id = %s"
-        ).format(self._table_id())
+        query = self._sql.SQL("SELECT payload FROM {} WHERE request_id = %s").format(
+            self._table_id()
+        )
         with self._psycopg.connect(self._dsn) as conn:
             row = conn.execute(query, (request_id,)).fetchone()
         if row is None:
@@ -104,8 +103,8 @@ class PostgresEntryStorage:
     ) -> tuple[ClaimOutcome, E | None]:
         self._ensure_schema()
         now = time.time()
-        leased = with_lease(entry, now=now, lease_ttl=lease_ttl)
-        payload = json.loads(json.dumps(leased.to_dict(), default=str))
+        fresh = with_lease(entry, now=now, lease_ttl=lease_ttl)
+        payload = json.loads(json.dumps(fresh.to_dict(), default=str))
         insert_query = self._sql.SQL(
             "INSERT INTO {} (request_id, payload) VALUES (%s, %s::jsonb) "
             "ON CONFLICT (request_id) DO NOTHING RETURNING request_id"
@@ -137,9 +136,11 @@ class PostgresEntryStorage:
                 if outcome == "in_flight":
                     return "in_flight", existing
 
+                reclaim_entry = with_lease(entry, now=now, lease_ttl=lease_ttl, prior=existing)
+                reclaim_payload = json.loads(json.dumps(reclaim_entry.to_dict(), default=str))
                 reclaimed = conn.execute(
                     update_reclaim,
-                    (json.dumps(payload), entry.request_id),
+                    (json.dumps(reclaim_payload), entry.request_id),
                 ).fetchone()
                 if reclaimed is not None:
                     return "claimed", None
@@ -152,12 +153,14 @@ class PostgresEntryStorage:
         expected_terminal_outcomes: frozenset[str],
         expected_owner: str | None = None,
         require_lease_held_at: float | None = None,
+        expected_fence: int | None = None,
+        expected_effect_phase: str | None = None,
     ) -> bool:
         self._ensure_schema()
         table = self._table_id()
         payload = json.loads(json.dumps(entry.to_dict(), default=str))
         # Build WHERE clause: terminal_outcome IN (...) [AND owner = ...]
-        # [AND lease held or unbounded]
+        # [AND fence matches] [AND lease held or unbounded]
         extra_clauses = self._sql.SQL("")
         params: list[Any] = [
             json.dumps(payload),
@@ -165,10 +168,19 @@ class PostgresEntryStorage:
             list(expected_terminal_outcomes),
         ]
         if expected_owner is not None:
-            extra_clauses = self._sql.SQL("{} AND payload->>'owner' = %s").format(
-                extra_clauses
-            )
+            extra_clauses = self._sql.SQL("{} AND payload->>'owner' = %s").format(extra_clauses)
             params.append(expected_owner)
+        if expected_fence is not None:
+            # COALESCE so old rows (payload without a fence) read as 0.
+            extra_clauses = self._sql.SQL(
+                "{} AND COALESCE((payload->>'fence')::bigint, 0) = %s"
+            ).format(extra_clauses)
+            params.append(expected_fence)
+        if expected_effect_phase is not None:
+            extra_clauses = self._sql.SQL(
+                "{} AND COALESCE(payload->>'effect_phase', 'INTENDED') = %s"
+            ).format(extra_clauses)
+            params.append(expected_effect_phase)
         if require_lease_held_at is not None:
             # NULL lease_until = unbounded; else must still be in the future.
             extra_clauses = self._sql.SQL(
@@ -236,12 +248,16 @@ class PostgresLedgerStorage:
         expected_terminal_outcomes: frozenset[str],
         expected_owner: str | None = None,
         require_lease_held_at: float | None = None,
+        expected_fence: int | None = None,
+        expected_effect_phase: str | None = None,
     ) -> bool:
         return self._inner.try_transition(
             entry,
             expected_terminal_outcomes=expected_terminal_outcomes,
             expected_owner=expected_owner,
             require_lease_held_at=require_lease_held_at,
+            expected_fence=expected_fence,
+            expected_effect_phase=expected_effect_phase,
         )
 
 

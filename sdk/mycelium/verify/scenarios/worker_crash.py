@@ -217,7 +217,11 @@ def run_worker_crash(ctx: ScenarioContext) -> VerificationEvidence:
                 failures.append("operator override was not visibly marked")
             else:
                 decisions.append("death-signal: live refuse; override operator-asserted")
-            ledger.fail(death_id, RuntimeError("verify cleanup"))
+            ledger.fail(
+                death_id,
+                RuntimeError("verify cleanup"),
+                expected_fence=entry.fence,
+            )
     finally:
         terminate_owned(ctx.owned_procs)
 

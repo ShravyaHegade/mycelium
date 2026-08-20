@@ -98,7 +98,9 @@ def test_redis_storage_atomic_claim(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(LedgerPendingError):
         ledger.claim("req-redis", "send_payment", (), {"amount": 1})
 
-    completed = ledger.complete("req-redis", {"ok": True})
+    completed = ledger.complete(
+        "req-redis", {"ok": True}, expected_fence=first.fence
+    )
     assert completed.status == "completed"
 
     replay = ledger.claim("req-redis", "send_payment", (), {"amount": 1})
@@ -110,11 +112,113 @@ def test_redis_storage_retries_after_failed_claim(monkeypatch: pytest.MonkeyPatc
     _fake_redis(monkeypatch)
     storage = RedisLedgerStorage("redis://test")
     ledger = ActionLedger(storage=storage)
-    ledger.claim("req-fail", "send_payment", (), {})
-    ledger.fail("req-fail", RuntimeError("boom"))
+    claimed = ledger.claim("req-fail", "send_payment", (), {})
+    ledger.fail("req-fail", RuntimeError("boom"), expected_fence=claimed.fence)
 
     retry = ledger.claim("req-fail", "send_payment", (), {})
     assert retry.status == "in-flight"
+
+
+def test_redis_tombstone_never_regresses_fence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dataclasses import replace
+
+    fake = _fake_redis(monkeypatch)
+    storage = RedisLedgerStorage("redis://test")
+    claimed = LedgerEntry(
+        request_id="redis-fence-tomb",
+        tool="send_payment",
+        args=[],
+        kwargs={},
+        status="in-flight",
+        terminal_outcome=TerminalOutcome.IN_FLIGHT.value,
+        owner="worker-A",
+        fence=1,
+    )
+    successor = replace(claimed, owner="worker-B", fence=2)
+    storage.set(successor)
+    storage.set(claimed)
+
+    fake.delete("mycelium:action:redis-fence-tomb")
+    restored = storage.get(claimed.request_id)
+
+    assert restored is not None
+    assert restored.owner == "worker-B"
+    assert restored.fence == 2
+
+
+def test_redis_watch_exhaustion_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from redis.exceptions import WatchError
+
+    fake = _fake_redis(monkeypatch)
+    original_pipeline = fake.pipeline
+
+    class ConflictingPipeline:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def watch(self, *keys):
+            return None
+
+        def get(self, key):
+            return fake.get(key)
+
+        def multi(self):
+            return None
+
+        def set(self, *args, **kwargs):
+            return self
+
+        def execute(self):
+            raise WatchError("forced contention")
+
+    def force_conflicts() -> None:
+        fake.pipeline = lambda transaction=True: ConflictingPipeline()
+
+    entry = LedgerEntry(
+        request_id="redis-watch-exhaustion",
+        tool="send_payment",
+        args=[],
+        kwargs={},
+        status="in-flight",
+        terminal_outcome=TerminalOutcome.IN_FLIGHT.value,
+    )
+
+    storage = RedisLedgerStorage("redis://test", prefix="watch-set:")
+    force_conflicts()
+    with pytest.raises(RuntimeError, match="set exhausted WATCH retries"):
+        storage.set(entry)
+
+    fake.pipeline = original_pipeline
+    storage = RedisLedgerStorage("redis://test", prefix="watch-claim:")
+    force_conflicts()
+    with pytest.raises(RuntimeError, match="claim exhausted WATCH retries"):
+        storage.try_claim_inflight(entry)
+    assert fake.get("watch-claim:redis-watch-exhaustion") is None
+
+    fake.pipeline = original_pipeline
+    storage = RedisLedgerStorage("redis://test", prefix="watch-restore:")
+    storage.set(entry)
+    fake.delete("watch-restore:redis-watch-exhaustion")
+    force_conflicts()
+    with pytest.raises(RuntimeError, match="restoration exhausted WATCH retries"):
+        storage.get(entry.request_id)
+
+    fake.pipeline = original_pipeline
+    storage = RedisLedgerStorage("redis://test", prefix="watch-transition:")
+    storage.set(entry)
+    force_conflicts()
+    with pytest.raises(RuntimeError, match="transition exhausted WATCH retries"):
+        storage.try_transition(
+            entry,
+            expected_terminal_outcomes=frozenset({TerminalOutcome.IN_FLIGHT.value}),
+        )
 
 
 def test_file_storage_payment_hard_blocks_expired_lease(tmp_path: Path) -> None:
@@ -269,7 +373,10 @@ def test_redis_storage_read_only_returns_completed(
         {"query": "billing"},
     )
     assert claimed.status == "in-flight"
-    ledger.complete(request_id, {"query": "billing", "hits": 1})
+    ledger.complete(
+        request_id, {"query": "billing", "hits": 1},
+        expected_fence=claimed.fence,
+    )
 
     replay = ledger.claim_read_only(
         request_id,
@@ -300,7 +407,7 @@ def test_postgres_storage_atomic_claim() -> None:
     with pytest.raises(LedgerPendingError):
         ledger.claim(request_id, "send_payment", (), {"amount": 99})
 
-    ledger.complete(request_id, {"paid": True})
+    ledger.complete(request_id, {"paid": True}, expected_fence=first.fence)
     replay = ledger.claim(request_id, "send_payment", (), {"amount": 99})
     assert replay.status == "completed"
     assert replay.result == {"paid": True}
@@ -346,7 +453,9 @@ def test_sqlite_storage_atomic_claim(tmp_path: Path) -> None:
     with pytest.raises(LedgerPendingError):
         ledger.claim("req-sqlite", "send_payment", (), {"amount": 1})
 
-    completed = ledger.complete("req-sqlite", {"ok": True})
+    completed = ledger.complete(
+        "req-sqlite", {"ok": True}, expected_fence=first.fence
+    )
     assert completed.status == "completed"
 
     replay = ledger.claim("req-sqlite", "send_payment", (), {"amount": 1})

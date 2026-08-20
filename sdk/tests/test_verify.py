@@ -674,6 +674,7 @@ def test_all_order_sqlite(tmp_path: Path, scenario: str) -> None:
         "destructive-confirm",
         "authority-window",
         "use-time-currency",
+        "simulation",
     ]
     assert all(item.status == VerificationStatus.PASS for item in report.scenarios)
     assert report.empirically_verified is True

@@ -103,18 +103,28 @@ def _worker_a(payload: dict[str, Any]) -> None:
             policy_version="1",
             side_effect_class=SideEffectClass.NON_IDEMPOTENT_MUTATE,
         )
-        ledger.claim_side_effecting(
+        claimed = ledger.claim_side_effecting(
             request_id,
             "subagent_task",
             (),
             {"task": "analyze_market"},
             binding,
         )
+        ledger.record_decision(
+            request_id,
+            {"allowed": True, "verdicts": [], "denied_reasons": []},
+            expected_owner=claimed.owner,
+            expected_fence=claimed.fence,
+        )
         client.set(keys["ready"], "1")
         # Durable side-effect counter shared across processes.
         client.incr(keys["exec"])
         time.sleep(work_seconds)
-        ledger.complete(request_id, {"task": "analyze_market", "result": "done"})
+        ledger.complete(
+            request_id,
+            {"task": "analyze_market", "result": "done"},
+            expected_fence=claimed.fence,
+        )
     except Exception as exc:  # noqa: BLE001 — surface to parent via Redis
         client.set(keys["error_a"], f"{type(exc).__name__}: {exc}")
     finally:

@@ -230,6 +230,40 @@ def test_release_completed_returns_result_without_reexecution(storage) -> None:
         assert calls == [7.0]  # body never re-ran
 
 
+def test_release_completed_rejects_decisionless_effect_protocol(storage) -> None:
+    ledger_inst = ActionLedger(storage=storage)
+    with execution_scope(_scope()):
+        claimed = ledger_inst.claim_side_effecting(
+            "release-decisionless",
+            "charge",
+            (),
+            {
+                "request_id": "release-decisionless",
+                "thread_id": "t1",
+                "run_id": "r1",
+            },
+            _binding(),
+        )
+    ledger_inst.mark_unknown(
+        claimed.request_id,
+        error="worker disappeared",
+        expected_fence=claimed.fence,
+    )
+
+    with pytest.raises(LedgerReleaseRefusedError, match="allowed durable ATTEMPTING"):
+        ledger_inst.release(
+            claimed.request_id,
+            verified="completed",
+            result={"charged": True},
+            by="ops@example.com",
+            reason="provider reports success",
+        )
+
+    stored = storage.get(claimed.request_id)
+    assert stored is not None
+    assert stored.resolved_terminal_outcome() != TerminalOutcome.COMPLETED
+
+
 def test_release_is_one_shot(storage) -> None:
     ledger_inst = ActionLedger(storage=storage)
     storage.set(
@@ -598,18 +632,30 @@ def test_postgres_release_not_executed_round_trip() -> None:
 def _seed_file_ledger(path: Path) -> str:
     storage = FileLedgerStorage(path)
     ledger_inst = ActionLedger(storage=storage)
-    ledger_inst.claim("req-cli", "send_payment", (), {"amount": 10})
-    ledger_inst.attach_external_operation_ref("req-cli", "pi_cli_1")
-    ledger_inst.mark_blocked("req-cli", error="stale lease; maybe crossed")
+    claimed = ledger_inst.claim("req-cli", "send_payment", (), {"amount": 10})
+    ledger_inst.attach_external_operation_ref(
+        "req-cli", "pi_cli_1", expected_fence=claimed.fence
+    )
+    ledger_inst.mark_blocked(
+        "req-cli", error="stale lease; maybe crossed", expected_fence=claimed.fence
+    )
     return "req-cli"
 
 
 def _seed_sqlite_ledger(path: Path) -> str:
     storage = SqliteLedgerStorage(path)
     ledger_inst = ActionLedger(storage=storage)
-    ledger_inst.claim("req-cli-sqlite", "send_payment", (), {"amount": 10})
-    ledger_inst.attach_external_operation_ref("req-cli-sqlite", "pi_cli_sqlite")
-    ledger_inst.mark_blocked("req-cli-sqlite", error="stale lease; maybe crossed")
+    claimed = ledger_inst.claim(
+        "req-cli-sqlite", "send_payment", (), {"amount": 10}
+    )
+    ledger_inst.attach_external_operation_ref(
+        "req-cli-sqlite", "pi_cli_sqlite", expected_fence=claimed.fence
+    )
+    ledger_inst.mark_blocked(
+        "req-cli-sqlite",
+        error="stale lease; maybe crossed",
+        expected_fence=claimed.fence,
+    )
     return "req-cli-sqlite"
 
 

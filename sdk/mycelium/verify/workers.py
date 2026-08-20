@@ -274,6 +274,50 @@ def concurrent_reconcile_failure(
     return None
 
 
+def fence_rejection_failure(storage: Any, request_id: str) -> str | None:
+    """Prove a stale-fence write is CAS-rejected on the winning entry.
+
+    A superseded worker carries a fence below the stored one. Even reusing the
+    winner's own outcome/owner, a write stamped with ``stored_fence - 1`` must
+    be refused by the storage CAS. Returns a failure reason, or ``None`` when
+    the fence gate empirically rejects the stale write.
+    """
+    from dataclasses import replace
+
+    from mycelium.transition import TerminalOutcome
+
+    entry = storage.get(request_id)
+    if entry is None:
+        return f"winning entry {request_id!r} missing; cannot prove fence"
+    stored_fence = getattr(entry, "fence", None)
+    if stored_fence is None:
+        return "winning entry carries no fence token"
+    if stored_fence < 1:
+        return f"winning entry fence={stored_fence}, expected >= 1 after a claim"
+
+    stale = replace(entry, fence=stored_fence - 1, result={"stale": True})
+    accepted = storage.try_transition(
+        stale,
+        expected_terminal_outcomes=frozenset(
+            {
+                TerminalOutcome.IN_FLIGHT.value,
+                TerminalOutcome.COMPLETED.value,
+            }
+        ),
+        expected_fence=stored_fence - 1,
+    )
+    if accepted:
+        return (
+            f"stale-fence write accepted (stored fence={stored_fence}); "
+            "fencing gate did not reject the superseded worker"
+        )
+
+    after = storage.get(request_id)
+    if after is None or getattr(after, "fence", None) != stored_fence:
+        return "stored fence mutated after a stale-fence write was refused"
+    return None
+
+
 def storage_from_payload(payload: dict[str, Any]) -> IsolationGateStorage:
     backend = payload["backend"]
     if backend == "file":
@@ -367,7 +411,7 @@ def crash_worker(payload: dict[str, Any]) -> None:
     phase = payload["phase"]
     request_id = payload["request_id"]
     with execution_scope(TransitionScope(thread_id="verify", run_id="verify")):
-        ledger.claim_side_effecting(
+        claimed = ledger.claim_side_effecting(
             request_id,
             SYNTHETIC_TOOL,
             (1,),
@@ -379,12 +423,25 @@ def crash_worker(payload: dict[str, Any]) -> None:
             binding,
         )
         token = _active_transition_var.set(
-            _ActiveTransition(ledger, request_id, binding, {})
+            _ActiveTransition(
+                ledger,
+                request_id,
+                binding,
+                {},
+                claimed.owner,
+                claimed.fence,
+            )
         )
         try:
             if phase == "after_claim":
                 _append_line(payload["ready_file"], "after_claim")
                 os._exit(1)
+            ledger.record_decision(
+                request_id,
+                {"allowed": True, "verdicts": [], "denied_reasons": []},
+                expected_owner=claimed.owner,
+                expected_fence=claimed.fence,
+            )
             _append_count(payload["exec_file"])
             if phase == "after_body_start":
                 _append_line(payload["ready_file"], "after_body_start")
@@ -399,7 +456,12 @@ def crash_worker(payload: dict[str, Any]) -> None:
                 _append_line(payload["ready_file"], "after_effect")
                 time.sleep(60)
                 os._exit(1)
-            ledger.complete(request_id, {"charged": True})
+            ledger.complete(
+                request_id,
+                {"charged": True},
+                expected_fence=claimed.fence,
+                _expected_owner=claimed.owner,
+            )
         finally:
             _active_transition_var.reset(token)
 
@@ -413,6 +475,7 @@ def reconcile_worker(payload: dict[str, Any]) -> None:
         return
     status = ReconcileStatus(payload.get("reconcile_status", "NOT_EXECUTED"))
     reconciler = SyntheticReconciler(status=status)
+    provider = SyntheticProvider()
     ready = payload.get("ready_file")
     if ready:
         _append_line(ready, "ready")
@@ -423,15 +486,22 @@ def reconcile_worker(payload: dict[str, Any]) -> None:
     tool = make_tool(
         storage,
         payload["exec_file"],
+        provider=provider,
         reconciler=reconciler,
         poll_timeout=float(payload.get("poll_timeout", 8.0)),
     )
     try:
         with execution_scope(TransitionScope(thread_id="verify", run_id="verify")):
-            result = tool(1, request_id=payload["request_id"], op_id=payload.get("op_id", "op"))
+            call_kwargs = {"request_id": payload["request_id"]}
+            if not payload.get("omit_op_id"):
+                call_kwargs["op_id"] = payload.get("op_id", "op")
+            result = tool(1, **call_kwargs)
         _append_line(payload["out_file"], str(result))
     except Exception as exc:  # noqa: BLE001
         _append_line(payload["err_file"], f"{type(exc).__name__}: {exc}")
+    finally:
+        for effect_id in provider.effects:
+            _append_line(payload["effect_file"], effect_id)
 
 
 def spawn_workers(target, payloads: list[dict[str, Any]]) -> list[mp.Process]:
@@ -474,6 +544,7 @@ __all__ = [
     "concurrent_reconcile_failure",
     "count_executions",
     "crash_worker",
+    "fence_rejection_failure",
     "join_workers",
     "make_ledger",
     "make_tool",

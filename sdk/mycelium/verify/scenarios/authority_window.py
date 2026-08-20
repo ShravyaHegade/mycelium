@@ -205,6 +205,19 @@ def run_authority_window(ctx: ScenarioContext) -> VerificationEvidence:
                 "stored completed retries return result without re-execution",
             )
 
+            # Fencing token proof: the settled entry carries a monotonic fence,
+            # and a superseded worker's write (fence behind the stored one) is
+            # CAS-rejected even reusing the winner's outcome/owner. This is the
+            # gate that stops a resumed stale worker from committing an effect
+            # after a newer claim took over — independent of its lease clock.
+            from mycelium.verify.workers import fence_rejection_failure
+
+            fence_note = fence_rejection_failure(storage, rid_ok)
+            _record(
+                fence_note is None,
+                fence_note or "stale-fence write is rejected by the storage CAS",
+            )
+
             # Authorize valid, expire before use (exact boundary now == expires_at)
             rid_exp = iso.track(iso.namespace.request_id("authority-window", "expire"))
             grant_exp = issue_destructive_grant(

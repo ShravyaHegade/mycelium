@@ -34,8 +34,8 @@ def test_ledger_entry_sets_envelope_on_claim() -> None:
 def test_complete_sets_completed_terminal_outcome() -> None:
     storage = InMemoryLedgerStorage()
     ledger = ActionLedger(storage=storage)
-    ledger.claim("key-2", "search_docs", (), {})
-    completed = ledger.complete("key-2", {"hits": 1})
+    claimed = ledger.claim("key-2", "search_docs", (), {})
+    completed = ledger.complete("key-2", {"hits": 1}, expected_fence=claimed.fence)
 
     assert completed.terminal_outcome == TerminalOutcome.COMPLETED.value
     assert completed.status == "completed"
@@ -45,8 +45,8 @@ def test_complete_sets_completed_terminal_outcome() -> None:
 def test_fail_defaults_to_failed_before_effect() -> None:
     storage = InMemoryLedgerStorage()
     ledger = ActionLedger(storage=storage)
-    ledger.claim("key-3", "search_docs", (), {})
-    failed = ledger.fail("key-3", RuntimeError("boom"))
+    claimed = ledger.claim("key-3", "search_docs", (), {})
+    failed = ledger.fail("key-3", RuntimeError("boom"), expected_fence=claimed.fence)
 
     assert failed.terminal_outcome == TerminalOutcome.FAILED_BEFORE_EFFECT.value
     assert failed.status == "failed"
@@ -55,8 +55,11 @@ def test_fail_defaults_to_failed_before_effect() -> None:
 def test_fail_after_effect() -> None:
     storage = InMemoryLedgerStorage()
     ledger = ActionLedger(storage=storage)
-    ledger.claim("key-4", "send_payment", (), {})
-    failed = ledger.fail("key-4", RuntimeError("charged"), failed_after_effect=True)
+    claimed = ledger.claim("key-4", "send_payment", (), {})
+    failed = ledger.fail(
+        "key-4", RuntimeError("charged"), failed_after_effect=True,
+        expected_fence=claimed.fence,
+    )
 
     assert failed.terminal_outcome == TerminalOutcome.FAILED_AFTER_EFFECT.value
 
@@ -92,13 +95,13 @@ def test_from_dict_migrates_legacy_status() -> None:
 def test_mark_blocked_and_unknown() -> None:
     storage = InMemoryLedgerStorage()
     ledger = ActionLedger(storage=storage)
-    ledger.claim("key-6", "search_docs", (), {})
+    claimed = ledger.claim("key-6", "search_docs", (), {})
 
-    blocked = ledger.mark_blocked("key-6", error="policy")
+    blocked = ledger.mark_blocked("key-6", error="policy", expected_fence=claimed.fence)
     assert blocked.terminal_outcome == TerminalOutcome.BLOCKED.value
 
-    ledger.claim("key-7", "search_docs", (), {})
-    unknown = ledger.mark_unknown("key-7", error="orphan")
+    claimed = ledger.claim("key-7", "search_docs", (), {})
+    unknown = ledger.mark_unknown("key-7", error="orphan", expected_fence=claimed.fence)
     assert unknown.terminal_outcome == TerminalOutcome.UNKNOWN.value
 
 

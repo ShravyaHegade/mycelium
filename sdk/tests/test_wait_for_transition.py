@@ -31,6 +31,14 @@ def _binding() -> ToolTransitionBinding:
     )
 
 
+def _allow(ledger, claimed) -> None:
+    ledger.record_decision(
+        claimed.request_id,
+        {"allowed": True, "verdicts": [], "denied_reasons": []},
+        expected_fence=claimed.fence,
+    )
+
+
 def test_wait_for_transition_returns_immediately_when_terminal() -> None:
     ledger = _ledger()
     claimed = ledger.claim_side_effecting(
@@ -40,7 +48,8 @@ def test_wait_for_transition_returns_immediately_when_terminal() -> None:
         {},
         _binding(),
     )
-    ledger.complete(claimed.request_id, {"ok": True})
+    _allow(ledger, claimed)
+    ledger.complete(claimed.request_id, {"ok": True}, expected_fence=claimed.fence)
 
     entry = ledger.wait_for_transition("r1")
     assert entry.resolved_terminal_outcome() == TerminalOutcome.COMPLETED
@@ -69,10 +78,13 @@ def test_wait_for_transition_times_out_without_mutating() -> None:
 def test_wait_for_transition_sees_peer_complete() -> None:
     ledger = _ledger(poll_interval=0.01, poll_timeout=2.0)
     claimed = ledger.claim_side_effecting("r1", "charge", (), {}, _binding())
+    _allow(ledger, claimed)
 
     def _complete() -> None:
         time.sleep(0.05)
-        ledger.complete(claimed.request_id, {"paid": 1})
+        ledger.complete(
+            claimed.request_id, {"paid": 1}, expected_fence=claimed.fence
+        )
 
     threading.Thread(target=_complete, daemon=True).start()
     entry = ledger.wait_for_transition("r1")
@@ -85,10 +97,13 @@ async def test_wait_for_transition_async_sees_peer_complete() -> None:
 
     ledger = _ledger(poll_interval=0.01, poll_timeout=2.0)
     claimed = ledger.claim_side_effecting("r1", "charge", (), {}, _binding())
+    _allow(ledger, claimed)
 
     async def _complete() -> None:
         await asyncio.sleep(0.05)
-        ledger.complete(claimed.request_id, {"paid": 2})
+        ledger.complete(
+            claimed.request_id, {"paid": 2}, expected_fence=claimed.fence
+        )
 
     task = asyncio.create_task(_complete())
     entry = await ledger.wait_for_transition_async("r1")

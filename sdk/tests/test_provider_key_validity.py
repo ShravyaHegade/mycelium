@@ -370,10 +370,13 @@ def test_unknown_same_key_valid_ttl_retries_without_reconciler() -> None:
     storage = InMemoryLedgerStorage()
     binding = _keyed_binding(ttl=300.0)
     attempts = {"n": 0}
+    claims: list[tuple[int, float | None]] = []
 
     @ledger_sync(storage=storage, transition_binding=binding)
     def send_payment(amount: float, idempotency_key: str) -> dict[str, str]:
         attempts["n"] += 1
+        claimed = storage.list_all()[0]
+        claims.append((claimed.fence, claimed.lease_until))
         with side_effect():
             if attempts["n"] == 1:
                 raise RuntimeError("timeout after maybe-crossed")
@@ -388,6 +391,8 @@ def test_unknown_same_key_valid_ttl_retries_without_reconciler() -> None:
 
     assert attempts["n"] == 2
     assert result == {"status": "sent"}
+    assert [fence for fence, _lease_until in claims] == [1, 2]
+    assert claims[1][1] is not None
 
 
 def test_unknown_same_key_expired_ttl_hard_blocks_e2e() -> None:
@@ -418,9 +423,7 @@ def test_unknown_same_key_prefers_reconciler_over_reexec() -> None:
     reconciler = _StubReconciler(ReconcileResult.completed({"status": "settled"}))
     attempts = {"n": 0}
 
-    @ledger_sync(
-        storage=storage, transition_binding=binding, reconciler=reconciler
-    )
+    @ledger_sync(storage=storage, transition_binding=binding, reconciler=reconciler)
     def send_payment(amount: float, idempotency_key: str) -> dict[str, str]:
         attempts["n"] += 1
         with side_effect():

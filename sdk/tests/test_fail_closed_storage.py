@@ -163,7 +163,9 @@ class TestCompleteDuringStorageDown:
         storage.set(entry)
         storage.fail_set = True
         with pytest.raises(LedgerStorageUnavailableError, match="try_transition"):
-            ledger_inst.complete("req-complete", {"ok": True})
+            ledger_inst.complete(
+                "req-complete", {"ok": True}, expected_fence=entry.fence
+            )
         # Entry should still be IN_FLIGHT (not completed)
         stored = storage.get("req-complete")
         assert stored is not None
@@ -184,8 +186,9 @@ class TestFailureRecordingDuringStorageDown:
         def selective_fail(entry: LedgerEntry) -> None:
             nonlocal call_count
             call_count += 1
-            # First set is from claim (success); second set is from _record_failure
-            if call_count >= 2:
+            # set #1 = claim (success); set #2 = single-point decision record
+            # (success); set #3 = _record_failure after the tool raises (fails).
+            if call_count >= 3:
                 raise ConnectionError("storage backend unreachable")
             original_set(entry)
 
@@ -207,7 +210,8 @@ class TestFailureRecordingDuringStorageDown:
         def selective_fail(entry: LedgerEntry) -> None:
             nonlocal call_count
             call_count += 1
-            if call_count >= 2:
+            # set #1 = claim; set #2 = decision record; set #3 = _record_failure.
+            if call_count >= 3:
                 raise ConnectionError("storage backend unreachable")
             original_set(entry)
 
@@ -252,28 +256,36 @@ class TestUnclassifiedPolicyWarn:
 
     def test_warn_mode_reclaims_failed_entry(self) -> None:
         ledger_inst = ActionLedger(unclassified_policy=UNCLASSIFIED_POLICY_WARN)
-        ledger_inst.claim("req-warn", "my_tool", (), {})
-        ledger_inst.fail("req-warn", RuntimeError("boom"))
+        claimed = ledger_inst.claim("req-warn", "my_tool", (), {})
+        ledger_inst.fail(
+            "req-warn", RuntimeError("boom"), expected_fence=claimed.fence
+        )
         # Warn mode should allow reclaim (legacy behavior)
         retry = ledger_inst.claim("req-warn", "my_tool", (), {})
         assert retry.status == "in-flight"
 
     def test_warn_mode_emits_warning_on_failed_retry(self) -> None:
         ledger_inst = ActionLedger(unclassified_policy=UNCLASSIFIED_POLICY_WARN)
-        ledger_inst.claim("req-warn2", "my_tool", (), {})
-        ledger_inst.fail("req-warn2", RuntimeError("boom"))
+        claimed = ledger_inst.claim("req-warn2", "my_tool", (), {})
+        ledger_inst.fail(
+            "req-warn2", RuntimeError("boom"), expected_fence=claimed.fence
+        )
         with pytest.warns(UserWarning, match="transition_binding"):
             ledger_inst.claim("req-warn2", "my_tool", (), {})
 
     def test_warn_warning_only_once_per_tool(self) -> None:
         ledger_inst = ActionLedger(unclassified_policy=UNCLASSIFIED_POLICY_WARN)
         # First failure+retry
-        ledger_inst.claim("req-w1", "my_tool", (), {})
-        ledger_inst.fail("req-w1", RuntimeError("boom"))
+        claimed = ledger_inst.claim("req-w1", "my_tool", (), {})
+        ledger_inst.fail(
+            "req-w1", RuntimeError("boom"), expected_fence=claimed.fence
+        )
         with pytest.warns(UserWarning, match="transition_binding"):
-            ledger_inst.claim("req-w1", "my_tool", (), {})
+            claimed = ledger_inst.claim("req-w1", "my_tool", (), {})
         # Second failure+retry — no warning
-        ledger_inst.fail("req-w1", RuntimeError("boom again"))
+        ledger_inst.fail(
+            "req-w1", RuntimeError("boom again"), expected_fence=claimed.fence
+        )
         import warnings
         with warnings.catch_warnings():
             warnings.simplefilter("error", UserWarning)
@@ -286,8 +298,10 @@ class TestUnclassifiedPolicyStrict:
             unclassified_policy=UNCLASSIFIED_POLICY_STRICT,
             poll_timeout=0.1,
         )
-        ledger_inst.claim("req-strict", "my_tool", (), {})
-        ledger_inst.fail("req-strict", RuntimeError("boom"))
+        claimed = ledger_inst.claim("req-strict", "my_tool", (), {})
+        ledger_inst.fail(
+            "req-strict", RuntimeError("boom"), expected_fence=claimed.fence
+        )
         with pytest.raises(LedgerHardBlockError, match="manual reconciliation"):
             ledger_inst.claim("req-strict", "my_tool", (), {})
 
@@ -297,8 +311,10 @@ class TestUnclassifiedPolicyStrict:
             poll_timeout=0.1,
         )
         # Claim creates IN_FLIGHT; fail creates FAILED_BEFORE_EFFECT
-        ledger_inst.claim("req-strict2", "my_tool", (), {})
-        ledger_inst.fail("req-strict2", RuntimeError("boom"))
+        claimed = ledger_inst.claim("req-strict2", "my_tool", (), {})
+        ledger_inst.fail(
+            "req-strict2", RuntimeError("boom"), expected_fence=claimed.fence
+        )
         # The claim_side_effecting path with _UNCLASSIFIED_BINDING should
         # resolve FAILED_BEFORE_EFFECT → MANUAL_RECONCILIATION_REQUIRED → hard-block
         with pytest.raises(LedgerHardBlockError):
@@ -309,8 +325,15 @@ class TestUnclassifiedPolicyStrict:
             unclassified_policy=UNCLASSIFIED_POLICY_STRICT,
         )
         with execution_scope(_scope()):
-            ledger_inst.claim("req-strict3", "my_tool", (), {})
-            ledger_inst.complete("req-strict3", {"result": "done"})
+            claimed = ledger_inst.claim("req-strict3", "my_tool", (), {})
+            ledger_inst.record_decision(
+                claimed.request_id,
+                {"allowed": True, "verdicts": [], "denied_reasons": []},
+                expected_fence=claimed.fence,
+            )
+            ledger_inst.complete(
+                "req-strict3", {"result": "done"}, expected_fence=claimed.fence
+            )
         # Second claim should return the cached result
         result = ledger_inst.claim("req-strict3", "my_tool", (), {})
         assert result.status == "completed"
@@ -332,8 +355,10 @@ class TestOperatorReleaseAfterStrict:
             poll_timeout=0.1,
         )
         # Fail → hard-block
-        ledger_inst.claim("req-rel", "my_tool", (), {})
-        ledger_inst.fail("req-rel", RuntimeError("boom"))
+        claimed = ledger_inst.claim("req-rel", "my_tool", (), {})
+        ledger_inst.fail(
+            "req-rel", RuntimeError("boom"), expected_fence=claimed.fence
+        )
         with pytest.raises(LedgerHardBlockError):
             ledger_inst.claim("req-rel", "my_tool", (), {})
 

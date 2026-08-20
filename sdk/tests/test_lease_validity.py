@@ -69,7 +69,9 @@ def test_renew_lease_keeps_held_and_poll_gate() -> None:
     old_until = claimed.lease_until
     assert old_until is not None
 
-    renewed = ledger.renew_lease("pay-1", lease_ttl=3600.0)
+    renewed = ledger.renew_lease(
+        "pay-1", lease_ttl=3600.0, expected_fence=claimed.fence
+    )
     assert renewed.lease_until is not None
     assert renewed.lease_until > old_until
     assert renewed.lease_validity() == LeaseValidity.HELD
@@ -86,42 +88,44 @@ def test_renew_lease_keeps_held_and_poll_gate() -> None:
 def test_renew_lease_rejects_already_expired() -> None:
     storage = InMemoryLedgerStorage()
     ledger = ActionLedger(storage=storage, lease_ttl=3600.0)
-    ledger.claim("pay-2", "send_payment", (), {})
+    claimed = ledger.claim("pay-2", "send_payment", (), {})
     existing = storage.get("pay-2")
     assert existing is not None
     storage.set(replace(existing, lease_until=time.time() - 1))
 
     with pytest.raises(LedgerError, match="already expired"):
-        ledger.renew_lease("pay-2")
+        ledger.renew_lease("pay-2", expected_fence=claimed.fence)
 
 
 def test_renew_lease_rejects_completed() -> None:
     storage = InMemoryLedgerStorage()
     ledger = ActionLedger(storage=storage)
-    ledger.claim("pay-3", "send_payment", (), {})
-    ledger.complete("pay-3", {"ok": True})
+    claimed = ledger.claim("pay-3", "send_payment", (), {})
+    ledger.complete("pay-3", {"ok": True}, expected_fence=claimed.fence)
     with pytest.raises(LedgerError, match="not IN_FLIGHT"):
-        ledger.renew_lease("pay-3")
+        ledger.renew_lease("pay-3", expected_fence=claimed.fence)
 
 
 def test_renew_lease_cas_does_not_clobber_concurrent_complete() -> None:
     """Renew must not overwrite a concurrent complete (TOCTOU)."""
     storage = InMemoryLedgerStorage()
     ledger = ActionLedger(storage=storage, lease_ttl=3600.0)
-    ledger.claim("pay-cas", "send_payment", (), {"amount": 1})
+    claimed = ledger.claim("pay-cas", "send_payment", (), {"amount": 1})
     barrier = threading.Barrier(2)
     errors: list[BaseException] = []
 
     def _renew() -> None:
         barrier.wait()
         try:
-            ledger.renew_lease("pay-cas", lease_ttl=7200.0)
+            ledger.renew_lease(
+                "pay-cas", lease_ttl=7200.0, expected_fence=claimed.fence
+            )
         except LedgerError as exc:
             errors.append(exc)
 
     def _complete() -> None:
         barrier.wait()
-        ledger.complete("pay-cas", {"ok": True})
+        ledger.complete("pay-cas", {"ok": True}, expected_fence=claimed.fence)
 
     t1 = threading.Thread(target=_renew, daemon=True)
     t2 = threading.Thread(target=_complete, daemon=True)
@@ -188,8 +192,8 @@ def test_auto_renew_keeps_lease_held_past_original_ttl() -> None:
     @ledger_sync(
         storage=storage,
         transition_binding=binding,
-        lease_ttl=0.08,
-        lease_renew_interval=0.02,
+        lease_ttl=0.3,
+        lease_renew_interval=0.03,
     )
     def slow_charge(amount: float) -> dict:
         entries = storage.list_all()
@@ -198,7 +202,7 @@ def test_auto_renew_keeps_lease_held_past_original_ttl() -> None:
         assert claimed_until is not None
         observed["claimed_until"] = claimed_until
         # Outlast the original lease window; auto-renew must keep it HELD.
-        time.sleep(0.22)
+        time.sleep(0.7)
         after = storage.get(entries[0].request_id)
         assert after is not None
         assert after.lease_until is not None
@@ -230,8 +234,8 @@ def test_auto_renew_keeps_peer_on_poll_past_original_ttl() -> None:
     @ledger_sync(
         storage=storage,
         transition_binding=binding,
-        lease_ttl=0.08,
-        lease_renew_interval=0.02,
+        lease_ttl=0.3,
+        lease_renew_interval=0.03,
     )
     def slow_charge(amount: float) -> dict:
         started.set()
@@ -248,7 +252,7 @@ def test_auto_renew_keeps_peer_on_poll_past_original_ttl() -> None:
     def run_peer() -> None:
         try:
             assert started.wait(timeout=2.0)
-            time.sleep(0.12)  # past original lease_ttl without auto-renew → EXPIRED
+            time.sleep(0.45)  # past original lease_ttl without auto-renew → EXPIRED
             entries = storage.list_all()
             assert len(entries) == 1
             assert entries[0].lease_validity() == LeaseValidity.HELD
@@ -313,14 +317,14 @@ async def test_auto_renew_async_ledger() -> None:
     @ledger(
         storage=storage,
         transition_binding=binding,
-        lease_ttl=0.08,
-        lease_renew_interval=0.02,
+        lease_ttl=0.3,
+        lease_renew_interval=0.03,
     )
     async def slow_charge(amount: float) -> dict:
         entries = storage.list_all()
         claimed_until = entries[0].lease_until
         assert claimed_until is not None
-        await asyncio.sleep(0.22)
+        await asyncio.sleep(0.7)
         after = storage.get(entries[0].request_id)
         assert after is not None
         assert after.lease_until is not None

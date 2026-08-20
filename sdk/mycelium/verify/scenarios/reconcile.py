@@ -240,6 +240,7 @@ def run_reconcile(ctx: ScenarioContext) -> VerificationEvidence:
             "prefix_ns": iso.namespace.prefix,
             "request_id": rid,
             "exec_file": exec_file,
+            "effect_file": str(work / "effects.txt"),
             "out_file": str(work / "out.txt"),
             "err_file": str(work / "err.txt"),
             "ready_file": ready_file,

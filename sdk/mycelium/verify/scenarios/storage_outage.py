@@ -90,24 +90,24 @@ def run_storage_outage(ctx: ScenarioContext) -> VerificationEvidence:
             else:
                 failures.append(f"{phase} hid outage as {type(exc).__name__}: {exc}")
 
-    # 3. Failure while recording body start (side_effect → maybe_crossed set).
+    # 3. Failure while recording body start (side_effect → maybe_crossed transition).
     rid = iso.track(iso.namespace.request_id("outage", "body-start"))
-    fault._set_count = 0
-    fault.fail_set = True
+    fault._transition_count = 0
+    fault.fail_nth_transition = 2
     with execution_scope(TransitionScope(thread_id="verify", run_id="verify")):
         tool = make_tool(storage, artifact, provider=SyntheticProvider())
         _expect_outage("body-start", lambda: tool(1, request_id=rid, op_id="body-start"))
-    fault.fail_set = False
+    fault.fail_nth_transition = None
 
-    # 4. Failure while writing the external-operation boundary (2nd set).
+    # 4. Failure while writing the external-operation reference transition.
     rid = iso.track(iso.namespace.request_id("outage", "boundary"))
-    fault._set_count = 0
-    fault.fail_nth_set = 2
+    fault._transition_count = 0
+    fault.fail_nth_transition = 3
     with execution_scope(TransitionScope(thread_id="verify", run_id="verify")):
         tool = make_tool(storage, artifact, provider=SyntheticProvider())
         _expect_outage("boundary-write", lambda: tool(1, request_id=rid, op_id="boundary"))
-    fault.fail_nth_set = None
-    fault._set_count = 0
+    fault.fail_nth_transition = None
+    fault._transition_count = 0
 
     # 5. Failure while completing. Silent success is a false PASS.
     rid = iso.track(iso.namespace.request_id("outage", "complete"))

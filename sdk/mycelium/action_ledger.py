@@ -19,6 +19,7 @@ from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar
 
 from mycelium.reconcile import Reconciler, ReconcileResult, ReconcileStatus
@@ -42,6 +43,7 @@ from mycelium.transition import (
     SideEffectBoundary,
     SideEffectClass,
     TerminalOutcome,
+    ToolCapability,
     ToolTransitionBinding,
     args_fingerprint,
     derive_dispatch_id,
@@ -168,13 +170,15 @@ OPERATOR_RESOLUTION_NOT_EXECUTED = "not_executed"
 # Stored terminal-outcome values that resolution paths (release, reconcile)
 # will accept from existing entries.  IN_FLIGHT (None) and COMPLETED are missing
 # because resolution paths should never see them at write time.
-_RESOLUTION_ACCEPTED_STORED_OUTCOMES: frozenset[str] = frozenset({
-    TerminalOutcome.IN_FLIGHT.value,
-    TerminalOutcome.BLOCKED.value,
-    TerminalOutcome.UNKNOWN.value,
-    TerminalOutcome.FAILED_AFTER_EFFECT.value,
-    TerminalOutcome.FAILED_BEFORE_EFFECT.value,
-})
+_RESOLUTION_ACCEPTED_STORED_OUTCOMES: frozenset[str] = frozenset(
+    {
+        TerminalOutcome.IN_FLIGHT.value,
+        TerminalOutcome.BLOCKED.value,
+        TerminalOutcome.UNKNOWN.value,
+        TerminalOutcome.FAILED_AFTER_EFFECT.value,
+        TerminalOutcome.FAILED_BEFORE_EFFECT.value,
+    }
+)
 
 # Stored terminal-outcome values that **the NOT_EXECUTED reset** accepts.
 # Excludes ``IN_FLIGHT`` so two reconcilers racing ``NOT_EXECUTED``
@@ -182,19 +186,23 @@ _RESOLUTION_ACCEPTED_STORED_OUTCOMES: frozenset[str] = frozenset({
 # writer wins; the second sees ``IN_FLIGHT`` and fails the CAS.
 # EXPIRED entries (stored ``IN_FLIGHT`` with expired lease) are advanced
 # to ``BLOCKED`` before the CAS (see ``_apply_reconcile_result``).
-_RECONCILE_NOT_EXECUTED_OUTCOMES: frozenset[str] = frozenset({
-    TerminalOutcome.BLOCKED.value,
-    TerminalOutcome.UNKNOWN.value,
-    TerminalOutcome.FAILED_AFTER_EFFECT.value,
-    TerminalOutcome.FAILED_BEFORE_EFFECT.value,
-})
+_RECONCILE_NOT_EXECUTED_OUTCOMES: frozenset[str] = frozenset(
+    {
+        TerminalOutcome.BLOCKED.value,
+        TerminalOutcome.UNKNOWN.value,
+        TerminalOutcome.FAILED_AFTER_EFFECT.value,
+        TerminalOutcome.FAILED_BEFORE_EFFECT.value,
+    }
+)
 
 # Opt-in same-key UNKNOWN retry (param + TTL still VALID). claim_inflight
 # treats UNKNOWN as non-claimable so peers do not blind-overwrite; this CAS
 # is the only authorized reset path after the gate returns ALLOW.
-_UNKNOWN_SAME_KEY_RETRY_OUTCOMES: frozenset[str] = frozenset({
-    TerminalOutcome.UNKNOWN.value,
-})
+_UNKNOWN_SAME_KEY_RETRY_OUTCOMES: frozenset[str] = frozenset(
+    {
+        TerminalOutcome.UNKNOWN.value,
+    }
+)
 
 # Policies for tools ledgered without a transition_binding (unclassified).
 # "warn": legacy behavior + a one-time warning when a failed entry is
@@ -306,8 +314,7 @@ def _storage_errors(operation: str) -> Iterator[None]:
         raise
     except Exception as exc:
         raise LedgerStorageUnavailableError(
-            f"ledger storage unavailable during {operation}: "
-            f"{type(exc).__name__}: {exc}"
+            f"ledger storage unavailable during {operation}: {type(exc).__name__}: {exc}"
         ) from exc
 
 
@@ -319,6 +326,8 @@ class _ActiveTransition:
     request_id: str
     binding: ToolTransitionBinding | None
     call_kwargs: Mapping[str, Any]
+    owner: str | None
+    fence: int
 
 
 _active_transition_var: ContextVar[_ActiveTransition | None] = ContextVar(
@@ -356,7 +365,12 @@ def _advance_active_boundary(boundary: SideEffectBoundary) -> None:
             stacklevel=3,
         )
         return
-    active.ledger.advance_boundary(active.request_id, boundary)
+    active.ledger.advance_boundary(
+        active.request_id,
+        boundary,
+        expected_owner=active.owner,
+        expected_fence=active.fence,
+    )
 
 
 def mark_maybe_crossed() -> None:
@@ -383,9 +397,7 @@ async def mark_maybe_crossed_async() -> None:
     from mycelium.use_time_currency import enforce_use_boundary_async
 
     active = _active_transition_var.get()
-    await enforce_use_boundary_async(
-        kwargs=active.call_kwargs if active is not None else {}
-    )
+    await enforce_use_boundary_async(kwargs=active.call_kwargs if active is not None else {})
     _advance_active_boundary(SideEffectBoundary.MAYBE_CROSSED)
 
 
@@ -413,7 +425,12 @@ def record_external_operation(ref: str) -> None:
             stacklevel=2,
         )
         return
-    active.ledger.attach_external_operation_ref(active.request_id, ref)
+    active.ledger.attach_external_operation_ref(
+        active.request_id,
+        ref,
+        expected_owner=active.owner,
+        expected_fence=active.fence,
+    )
 
 
 def renew_lease(*, lease_ttl: float | None = None) -> None:
@@ -435,7 +452,12 @@ def renew_lease(*, lease_ttl: float | None = None) -> None:
             stacklevel=2,
         )
         return
-    active.ledger.renew_lease(active.request_id, lease_ttl=lease_ttl)
+    active.ledger.renew_lease(
+        active.request_id,
+        lease_ttl=lease_ttl,
+        _expected_owner=active.owner,
+        _expected_fence=active.fence,
+    )
 
 
 def _resolve_lease_renew_interval(
@@ -459,7 +481,13 @@ def _resolve_lease_renew_interval(
 
 
 @contextmanager
-def _lease_auto_renew(ledger: ActionLedger, request_id: str) -> Iterator[None]:
+def _lease_auto_renew(
+    ledger: ActionLedger,
+    request_id: str,
+    *,
+    owner: str | None,
+    fence: int,
+) -> Iterator[None]:
     """Background owner heartbeat while a ledgered tool body executes.
 
     Keeps ``lease_until`` ahead of wall clock so redispatched peers stay on
@@ -478,7 +506,12 @@ def _lease_auto_renew(ledger: ActionLedger, request_id: str) -> Iterator[None]:
     def _loop() -> None:
         while not stop.wait(interval):
             try:
-                ledger.renew_lease(request_id, lease_ttl=ledger._lease_ttl)
+                ledger.renew_lease(
+                    request_id,
+                    lease_ttl=ledger._lease_ttl,
+                    _expected_owner=owner,
+                    _expected_fence=fence,
+                )
             except LedgerError as exc:
                 _logger.warning(
                     "lease auto-renew stopped for %s: %s",
@@ -546,6 +579,13 @@ class LedgerEntry:
     kwargs: dict[str, Any]
     status: str  # legacy: "in-flight" | "completed" | "failed"
     terminal_outcome: str = TerminalOutcome.IN_FLIGHT.value
+    # Kleppmann fencing token. Every successful claim atomically bumps the
+    # stored fence; the claimed entry carries it, and every later mutation must
+    # match the stored fence or the storage CAS rejects the write. A worker
+    # whose claim was superseded holds a stale (lower) fence and is refused at
+    # the point of mutation — independent of its own lease clock. Old rows
+    # without a fence load as 0.
+    fence: int = 0
     result: Any = None
     error: str | None = None
     started_at: float = field(default_factory=time.time)
@@ -582,6 +622,15 @@ class LedgerEntry:
     # lives in ``state_authority.StateAuthority``, not in claim resolution).
     decision_id: str | None = None
     state_ref: str | None = None
+
+    # Durable record of the single-decision-point evaluation (Change 2). The
+    # serialized :class:`mycelium.decision.Decision` — every registered
+    # predicate's verdict — stamped atomically with the INTENDED -> ATTEMPTING
+    # transition under the same fenced CAS. ``None`` when no decision was
+    # recorded (timeless paths, older rows).
+    decision: dict[str, Any] | None = None
+    effect_phase: str = "INTENDED"
+    effect_protocol_required: bool = False
 
     # Thin handoff / causation audit (optional). Set via ``handoff_scope`` or
     # kwargs; does not grant capabilities or change claim gates.
@@ -623,6 +672,7 @@ class LedgerEntry:
             "kwargs": self.kwargs,
             "status": self.status,
             "terminal_outcome": self.terminal_outcome,
+            "fence": self.fence,
             "result": self.result,
             "error": self.error,
             "started_at": self.started_at,
@@ -645,6 +695,9 @@ class LedgerEntry:
             "released_from_outcome": self.released_from_outcome,
             "decision_id": self.decision_id,
             "state_ref": self.state_ref,
+            "decision": self.decision,
+            "effect_phase": self.effect_phase,
+            "effect_protocol_required": self.effect_protocol_required,
             "parent_request_id": self.parent_request_id,
             "handoff_id": self.handoff_id,
         }
@@ -652,11 +705,7 @@ class LedgerEntry:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> LedgerEntry:
         status = str(data["status"])
-        lease_until = (
-            float(data["lease_until"])
-            if data.get("lease_until") is not None
-            else None
-        )
+        lease_until = float(data["lease_until"]) if data.get("lease_until") is not None else None
         terminal_raw = data.get("terminal_outcome")
         if terminal_raw is None:
             terminal_outcome = terminal_from_legacy_status(
@@ -673,6 +722,7 @@ class LedgerEntry:
             kwargs=dict(data.get("kwargs") or {}),
             status=status,
             terminal_outcome=terminal_outcome,
+            fence=int(data.get("fence") or 0),
             result=data.get("result"),
             error=data.get("error"),
             started_at=float(data.get("started_at", time.time())),
@@ -695,23 +745,29 @@ class LedgerEntry:
             resolution_reason=data.get("resolution_reason"),
             resolved_at=data.get("resolved_at"),
             released_from_outcome=data.get("released_from_outcome"),
-            decision_id=(
-                str(data["decision_id"])
-                if data.get("decision_id") is not None
-                else None
-            ),
-            state_ref=(
-                str(data["state_ref"]) if data.get("state_ref") is not None else None
-            ),
+            decision_id=(str(data["decision_id"]) if data.get("decision_id") is not None else None),
+            state_ref=(str(data["state_ref"]) if data.get("state_ref") is not None else None),
+            decision=(dict(data["decision"]) if data.get("decision") is not None else None),
+            effect_phase=str(data.get("effect_phase") or "INTENDED"),
+            effect_protocol_required=bool(data.get("effect_protocol_required", False)),
             parent_request_id=(
                 str(data["parent_request_id"])
                 if data.get("parent_request_id") is not None
                 else None
             ),
-            handoff_id=(
-                str(data["handoff_id"]) if data.get("handoff_id") is not None else None
-            ),
+            handoff_id=(str(data["handoff_id"]) if data.get("handoff_id") is not None else None),
         )
+
+
+def _has_allowed_attempting_decision(entry: LedgerEntry) -> bool:
+    if entry.effect_phase != "ATTEMPTING" or entry.decision is None:
+        return False
+    from mycelium.decision import Decision
+
+    try:
+        return Decision.from_dict(entry.decision).allowed
+    except (KeyError, TypeError, ValueError):
+        return False
 
 
 class LedgerStorage:
@@ -750,10 +806,16 @@ class LedgerStorage:
         expected_terminal_outcomes: frozenset[str],
         expected_owner: str | None = None,
         require_lease_held_at: float | None = None,
+        expected_fence: int | None = None,
+        expected_effect_phase: str | None = None,
     ) -> bool:
         """Atomically write *entry* only if the stored entry's terminal outcome
         is one of *expected_terminal_outcomes* (and *expected_owner* matches,
         when set).
+
+        When ``expected_fence`` is set, also refuse unless the stored entry's
+        fence equals it (Kleppmann fencing — a superseded worker holds a lower
+        fence and is rejected here regardless of its lease clock).
 
         When ``require_lease_held_at`` is set, also refuse if the stored lease
         is already expired at that timestamp (renew path — closes TOCTOU
@@ -771,6 +833,10 @@ class LedgerStorage:
         if existing.terminal_outcome not in expected_terminal_outcomes:
             return False
         if expected_owner is not None and existing.owner != expected_owner:
+            return False
+        if expected_fence is not None and existing.fence != expected_fence:
+            return False
+        if expected_effect_phase is not None and existing.effect_phase != expected_effect_phase:
             return False
         if require_lease_held_at is not None and not lease_allows_renew(
             existing.lease_until, now=require_lease_held_at
@@ -820,6 +886,8 @@ class InMemoryLedgerStorage(LedgerStorage):
         expected_terminal_outcomes: frozenset[str],
         expected_owner: str | None = None,
         require_lease_held_at: float | None = None,
+        expected_fence: int | None = None,
+        expected_effect_phase: str | None = None,
     ) -> bool:
         with self._lock:
             existing = self._entries.get(entry.request_id)
@@ -828,6 +896,10 @@ class InMemoryLedgerStorage(LedgerStorage):
             if existing.terminal_outcome not in expected_terminal_outcomes:
                 return False
             if expected_owner is not None and existing.owner != expected_owner:
+                return False
+            if expected_fence is not None and existing.fence != expected_fence:
+                return False
+            if expected_effect_phase is not None and existing.effect_phase != expected_effect_phase:
                 return False
             if require_lease_held_at is not None and not lease_allows_renew(
                 existing.lease_until, now=require_lease_held_at
@@ -892,7 +964,7 @@ class FileLedgerStorage(LedgerStorage):
             if result == "in_flight":
                 outcome.append(("in_flight", existing))
                 return
-            leased = with_lease(entry, now=now, lease_ttl=lease_ttl)
+            leased = with_lease(entry, now=now, lease_ttl=lease_ttl, prior=existing)
             data[entry.request_id] = leased.to_dict()
             outcome.append(("claimed", None))
 
@@ -907,6 +979,8 @@ class FileLedgerStorage(LedgerStorage):
         expected_terminal_outcomes: frozenset[str],
         expected_owner: str | None = None,
         require_lease_held_at: float | None = None,
+        expected_fence: int | None = None,
+        expected_effect_phase: str | None = None,
     ) -> bool:
         result: list[bool] = []
 
@@ -920,6 +994,12 @@ class FileLedgerStorage(LedgerStorage):
                 result.append(False)
                 return
             if expected_owner is not None and existing.owner != expected_owner:
+                result.append(False)
+                return
+            if expected_fence is not None and existing.fence != expected_fence:
+                result.append(False)
+                return
+            if expected_effect_phase is not None and existing.effect_phase != expected_effect_phase:
                 result.append(False)
                 return
             if require_lease_held_at is not None and not lease_allows_renew(
@@ -987,8 +1067,7 @@ class ActionLedger:
         self._unclassified_policy = unclassified_policy
         if on_args_drift not in ARGS_DRIFT_POLICIES:
             raise ValueError(
-                f"on_args_drift must be one of {sorted(ARGS_DRIFT_POLICIES)}, "
-                f"got {on_args_drift!r}"
+                f"on_args_drift must be one of {sorted(ARGS_DRIFT_POLICIES)}, got {on_args_drift!r}"
             )
         # Default soft: same dispatch ticket (request_id / tool_call_id) with
         # different tool args → ToolBoundaryError (hard → LedgerHardBlockError;
@@ -1044,20 +1123,25 @@ class ActionLedger:
         expected_from: frozenset[str] | None = None,
         expected_owner: str | None = None,
         require_lease_held_at: float | None = None,
+        expected_fence: int | None = None,
+        expected_effect_phase: str | None = None,
     ) -> bool:
-        """Atomically write *entry* subject to outcome/owner pre-conditions.
+        """Atomically write *entry* subject to outcome/owner/fence pre-conditions.
 
         Returns ``True`` on success, ``False`` when the stored entry's
-        terminal outcome is not in *expected_from* (or owner mismatch).
+        terminal outcome is not in *expected_from* (or owner / fence mismatch).
         The caller raises ``LedgerOutcomeAlreadySetError`` on ``False``.
         """
         outcomes = expected_from if expected_from is not None else _IN_FLIGHT_OUTCOMES
+        fence = entry.fence if expected_fence is None else expected_fence
         with _storage_errors("try_transition"):
             return self._storage.try_transition(
                 entry,
                 expected_terminal_outcomes=outcomes,
                 expected_owner=expected_owner,
                 require_lease_held_at=require_lease_held_at,
+                expected_fence=fence,
+                expected_effect_phase=expected_effect_phase,
             )
 
     def _list_all_entries(self) -> list[LedgerEntry]:
@@ -1118,9 +1202,7 @@ class ActionLedger:
             ):
                 # Host-owned request_id is the identity: mismatch is
                 # fail-closed even when on_args_drift is off.
-                self._raise_identity_conflict(
-                    tool, request_id=request_id, conflict=existing
-                )
+                self._raise_identity_conflict(tool, request_id=request_id, conflict=existing)
             if stored_fp != incoming_fp:
                 conflict = existing
 
@@ -1245,9 +1327,7 @@ class ActionLedger:
                 request_id=request_id,
                 event=event,
                 gate=gate,
-                terminal_outcome=(
-                    terminal_outcome.value if terminal_outcome is not None else None
-                ),
+                terminal_outcome=(terminal_outcome.value if terminal_outcome is not None else None),
                 side_effect_boundary=boundary.value if boundary is not None else None,
                 side_effect_class=(
                     side_effect_class.value if side_effect_class is not None else None
@@ -1353,10 +1433,7 @@ class ActionLedger:
         for entry in self._list_all_entries():
             if tool is not None and entry.tool != tool:
                 continue
-            if (
-                parent_request_id is not None
-                and entry.parent_request_id != parent_request_id
-            ):
+            if parent_request_id is not None and entry.parent_request_id != parent_request_id:
                 continue
             resolved = entry.resolved_terminal_outcome(now=now)
             if outcome is not None and resolved != outcome:
@@ -1394,16 +1471,12 @@ class ActionLedger:
         while True:
             current = self.get(request_id)
             if current is None:
-                raise LedgerError(
-                    f"Cannot wait for unknown request {request_id!r}"
-                )
+                raise LedgerError(f"Cannot wait for unknown request {request_id!r}")
             outcome = current.resolved_terminal_outcome()
             if outcome != TerminalOutcome.IN_FLIGHT:
                 return current
             if poll_deadline is not None and time.time() >= poll_deadline:
-                raise LedgerPollTimeoutError(
-                    f"Timed out waiting for request {request_id!r}"
-                )
+                raise LedgerPollTimeoutError(f"Timed out waiting for request {request_id!r}")
             time.sleep(interval)
 
     async def wait_for_transition_async(
@@ -1426,16 +1499,12 @@ class ActionLedger:
         while True:
             current = self.get(request_id)
             if current is None:
-                raise LedgerError(
-                    f"Cannot wait for unknown request {request_id!r}"
-                )
+                raise LedgerError(f"Cannot wait for unknown request {request_id!r}")
             outcome = current.resolved_terminal_outcome()
             if outcome != TerminalOutcome.IN_FLIGHT:
                 return current
             if poll_deadline is not None and time.time() >= poll_deadline:
-                raise LedgerPollTimeoutError(
-                    f"Timed out waiting for request {request_id!r}"
-                )
+                raise LedgerPollTimeoutError(f"Timed out waiting for request {request_id!r}")
             await asyncio.sleep(interval)
 
     def release(
@@ -1481,9 +1550,7 @@ class ActionLedger:
             raise LedgerReleaseRefusedError("release requires a reason")
         existing = self._get_entry(request_id)
         if existing is None:
-            raise LedgerReleaseRefusedError(
-                f"Cannot release unknown request {request_id!r}"
-            )
+            raise LedgerReleaseRefusedError(f"Cannot release unknown request {request_id!r}")
         if existing.operator_resolution is not None:
             raise LedgerAlreadyResolvedError(
                 f"Request {request_id!r} already has an operator resolution "
@@ -1509,15 +1576,14 @@ class ActionLedger:
             # alive (GC pause, storage partition, silently failing auto-renew).
             # When reclaim_requires_death_signal is on, refuse until the grace
             # window elapses or death is asserted.
-            if (
-                self._reclaim_requires_death_signal
-                and not has_worker_death_evidence(
-                    existing, now=now,
-                    presumed_dead_after=self._presumed_dead_after,
-                )
+            if self._reclaim_requires_death_signal and not has_worker_death_evidence(
+                existing,
+                now=now,
+                presumed_dead_after=self._presumed_dead_after,
             ):
                 grace = _grace_remaining(
-                    existing, now=now,
+                    existing,
+                    now=now,
                     presumed_dead_after=self._presumed_dead_after,
                 )
                 raise LedgerWorkerAliveError(
@@ -1528,13 +1594,22 @@ class ActionLedger:
                     "Use mark_worker_dead() first, or wait for the grace window."
                 )
         if verified == OPERATOR_RESOLUTION_COMPLETED:
-            completed = self.complete(
-                request_id,
-                result,
-                _expected_from=_RESOLUTION_ACCEPTED_STORED_OUTCOMES,
-            )
+            if existing.effect_protocol_required and not _has_allowed_attempting_decision(
+                existing
+            ):
+                raise LedgerReleaseRefusedError(
+                    f"Cannot release request {request_id!r} as completed: "
+                    "no allowed durable ATTEMPTING decision"
+                )
             entry = replace(
-                completed,
+                existing,
+                status=legacy_status_from_terminal(TerminalOutcome.COMPLETED),
+                terminal_outcome=TerminalOutcome.COMPLETED.value,
+                result=_evidence_value(result),
+                finished_at=now,
+                lease_until=None,
+                side_effect_boundary=SideEffectBoundary.CROSSED.value,
+                effect_phase="COMMITTED",
                 operator_resolution=OPERATOR_RESOLUTION_COMPLETED,
                 resolved_by=by,
                 resolution_reason=reason,
@@ -1550,7 +1625,15 @@ class ActionLedger:
                 resolved_at=now,
                 released_from_outcome=outcome.value,
             )
-        self._set_entry(entry)
+        if not self._try_transition(
+            entry,
+            expected_from=_RESOLUTION_ACCEPTED_STORED_OUTCOMES,
+            expected_owner=existing.owner,
+            expected_fence=existing.fence,
+        ):
+            raise LedgerAlreadyResolvedError(
+                f"Cannot release request {request_id!r}: transition superseded"
+            )
         self._emit_outcome(
             request_id=request_id,
             tool=entry.tool,
@@ -1568,7 +1651,12 @@ class ActionLedger:
                 by=by,
                 reason=reason,
             )
-            entry = self.attach_receipt_ref(request_id, receipt.receipt_id)
+            entry = self.attach_receipt_ref(
+                request_id,
+                receipt.receipt_id,
+                expected_owner=entry.owner,
+                expected_fence=entry.fence,
+            )
         return entry
 
     def _new_inflight_entry(
@@ -1588,9 +1676,7 @@ class ActionLedger:
             else SideEffectBoundary.NOT_CROSSED.value
         )
         provider_key = (
-            extract_provider_idempotency_key(kwargs, binding)
-            if binding is not None
-            else None
+            extract_provider_idempotency_key(kwargs, binding) if binding is not None else None
         )
         if provider_key is not None and _provider_key_first_attempt_at is None:
             pkey_first_attempt: float | None = time.time()
@@ -1622,6 +1708,7 @@ class ActionLedger:
             state_ref=str(state_ref_raw) if state_ref_raw is not None else None,
             parent_request_id=str(parent_raw) if parent_raw is not None else None,
             handoff_id=str(handoff_raw) if handoff_raw is not None else None,
+            effect_protocol_required=binding is not None,
         )
 
     def claim(
@@ -1660,21 +1747,15 @@ class ActionLedger:
             )
         ttl = self._lease_ttl if lease_ttl is None else lease_ttl
         prior = self._get_entry(request_id)
-        self._enforce_args_drift(
-            tool, args, kwargs, request_id=request_id, existing=prior
-        )
+        self._enforce_args_drift(tool, args, kwargs, request_id=request_id, existing=prior)
         self._warn_unclassified_retry(tool, prior)
         entry = self._new_inflight_entry(request_id, tool, args, kwargs)
         outcome, existing = self._try_claim_inflight(entry, lease_ttl=ttl)
         if outcome == "completed" and existing is not None:
-            self._enforce_args_drift(
-                tool, args, kwargs, request_id=request_id, existing=existing
-            )
+            self._enforce_args_drift(tool, args, kwargs, request_id=request_id, existing=existing)
             return existing
         if outcome == "in_flight":
-            raise LedgerPendingError(
-                f"Tool {tool!r} request {request_id!r} is already in-flight"
-            )
+            raise LedgerPendingError(f"Tool {tool!r} request {request_id!r} is already in-flight")
         claimed = self.get(request_id)
         return claimed if claimed is not None else entry
 
@@ -1704,9 +1785,7 @@ class ActionLedger:
 
         while True:
             existing = self.get(request_id)
-            self._enforce_args_drift(
-                tool, args, kwargs, request_id=request_id, existing=existing
-            )
+            self._enforce_args_drift(tool, args, kwargs, request_id=request_id, existing=existing)
             if existing is not None:
                 gate = resolve_read_only_gate(existing)
                 if gate == TransitionGate.REPAIR:
@@ -1746,9 +1825,7 @@ class ActionLedger:
                     poll_deadline=poll_deadline,
                 )
                 continue
-            raise LedgerError(
-                f"Unexpected claim outcome {outcome!r} for read-only tool {tool!r}"
-            )
+            raise LedgerError(f"Unexpected claim outcome {outcome!r} for read-only tool {tool!r}")
 
     def _resolve_read_only_soft_block(
         self,
@@ -1771,7 +1848,16 @@ class ActionLedger:
                 soft_block_message(existing, tool=tool, request_id=request_id)
             )
         fresh = self._new_inflight_entry(request_id, tool, args, kwargs)
-        self._set_entry(fresh)
+        fresh = replace(fresh, fence=existing.fence + 1)
+        if not self._try_transition(
+            fresh,
+            expected_from=frozenset({existing.terminal_outcome}),
+            expected_owner=existing.owner,
+            expected_fence=existing.fence,
+        ):
+            raise LedgerOutcomeAlreadySetError(
+                f"Cannot retry read-only request {request_id!r}: transition superseded"
+            )
         return fresh
 
     def _poll_read_only(
@@ -1784,9 +1870,7 @@ class ActionLedger:
         """Wait until a read-only transition leaves the in-flight state."""
         while True:
             if poll_deadline is not None and time.time() >= poll_deadline:
-                raise LedgerPollTimeoutError(
-                    f"Timed out polling read-only request {request_id!r}"
-                )
+                raise LedgerPollTimeoutError(f"Timed out polling read-only request {request_id!r}")
             time.sleep(interval)
             current = self.get(request_id)
             if current is None:
@@ -1824,9 +1908,7 @@ class ActionLedger:
 
         while True:
             existing = self.get(request_id)
-            self._enforce_args_drift(
-                tool, args, kwargs, request_id=request_id, existing=existing
-            )
+            self._enforce_args_drift(tool, args, kwargs, request_id=request_id, existing=existing)
             if existing is not None:
                 gate = resolve_read_only_gate(existing)
                 if gate == TransitionGate.REPAIR:
@@ -1866,9 +1948,7 @@ class ActionLedger:
                     poll_deadline=poll_deadline,
                 )
                 continue
-            raise LedgerError(
-                f"Unexpected claim outcome {outcome!r} for read-only tool {tool!r}"
-            )
+            raise LedgerError(f"Unexpected claim outcome {outcome!r} for read-only tool {tool!r}")
 
     async def _poll_read_only_async(
         self,
@@ -1879,9 +1959,7 @@ class ActionLedger:
     ) -> None:
         while True:
             if poll_deadline is not None and time.time() >= poll_deadline:
-                raise LedgerPollTimeoutError(
-                    f"Timed out polling read-only request {request_id!r}"
-                )
+                raise LedgerPollTimeoutError(f"Timed out polling read-only request {request_id!r}")
             await asyncio.sleep(interval)
             current = self.get(request_id)
             if current is None:
@@ -1936,6 +2014,7 @@ class ActionLedger:
                         error=error,
                         _expected_from=_IN_FLIGHT_OUTCOMES,
                         _expected_owner=current.owner,
+                        _expected_fence=current.fence,
                     )
                 except LedgerOutcomeAlreadySetError:
                     again = self.get(request_id)
@@ -1956,6 +2035,7 @@ class ActionLedger:
         kwargs: dict[str, Any],
         binding: ToolTransitionBinding,
         result: Any,
+        observed_entry: LedgerEntry,
         _preserved_pkey_first_attempt: float | None = None,
         _cas_race_returns_none: bool = False,
     ) -> LedgerEntry | None:
@@ -1972,18 +2052,27 @@ class ActionLedger:
         polls instead of hard-blocking.
         """
         if result.status == ReconcileStatus.COMPLETED:
-            return self.complete(
-                request_id,
-                result.result,
-                _expected_from=_RESOLUTION_ACCEPTED_STORED_OUTCOMES,
-            )
+            if observed_entry.effect_protocol_required and not (
+                _has_allowed_attempting_decision(observed_entry)
+            ):
+                return None
+            try:
+                return self.complete(
+                    request_id,
+                    result.result,
+                    _expected_from=_RESOLUTION_ACCEPTED_STORED_OUTCOMES,
+                    _expected_owner=observed_entry.owner,
+                    _expected_fence=observed_entry.fence,
+                )
+            except LedgerOutcomeAlreadySetError:
+                if _cas_race_returns_none:
+                    return None
+                _reconcile_cas_lost.val = True
+                return self.get(request_id)
         if result.status == ReconcileStatus.NOT_EXECUTED:
             if _preserved_pkey_first_attempt is None:
-                old = self.get(request_id)
-                if old is not None and old.provider_idempotency_key is not None:
-                    _preserved_pkey_first_attempt = (
-                        old.provider_key_first_attempt_at
-                    )
+                if observed_entry.provider_idempotency_key is not None:
+                    _preserved_pkey_first_attempt = observed_entry.provider_key_first_attempt_at
             fresh = self._new_inflight_entry(
                 request_id,
                 tool,
@@ -1992,36 +2081,34 @@ class ActionLedger:
                 binding=binding,
                 _provider_key_first_attempt_at=_preserved_pkey_first_attempt,
             )
+            now = time.time()
+            fresh = replace(
+                fresh,
+                fence=observed_entry.fence + 1,
+                lease_until=(now + self._lease_ttl if self._lease_ttl > 0 else None),
+                last_heartbeat_at=now,
+            )
             # EXPIRED entries have stored terminal ``IN_FLIGHT`` (lease is
             # resolved at read time).  Advance past ``IN_FLIGHT`` first so the
             # CAS below cannot race on ``IN_FLIGHT → IN_FLIGHT``.
-            now = time.time()
-            stale = self.get(request_id)
-            _stale_owner: str | None = stale.owner if stale is not None else None
-            if stale is not None and stale.resolved_terminal_outcome(now=now) in (
-                TerminalOutcome.EXPIRED,
-            ):
+            expected_from = _RECONCILE_NOT_EXECUTED_OUTCOMES
+            if observed_entry.resolved_terminal_outcome(now=now) in (TerminalOutcome.EXPIRED,):
                 try:
                     self.mark_blocked(
                         request_id,
                         error="reconciling expired entry as NOT_EXECUTED",
                         _expected_from=_IN_FLIGHT_OUTCOMES,
-                        _expected_owner=_stale_owner,
+                        _expected_owner=observed_entry.owner,
+                        _expected_fence=observed_entry.fence,
                     )
                 except LedgerOutcomeAlreadySetError:
                     pass
-                after_block = self.get(request_id)
-                if (
-                    after_block is not None
-                    and after_block.terminal_outcome != TerminalOutcome.BLOCKED.value
-                ):
-                    if _cas_race_returns_none:
-                        return None
-                    _reconcile_cas_lost.val = True
-                    return after_block
+                expected_from = frozenset({TerminalOutcome.BLOCKED.value})
             if not self._try_transition(
                 fresh,
-                expected_from=_RECONCILE_NOT_EXECUTED_OUTCOMES,
+                expected_from=expected_from,
+                expected_owner=observed_entry.owner,
+                expected_fence=observed_entry.fence,
             ):
                 if _cas_race_returns_none:
                     return None
@@ -2033,6 +2120,86 @@ class ActionLedger:
             _outcome_reexec_authorized.set(True)
             return fresh
         return None
+
+    def _capability_for(self, binding: ToolTransitionBinding) -> ToolCapability:
+        """Effective capability for this ledger — reconciler presence drives QUERYABLE.
+
+        A bound :class:`~mycelium.reconcile.Reconciler` is the concrete
+        "queryable" mechanism, so it can loosen the binding's conservative floor
+        (e.g. ``NON_IDEMPOTENT_MUTATE`` BLIND → QUERYABLE). An explicit ``BLIND``
+        declaration always wins and is never loosened.
+        """
+        return binding.effective_capability(has_reconciler=self._reconciler is not None)
+
+    def _entry_is_ambiguous(self, entry: LedgerEntry) -> bool:
+        """Whether an effect's outcome is unknown (may or may not have happened).
+
+        A ``FAILED_BEFORE_EFFECT`` or ``EXPIRED`` entry whose boundary is still
+        ``not_crossed`` is not ambiguous — the effect provably never crossed the
+        boundary, so it stays safe to retry (or death-signal reclaim) regardless
+        of probeability. Ambiguity is ``UNKNOWN`` / ``FAILED_AFTER_EFFECT`` (the
+        outcome itself is unknown or the effect definitely fired), or *any*
+        ``maybe_crossed`` / ``crossed`` boundary. Only ambiguous entries are
+        subject to BLIND parking — that is exactly the "did the blind effect
+        happen?" case.
+        """
+        outcome = entry.resolved_terminal_outcome()
+        if outcome in (
+            TerminalOutcome.UNKNOWN,
+            TerminalOutcome.FAILED_AFTER_EFFECT,
+        ):
+            return True
+        boundary = SideEffectBoundary(entry.side_effect_boundary)
+        return boundary in (
+            SideEffectBoundary.MAYBE_CROSSED,
+            SideEffectBoundary.CROSSED,
+        )
+
+    def _blind_never_retries(
+        self,
+        tool: str,
+        binding: ToolTransitionBinding,
+        existing: LedgerEntry,
+    ) -> bool:
+        """Whether this tool must park (never auto-retry) an ambiguous entry.
+
+        BLIND: no way to probe the outcome — never auto-redispatch an entry
+        whose effect may have crossed the boundary. QUERYABLE without a
+        reconciler present fails closed to the same parking behaviour (with a
+        warning) rather than silently auto-retrying a second effect. An
+        unambiguous ``FAILED_BEFORE_EFFECT`` / ``not_crossed`` entry is never
+        parked here — it provably did not happen.
+        """
+        if not self._entry_is_ambiguous(existing):
+            return False
+        capability = self._capability_for(binding)
+        has_provider_key = binding.provider_idempotency_key_param is not None
+        # A tool that intended to be QUERYABLE but has no probe mechanism (no
+        # reconciler bound, no provider idempotency key) fails closed to BLIND
+        # parking — with a warning so the misconfiguration is visible.
+        intended_queryable = (
+            binding.explicit_capability == ToolCapability.QUERYABLE
+            or binding.capability == ToolCapability.QUERYABLE
+        )
+        if (
+            capability == ToolCapability.BLIND
+            and intended_queryable
+            and not has_provider_key
+            and self._reconciler is None
+        ):
+            warnings.warn(
+                f"tool {tool!r} declares capability=queryable but no Reconciler "
+                "is bound and no provider idempotency key is configured; "
+                "failing closed to blind behaviour — the ambiguous entry parks "
+                "for operator reconciliation instead of auto-retrying.",
+                stacklevel=2,
+            )
+            return True
+        if capability == ToolCapability.BLIND:
+            return True
+        # QUERYABLE with a provider idempotency key needs no reconciler: the
+        # same-key retry gate already validated the dedupe window.
+        return False
 
     def _attempt_reconcile(
         self,
@@ -2055,7 +2222,13 @@ class ActionLedger:
         except Exception:
             return None
         return self._apply_reconcile_result(
-            request_id, tool, args, kwargs, binding, result
+            request_id,
+            tool,
+            args,
+            kwargs,
+            binding,
+            result,
+            existing,
         )
 
     async def _attempt_reconcile_async(
@@ -2083,7 +2256,13 @@ class ActionLedger:
         except Exception:
             return None
         return self._apply_reconcile_result(
-            request_id, tool, args, kwargs, binding, result
+            request_id,
+            tool,
+            args,
+            kwargs,
+            binding,
+            result,
+            existing,
         )
 
     def _consume_operator_resolution(
@@ -2119,6 +2298,7 @@ class ActionLedger:
             kwargs,
             binding,
             ReconcileResult.not_executed(),
+            existing,
             _preserved_pkey_first_attempt=_preserved,
             _cas_race_returns_none=True,
         )
@@ -2131,7 +2311,15 @@ class ActionLedger:
             resolved_at=existing.resolved_at,
             released_from_outcome=existing.released_from_outcome,
         )
-        self._set_entry(stamped)
+        if not self._try_transition(
+            stamped,
+            expected_from=frozenset({fresh.terminal_outcome}),
+            expected_owner=fresh.owner,
+            expected_fence=fresh.fence,
+        ):
+            raise LedgerOutcomeAlreadySetError(
+                f"Cannot consume release for {request_id!r}: transition superseded"
+            )
         return stamped
 
     def _reconcile_or_hard_block(
@@ -2148,9 +2336,7 @@ class ActionLedger:
         )
         if released is not None:
             return released
-        resolved = self._attempt_reconcile(
-            request_id, tool, args, kwargs, existing, binding
-        )
+        resolved = self._attempt_reconcile(request_id, tool, args, kwargs, existing, binding)
         if resolved is not None:
             return resolved
         return self._raise_hard_block(request_id, tool, existing, binding=binding)
@@ -2198,9 +2384,7 @@ class ActionLedger:
         )
         if released is not None:
             return released
-        return self._attempt_reconcile(
-            request_id, tool, args, kwargs, existing, binding
-        )
+        return self._attempt_reconcile(request_id, tool, args, kwargs, existing, binding)
 
     async def _prefer_settle_before_unknown_allow_async(
         self,
@@ -2231,13 +2415,21 @@ class ActionLedger:
         kwargs: dict[str, Any],
         existing: LedgerEntry,
         binding: ToolTransitionBinding,
+        *,
+        lease_ttl: float,
     ) -> LedgerEntry | None:
         """CAS-reset ``UNKNOWN`` → fresh in-flight for opt-in same-key retry.
 
         ``try_claim_inflight`` refuses to overwrite ``UNKNOWN`` (fail-closed for
         peers). After the gate has ALLOW'd within the provider key window, this
         is the authorized transition — same shape as Reconciler ``NOT_EXECUTED``.
+
+        A BLIND tool (or a QUERYABLE tool with no reconciler) never opts into
+        same-key retry even with a valid provider key + TTL: BLIND declaration
+        wins, so it parks for operator reconciliation instead.
         """
+        if self._blind_never_retries(tool, binding, existing):
+            return None
         pkey_first = (
             existing.provider_key_first_attempt_at
             if existing.provider_idempotency_key is not None
@@ -2251,9 +2443,18 @@ class ActionLedger:
             binding=binding,
             _provider_key_first_attempt_at=pkey_first,
         )
+        now = time.time()
+        fresh = replace(
+            fresh,
+            fence=existing.fence + 1,
+            lease_until=(now + lease_ttl if lease_ttl > 0 else None),
+            last_heartbeat_at=now,
+        )
         if not self._try_transition(
             fresh,
             expected_from=_UNKNOWN_SAME_KEY_RETRY_OUTCOMES,
+            expected_owner=existing.owner,
+            expected_fence=existing.fence,
         ):
             return None
         _outcome_reexec_authorized.set(True)
@@ -2305,7 +2506,7 @@ class ActionLedger:
                         request_id, tool, args, kwargs, existing, binding
                     )
                     if entry.resolved_terminal_outcome() == TerminalOutcome.IN_FLIGHT:
-                        if getattr(_reconcile_cas_lost, 'val', False):
+                        if getattr(_reconcile_cas_lost, "val", False):
                             _reconcile_cas_lost.val = False
                             self._poll_side_effecting(
                                 request_id,
@@ -2329,16 +2530,25 @@ class ActionLedger:
                     )
                     if settled is not None:
                         return settled
-                    if (
-                        existing.resolved_terminal_outcome()
-                        == TerminalOutcome.UNKNOWN
-                    ):
+                    if existing.resolved_terminal_outcome() == TerminalOutcome.UNKNOWN:
                         reset = self._reset_unknown_for_same_key_retry(
-                            request_id, tool, args, kwargs, existing, binding
+                            request_id,
+                            tool,
+                            args,
+                            kwargs,
+                            existing,
+                            binding,
+                            lease_ttl=ttl,
                         )
                         if reset is not None:
                             return reset
+                        if self._blind_never_retries(tool, binding, existing):
+                            return self._raise_hard_block(
+                                request_id, tool, existing, binding=binding
+                            )
                         continue
+                    if self._blind_never_retries(tool, binding, existing):
+                        return self._raise_hard_block(request_id, tool, existing, binding=binding)
                     if self._reclaim_requires_death_signal and not has_worker_death_evidence(
                         existing,
                         now=time.time(),
@@ -2354,8 +2564,7 @@ class ActionLedger:
 
             _old_pkey_attempt = (
                 existing.provider_key_first_attempt_at
-                if existing is not None
-                and existing.provider_idempotency_key is not None
+                if existing is not None and existing.provider_idempotency_key is not None
                 else None
             )
             entry = self._new_inflight_entry(
@@ -2385,7 +2594,7 @@ class ActionLedger:
                         request_id, tool, args, kwargs, existing, binding
                     )
                     if entry.resolved_terminal_outcome() == TerminalOutcome.IN_FLIGHT:
-                        if getattr(_reconcile_cas_lost, 'val', False):
+                        if getattr(_reconcile_cas_lost, "val", False):
                             _reconcile_cas_lost.val = False
                             self._poll_side_effecting(
                                 request_id,
@@ -2395,6 +2604,16 @@ class ActionLedger:
                             )
                             continue
                     return entry
+                if gate == TransitionGate.ALLOW and self._blind_never_retries(
+                    tool, binding, existing
+                ):
+                    self._poll_side_effecting(
+                        request_id,
+                        tool=tool,
+                        interval=interval,
+                        poll_deadline=poll_deadline,
+                    )
+                    continue
                 if gate == TransitionGate.ALLOW and self._reclaim_requires_death_signal:
                     if not has_worker_death_evidence(
                         existing,
@@ -2423,7 +2642,7 @@ class ActionLedger:
                     request_id, tool, args, kwargs, existing, binding
                 )
                 if entry.resolved_terminal_outcome() == TerminalOutcome.IN_FLIGHT:
-                    if getattr(_reconcile_cas_lost, 'val', False):
+                    if getattr(_reconcile_cas_lost, "val", False):
                         _reconcile_cas_lost.val = False
                         self._poll_side_effecting(
                             request_id,
@@ -2455,11 +2674,16 @@ class ActionLedger:
             if poll_deadline is not None and time.time() >= poll_deadline:
                 current = self.get(request_id)
                 if current is not None:
-                    self.mark_unknown(
-                        request_id,
-                        error="timed out polling in-flight side-effecting transition",
-                        _expected_from=_IN_FLIGHT_OUTCOMES,
-                    )
+                    try:
+                        self.mark_unknown(
+                            request_id,
+                            error="timed out polling in-flight side-effecting transition",
+                            _expected_from=_IN_FLIGHT_OUTCOMES,
+                            _expected_owner=current.owner,
+                            _expected_fence=current.fence,
+                        )
+                    except LedgerOutcomeAlreadySetError:
+                        return
                     raise LedgerHardBlockError(
                         hard_block_message(
                             current,
@@ -2538,7 +2762,7 @@ class ActionLedger:
                         request_id, tool, args, kwargs, existing, binding
                     )
                     if entry.resolved_terminal_outcome() == TerminalOutcome.IN_FLIGHT:
-                        if getattr(_reconcile_cas_lost, 'val', False):
+                        if getattr(_reconcile_cas_lost, "val", False):
                             _reconcile_cas_lost.val = False
                             await self._poll_side_effecting_async(
                                 request_id,
@@ -2562,16 +2786,25 @@ class ActionLedger:
                     )
                     if settled is not None:
                         return settled
-                    if (
-                        existing.resolved_terminal_outcome()
-                        == TerminalOutcome.UNKNOWN
-                    ):
+                    if existing.resolved_terminal_outcome() == TerminalOutcome.UNKNOWN:
                         reset = self._reset_unknown_for_same_key_retry(
-                            request_id, tool, args, kwargs, existing, binding
+                            request_id,
+                            tool,
+                            args,
+                            kwargs,
+                            existing,
+                            binding,
+                            lease_ttl=ttl,
                         )
                         if reset is not None:
                             return reset
+                        if self._blind_never_retries(tool, binding, existing):
+                            return self._raise_hard_block(
+                                request_id, tool, existing, binding=binding
+                            )
                         continue
+                    if self._blind_never_retries(tool, binding, existing):
+                        return self._raise_hard_block(request_id, tool, existing, binding=binding)
                     if self._reclaim_requires_death_signal and not has_worker_death_evidence(
                         existing,
                         now=time.time(),
@@ -2587,8 +2820,7 @@ class ActionLedger:
 
             _old_pkey_attempt = (
                 existing.provider_key_first_attempt_at
-                if existing is not None
-                and existing.provider_idempotency_key is not None
+                if existing is not None and existing.provider_idempotency_key is not None
                 else None
             )
             entry = self._new_inflight_entry(
@@ -2618,7 +2850,7 @@ class ActionLedger:
                         request_id, tool, args, kwargs, existing, binding
                     )
                     if entry.resolved_terminal_outcome() == TerminalOutcome.IN_FLIGHT:
-                        if getattr(_reconcile_cas_lost, 'val', False):
+                        if getattr(_reconcile_cas_lost, "val", False):
                             _reconcile_cas_lost.val = False
                             await self._poll_side_effecting_async(
                                 request_id,
@@ -2628,6 +2860,16 @@ class ActionLedger:
                             )
                             continue
                     return entry
+                if gate == TransitionGate.ALLOW and self._blind_never_retries(
+                    tool, binding, existing
+                ):
+                    await self._poll_side_effecting_async(
+                        request_id,
+                        tool=tool,
+                        interval=interval,
+                        poll_deadline=poll_deadline,
+                    )
+                    continue
                 if gate == TransitionGate.ALLOW and self._reclaim_requires_death_signal:
                     if not has_worker_death_evidence(
                         existing,
@@ -2656,7 +2898,7 @@ class ActionLedger:
                     request_id, tool, args, kwargs, existing, binding
                 )
                 if entry.resolved_terminal_outcome() == TerminalOutcome.IN_FLIGHT:
-                    if getattr(_reconcile_cas_lost, 'val', False):
+                    if getattr(_reconcile_cas_lost, "val", False):
                         _reconcile_cas_lost.val = False
                         await self._poll_side_effecting_async(
                             request_id,
@@ -2683,11 +2925,16 @@ class ActionLedger:
             if poll_deadline is not None and time.time() >= poll_deadline:
                 current = self.get(request_id)
                 if current is not None:
-                    self.mark_unknown(
-                        request_id,
-                        error="timed out polling in-flight side-effecting transition",
-                        _expected_from=_IN_FLIGHT_OUTCOMES,
-                    )
+                    try:
+                        self.mark_unknown(
+                            request_id,
+                            error="timed out polling in-flight side-effecting transition",
+                            _expected_from=_IN_FLIGHT_OUTCOMES,
+                            _expected_owner=current.owner,
+                            _expected_fence=current.fence,
+                        )
+                    except LedgerOutcomeAlreadySetError:
+                        return
                     raise LedgerHardBlockError(
                         hard_block_message(
                             current,
@@ -2725,12 +2972,24 @@ class ActionLedger:
         request_id: str,
         result: Any,
         *,
+        expected_fence: int | None = None,
         _expected_from: frozenset[str] | None = None,
         _expected_owner: str | None = None,
+        _expected_fence: int | None = None,
     ) -> LedgerEntry:
         existing = self._get_entry(request_id)
         if existing is None:
             raise LedgerError(f"Cannot complete unknown request {request_id!r}")
+        if expected_fence is not None and _expected_fence is not None:
+            if expected_fence != _expected_fence:
+                raise LedgerError("conflicting expected fence values")
+        fence = expected_fence if expected_fence is not None else _expected_fence
+        if fence is None:
+            raise LedgerError(f"Completing request {request_id!r} requires the claim fence")
+        if existing.effect_protocol_required and not _has_allowed_attempting_decision(existing):
+            raise LedgerOutcomeAlreadySetError(
+                f"Cannot complete request {request_id!r}: no durable ATTEMPTING decision"
+            )
         entry = replace(
             existing,
             status=legacy_status_from_terminal(TerminalOutcome.COMPLETED),
@@ -2739,11 +2998,18 @@ class ActionLedger:
             finished_at=time.time(),
             lease_until=None,
             side_effect_boundary=SideEffectBoundary.CROSSED.value,
+            effect_phase="COMMITTED",
         )
         if not self._try_transition(
             entry,
             expected_from=_expected_from,
             expected_owner=_expected_owner,
+            expected_fence=fence,
+            expected_effect_phase=(
+                "ATTEMPTING"
+                if existing.effect_protocol_required
+                else None
+            ),
         ):
             current = self._get_entry(request_id)
             raise LedgerOutcomeAlreadySetError(
@@ -2765,12 +3031,20 @@ class ActionLedger:
         error: BaseException,
         *,
         failed_after_effect: bool = False,
+        expected_fence: int | None = None,
         _expected_from: frozenset[str] | None = None,
         _expected_owner: str | None = None,
+        _expected_fence: int | None = None,
     ) -> LedgerEntry:
         existing = self._get_entry(request_id)
         if existing is None:
             raise LedgerError(f"Cannot fail unknown request {request_id!r}")
+        if expected_fence is not None and _expected_fence is not None:
+            if expected_fence != _expected_fence:
+                raise LedgerError("conflicting expected fence values")
+        fence = expected_fence if expected_fence is not None else _expected_fence
+        if fence is None:
+            raise LedgerError(f"Failing request {request_id!r} requires the claim fence")
         terminal = (
             TerminalOutcome.FAILED_AFTER_EFFECT
             if failed_after_effect
@@ -2789,11 +3063,20 @@ class ActionLedger:
             finished_at=time.time(),
             lease_until=None,
             side_effect_boundary=boundary,
+            effect_phase=(
+                existing.effect_phase
+                if failed_after_effect
+                and existing.effect_protocol_required
+                and existing.effect_phase == "ATTEMPTING"
+                and existing.decision is not None
+                else "ABORTED"
+            ),
         )
         if not self._try_transition(
             entry,
             expected_from=_expected_from,
             expected_owner=_expected_owner,
+            expected_fence=fence,
         ):
             current = self._get_entry(request_id)
             raise LedgerOutcomeAlreadySetError(
@@ -2809,16 +3092,38 @@ class ActionLedger:
             )
         return entry
 
-    def attach_receipt_ref(self, request_id: str, receipt_ref: str) -> LedgerEntry:
+    def attach_receipt_ref(
+        self,
+        request_id: str,
+        receipt_ref: str,
+        *,
+        expected_owner: str | None = None,
+        expected_fence: int | None = None,
+    ) -> LedgerEntry:
         existing = self._get_entry(request_id)
         if existing is None:
             raise LedgerError(f"Cannot attach receipt to unknown request {request_id!r}")
+        if expected_fence is None:
+            raise LedgerError(f"Attaching a receipt to {request_id!r} requires the claim fence")
         entry = replace(existing, receipt_ref=receipt_ref)
-        self._set_entry(entry)
+        if not self._try_transition(
+            entry,
+            expected_from=frozenset({existing.terminal_outcome}),
+            expected_owner=expected_owner,
+            expected_fence=expected_fence,
+        ):
+            raise LedgerOutcomeAlreadySetError(
+                f"Cannot attach receipt to {request_id!r}: transition superseded"
+            )
         return entry
 
     def attach_external_operation_ref(
-        self, request_id: str, ref: str
+        self,
+        request_id: str,
+        ref: str,
+        *,
+        expected_owner: str | None = None,
+        expected_fence: int | None = None,
     ) -> LedgerEntry:
         """Store the provider's operation handle on a transition entry.
 
@@ -2830,8 +3135,28 @@ class ActionLedger:
             raise LedgerError(
                 f"Cannot attach external operation ref to unknown request {request_id!r}"
             )
+        if expected_fence is None:
+            raise LedgerError(
+                f"Attaching an external operation to {request_id!r} requires the claim fence"
+            )
+        if existing.effect_protocol_required and not _has_allowed_attempting_decision(existing):
+            raise LedgerOutcomeAlreadySetError(
+                f"Cannot attach external operation ref to {request_id!r}: "
+                "no durable ATTEMPTING decision"
+            )
         entry = replace(existing, external_operation_ref=ref)
-        self._set_entry(entry)
+        if not self._try_transition(
+            entry,
+            expected_from=frozenset({existing.terminal_outcome}),
+            expected_owner=expected_owner,
+            expected_fence=expected_fence,
+            expected_effect_phase=(
+                "ATTEMPTING" if existing.effect_protocol_required else None
+            ),
+        ):
+            raise LedgerOutcomeAlreadySetError(
+                f"Cannot attach external operation ref to {request_id!r}: transition superseded"
+            )
         return entry
 
     def renew_lease(
@@ -2840,6 +3165,9 @@ class ActionLedger:
         *,
         lease_ttl: float | None = None,
         now: float | None = None,
+        expected_fence: int | None = None,
+        _expected_owner: str | None = None,
+        _expected_fence: int | None = None,
     ) -> LedgerEntry:
         """Extend ``lease_until`` for an in-flight transition.
 
@@ -2860,6 +3188,12 @@ class ActionLedger:
         existing = self._get_entry(request_id)
         if existing is None:
             raise LedgerError(f"Cannot renew lease for unknown request {request_id!r}")
+        if expected_fence is not None and _expected_fence is not None:
+            if expected_fence != _expected_fence:
+                raise LedgerError("conflicting expected fence values")
+        fence = expected_fence if expected_fence is not None else _expected_fence
+        if fence is None:
+            raise LedgerError(f"Renewing request {request_id!r} requires the claim fence")
         now = now if now is not None else time.time()
         stored = (
             existing.terminal_outcome
@@ -2884,14 +3218,13 @@ class ActionLedger:
         if not self._try_transition(
             entry,
             expected_from=_IN_FLIGHT_OUTCOMES,
-            expected_owner=existing.owner,
+            expected_owner=(existing.owner if _expected_owner is None else _expected_owner),
             require_lease_held_at=now,
+            expected_fence=fence,
         ):
             current = self._get_entry(request_id)
             if current is None:
-                raise LedgerError(
-                    f"Cannot renew lease for unknown request {request_id!r}"
-                )
+                raise LedgerError(f"Cannot renew lease for unknown request {request_id!r}")
             current_outcome = (
                 current.terminal_outcome
                 if isinstance(current.terminal_outcome, TerminalOutcome)
@@ -2907,9 +3240,7 @@ class ActionLedger:
                     f"Cannot renew lease for request {request_id!r}: "
                     "owner changed (reclaimed by peer)"
                 )
-            if resolve_lease_validity(current.lease_until, now=now) == (
-                LeaseValidity.EXPIRED
-            ):
+            if resolve_lease_validity(current.lease_until, now=now) == (LeaseValidity.EXPIRED):
                 raise LedgerError(
                     f"Cannot renew lease for request {request_id!r}: "
                     "lease already expired — reclaim or reconcile instead"
@@ -2941,10 +3272,17 @@ class ActionLedger:
         entry = replace(existing, **updates)
         if transition_needs_repair(entry):
             raise LedgerError(
-                f"Cannot repair request {request_id!r}: still incomplete after "
-                "safe field updates"
+                f"Cannot repair request {request_id!r}: still incomplete after safe field updates"
             )
-        self._set_entry(entry)
+        if not self._try_transition(
+            entry,
+            expected_from=frozenset({existing.terminal_outcome}),
+            expected_owner=existing.owner,
+            expected_fence=existing.fence,
+        ):
+            raise LedgerOutcomeAlreadySetError(
+                f"Cannot repair request {request_id!r}: transition superseded"
+            )
         return entry
 
     def mark_blocked(
@@ -2952,12 +3290,20 @@ class ActionLedger:
         request_id: str,
         *,
         error: str | None = None,
+        expected_fence: int | None = None,
         _expected_from: frozenset[str] | None = None,
         _expected_owner: str | None = None,
+        _expected_fence: int | None = None,
     ) -> LedgerEntry:
         existing = self._get_entry(request_id)
         if existing is None:
             raise LedgerError(f"Cannot block unknown request {request_id!r}")
+        if expected_fence is not None and _expected_fence is not None:
+            if expected_fence != _expected_fence:
+                raise LedgerError("conflicting expected fence values")
+        fence = expected_fence if expected_fence is not None else _expected_fence
+        if fence is None:
+            raise LedgerError(f"Blocking request {request_id!r} requires the claim fence")
         entry = replace(
             existing,
             status=legacy_status_from_terminal(TerminalOutcome.BLOCKED),
@@ -2965,11 +3311,19 @@ class ActionLedger:
             error=error,
             finished_at=time.time(),
             lease_until=None,
+            effect_phase=(
+                existing.effect_phase
+                if existing.effect_protocol_required
+                and existing.effect_phase == "ATTEMPTING"
+                and existing.decision is not None
+                else "ABORTED"
+            ),
         )
         if not self._try_transition(
             entry,
             expected_from=_expected_from,
             expected_owner=_expected_owner,
+            expected_fence=fence,
         ):
             current = self._get_entry(request_id)
             raise LedgerOutcomeAlreadySetError(
@@ -2984,12 +3338,20 @@ class ActionLedger:
         request_id: str,
         *,
         error: str | None = None,
+        expected_fence: int | None = None,
         _expected_from: frozenset[str] | None = None,
         _expected_owner: str | None = None,
+        _expected_fence: int | None = None,
     ) -> LedgerEntry:
         existing = self._get_entry(request_id)
         if existing is None:
             raise LedgerError(f"Cannot mark unknown request {request_id!r}")
+        if expected_fence is not None and _expected_fence is not None:
+            if expected_fence != _expected_fence:
+                raise LedgerError("conflicting expected fence values")
+        fence = expected_fence if expected_fence is not None else _expected_fence
+        if fence is None:
+            raise LedgerError(f"Marking request {request_id!r} unknown requires the claim fence")
         entry = replace(
             existing,
             status=legacy_status_from_terminal(TerminalOutcome.UNKNOWN),
@@ -2997,11 +3359,19 @@ class ActionLedger:
             error=error,
             finished_at=time.time(),
             lease_until=None,
+            effect_phase=(
+                existing.effect_phase
+                if existing.effect_protocol_required
+                and existing.effect_phase == "ATTEMPTING"
+                and existing.decision is not None
+                else "ABORTED"
+            ),
         )
         if not self._try_transition(
             entry,
             expected_from=_expected_from,
             expected_owner=_expected_owner,
+            expected_fence=fence,
         ):
             current = self._get_entry(request_id)
             raise LedgerOutcomeAlreadySetError(
@@ -3039,9 +3409,7 @@ class ActionLedger:
         exist).
         """
         if not by:
-            raise LedgerReleaseRefusedError(
-                "mark_worker_dead requires an operator identity ('by')"
-            )
+            raise LedgerReleaseRefusedError("mark_worker_dead requires an operator identity ('by')")
         if not reason:
             raise LedgerReleaseRefusedError("mark_worker_dead requires a reason")
         now = now if now is not None else time.time()
@@ -3057,7 +3425,9 @@ class ActionLedger:
                 entry, now=now, presumed_dead_after=self._presumed_dead_after
             ):
                 grace = _grace_remaining(
-                    entry, now=now, presumed_dead_after=self._presumed_dead_after,
+                    entry,
+                    now=now,
+                    presumed_dead_after=self._presumed_dead_after,
                 )
                 raise LedgerWorkerAliveError(
                     f"Cannot mark worker dead for owner {owner!r}: request "
@@ -3065,16 +3435,20 @@ class ActionLedger:
                     f"({_format_heartbeat_age(entry, now=now)}) — "
                     f"grace window elapses in {grace}"
                 )
-            stored_reason = (
-                f"{reason} (heartbeat overridden)" if override_heartbeat else reason
-            )
+            stored_reason = f"{reason} (heartbeat overridden)" if override_heartbeat else reason
             dead_entry = replace(
                 entry,
                 worker_dead_asserted_by=by,
                 worker_dead_asserted_at=now,
                 resolution_reason=stored_reason,
             )
-            self._set_entry(dead_entry)
+            if not self._try_transition(
+                dead_entry,
+                expected_from=frozenset({entry.terminal_outcome}),
+                expected_owner=entry.owner,
+                expected_fence=entry.fence,
+            ):
+                continue
             stamped.append(dead_entry)
         return stamped
 
@@ -3121,7 +3495,9 @@ class ActionLedger:
             existing, now=now, presumed_dead_after=self._presumed_dead_after
         ):
             grace = _grace_remaining(
-                existing, now=now, presumed_dead_after=self._presumed_dead_after,
+                existing,
+                now=now,
+                presumed_dead_after=self._presumed_dead_after,
             )
             raise LedgerWorkerAliveError(
                 f"Cannot mark worker dead for request {request_id!r}: "
@@ -3132,20 +3508,31 @@ class ActionLedger:
                 "of death (bypasses liveness check; may cause a duplicate "
                 "effect if the worker is alive)."
             )
-        stored_reason = (
-            f"{reason} (heartbeat overridden)" if override_heartbeat else reason
-        )
+        stored_reason = f"{reason} (heartbeat overridden)" if override_heartbeat else reason
         entry = replace(
             existing,
             worker_dead_asserted_by=by,
             worker_dead_asserted_at=now,
             resolution_reason=stored_reason,
         )
-        self._set_entry(entry)
+        if not self._try_transition(
+            entry,
+            expected_from=frozenset({existing.terminal_outcome}),
+            expected_owner=existing.owner,
+            expected_fence=existing.fence,
+        ):
+            raise LedgerOutcomeAlreadySetError(
+                f"Cannot mark worker dead for {request_id!r}: transition superseded"
+            )
         return entry
 
     def advance_boundary(
-        self, request_id: str, boundary: SideEffectBoundary
+        self,
+        request_id: str,
+        boundary: SideEffectBoundary,
+        *,
+        expected_owner: str | None = None,
+        expected_fence: int | None = None,
     ) -> LedgerEntry:
         """Move an entry's side-effect boundary forward (monotonic).
 
@@ -3155,14 +3542,77 @@ class ActionLedger:
         """
         existing = self._get_entry(request_id)
         if existing is None:
-            raise LedgerError(
-                f"Cannot advance boundary for unknown request {request_id!r}"
+            raise LedgerError(f"Cannot advance boundary for unknown request {request_id!r}")
+        if expected_fence is None:
+            raise LedgerError(f"Advancing request {request_id!r} requires the claim fence")
+        if existing.effect_protocol_required and not _has_allowed_attempting_decision(existing):
+            raise LedgerOutcomeAlreadySetError(
+                f"Cannot advance boundary for {request_id!r}: "
+                "no durable ATTEMPTING decision"
             )
         current = SideEffectBoundary(existing.side_effect_boundary)
-        if _BOUNDARY_RANK[boundary] <= _BOUNDARY_RANK[current]:
-            return existing
-        entry = replace(existing, side_effect_boundary=boundary.value)
-        self._set_entry(entry)
+        entry = (
+            existing
+            if _BOUNDARY_RANK[boundary] <= _BOUNDARY_RANK[current]
+            else replace(existing, side_effect_boundary=boundary.value)
+        )
+        if not self._try_transition(
+            entry,
+            expected_from=frozenset({existing.terminal_outcome}),
+            expected_owner=expected_owner,
+            expected_fence=expected_fence,
+            expected_effect_phase=(
+                "ATTEMPTING" if existing.effect_protocol_required else None
+            ),
+        ):
+            raise LedgerOutcomeAlreadySetError(
+                f"Cannot advance boundary for {request_id!r}: transition superseded"
+            )
+        return entry
+
+    def record_decision(
+        self,
+        request_id: str,
+        decision: dict[str, Any],
+        *,
+        expected_owner: str | None = None,
+        expected_fence: int | None = None,
+    ) -> LedgerEntry:
+        """Stamp the single-decision-point result onto the entry atomically.
+
+        The write is the ``INTENDED -> ATTEMPTING`` transition: it goes through
+        the same fenced compare-and-swap as every other in-flight mutation, so a
+        superseded worker (stale fence) cannot record a decision — and therefore
+        cannot smuggle in an effect the current-fence decision would deny. The
+        entry stays ``IN_FLIGHT``; only the durable ``decision`` field changes.
+        """
+        existing = self._get_entry(request_id)
+        if existing is None:
+            raise LedgerError(f"Cannot record decision for unknown request {request_id!r}")
+        if expected_fence is None:
+            raise LedgerError(f"Recording a decision for {request_id!r} requires the claim fence")
+        from mycelium.decision import Decision
+
+        try:
+            parsed = Decision.from_dict(decision)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise LedgerError(f"Invalid decision for request {request_id!r}: {exc}") from exc
+        entry = replace(
+            existing,
+            decision=parsed.to_dict(),
+            effect_phase="ATTEMPTING" if parsed.allowed else "ABORTED",
+        )
+        if not self._try_transition(
+            entry,
+            expected_from=_IN_FLIGHT_OUTCOMES,
+            expected_owner=expected_owner,
+            expected_fence=expected_fence,
+            expected_effect_phase="INTENDED",
+        ):
+            raise LedgerOutcomeAlreadySetError(
+                f"Cannot record decision for {request_id!r}: "
+                "transition superseded (stale fence/owner or already resolved)"
+            )
         return entry
 
     # --- request id derivation ---
@@ -3198,33 +3648,23 @@ class ActionLedger:
         forwarded to the wrapped tool.
         """
         lookup = identity_kwargs if identity_kwargs is not None else kwargs
-        explicit = parse_explicit_request_id(kwargs) or parse_explicit_request_id(
-            lookup
-        )
+        explicit = parse_explicit_request_id(kwargs) or parse_explicit_request_id(lookup)
         if explicit is not None:
             return explicit
 
-        field = (
-            transition_binding.request_id_from
-            if transition_binding is not None
-            else None
-        )
+        field = transition_binding.request_id_from if transition_binding is not None else None
         if field:
             return request_id_from_argument(tool, field, lookup)
 
         if (
-            self._request_identity_policy
-            == REQUEST_IDENTITY_POLICY_REQUIRE_EXPLICIT
+            self._request_identity_policy == REQUEST_IDENTITY_POLICY_REQUIRE_EXPLICIT
             and transition_binding is not None
-            and transition_binding.side_effect_class
-            in CONSEQUENTIAL_SIDE_EFFECT_CLASSES
+            and transition_binding.side_effect_class in CONSEQUENTIAL_SIDE_EFFECT_CLASSES
         ):
             raise MissingRequestIdentityError(tool=tool)
 
         if transition_binding is not None:
-            return derive_transition_key_for_call(
-                tool, args, kwargs, transition_binding
-            )
+            return derive_transition_key_for_call(tool, args, kwargs, transition_binding)
 
         if "tool_call_id" in kwargs:
             return str(kwargs["tool_call_id"])
@@ -3448,9 +3888,7 @@ def _args_drift_scope_key(kwargs: dict[str, Any]) -> str | None:
     return None
 
 
-def _args_drift_scopes_match(
-    incoming: str | None, stored: str | None
-) -> bool:
+def _args_drift_scopes_match(incoming: str | None, stored: str | None) -> bool:
     """True when both sides share a scope, or both are unscoped (legacy)."""
     if incoming is None and stored is None:
         return True
@@ -3530,6 +3968,9 @@ def _emit_tool_receipt(
     audit_emitter: AuditReceiptEmitter | None,
     ledger: ActionLedger,
     request_id: str,
+    *,
+    expected_owner: str | None,
+    expected_fence: int,
 ) -> None:
     if audit_emitter is None:
         return
@@ -3544,7 +3985,12 @@ def _emit_tool_receipt(
     ):
         return
     receipt = audit_emitter.emit_from_tool_entry(entry)
-    ledger.attach_receipt_ref(request_id, receipt.receipt_id)
+    ledger.attach_receipt_ref(
+        request_id,
+        receipt.receipt_id,
+        expected_owner=expected_owner,
+        expected_fence=expected_fence,
+    )
 
 
 def _is_read_only_binding(
@@ -3565,9 +4011,7 @@ def _claim_for_transition(
     transition_binding: ToolTransitionBinding | None,
 ) -> LedgerEntry:
     if _is_read_only_binding(transition_binding):
-        return ledger.claim_read_only(
-            request_id, tool_name, args, clean_kwargs
-        )
+        return ledger.claim_read_only(request_id, tool_name, args, clean_kwargs)
     if transition_binding is not None:
         return ledger.claim_side_effecting(
             request_id,
@@ -3588,9 +4032,7 @@ async def _claim_for_transition_async(
     transition_binding: ToolTransitionBinding | None,
 ) -> LedgerEntry:
     if _is_read_only_binding(transition_binding):
-        return await ledger.claim_read_only_async(
-            request_id, tool_name, args, clean_kwargs
-        )
+        return await ledger.claim_read_only_async(request_id, tool_name, args, clean_kwargs)
     if transition_binding is not None:
         return await ledger.claim_side_effecting_async(
             request_id,
@@ -3608,6 +4050,7 @@ def _record_failure(
     exc: BaseException,
     *,
     _expected_owner: str | None = None,
+    _expected_fence: int | None = None,
 ) -> None:
     """Record a tool failure with the terminal outcome implied by the boundary.
 
@@ -3615,8 +4058,9 @@ def _record_failure(
     ``maybe_crossed`` → ``UNKNOWN`` (ambiguous; hard-block for reconcile),
     ``crossed`` → ``FAILED_AFTER_EFFECT`` (effect happened; hard-block).
 
-    When *_expected_owner* is set, the write also fences on the stored entry's
-    ``owner`` field (wrapper-path).
+    When *_expected_owner* / *_expected_fence* are set, the write also fences on
+    the stored entry's ``owner`` / ``fence`` (wrapper-path). A stale worker whose
+    claim was superseded holds a lower fence and is rejected here.
     """
     entry = ledger.get(request_id)
     boundary = (
@@ -3630,15 +4074,114 @@ def _record_failure(
             exc,
             failed_after_effect=True,
             _expected_owner=_expected_owner,
+            _expected_fence=_expected_fence,
         )
     elif boundary == SideEffectBoundary.MAYBE_CROSSED:
         ledger.mark_unknown(
             request_id,
             error=f"{type(exc).__name__}: {exc}",
             _expected_owner=_expected_owner,
+            _expected_fence=_expected_fence,
         )
     else:
-        ledger.fail(request_id, exc, _expected_owner=_expected_owner)
+        ledger.fail(
+            request_id,
+            exc,
+            _expected_owner=_expected_owner,
+            _expected_fence=_expected_fence,
+        )
+
+
+def _record_boundary_decision(
+    ledger: ActionLedger,
+    request_id: str,
+    *,
+    tool: str,
+    args: tuple[Any, ...],
+    kwargs: Mapping[str, Any],
+    transition_key: str | None,
+    auth_decision: Any,
+    currency_decision: Any,
+    owner: str | None,
+    fence: int | None,
+) -> Any:
+    """Evaluate the registered predicates and stamp the Decision atomically.
+
+    This is the single decision point: run at the ``INTENDED -> ATTEMPTING``
+    boundary after the final-boundary checks passed and before body_start. The
+    built-in authority + currency predicates read the already-computed
+    ``auth_decision`` / ``currency_decision`` (no re-run, no double-enforcement);
+    host-registered predicates decide over the same immutable snapshot. The
+    result is written under the same fenced CAS as every in-flight mutation, so
+    a superseded worker cannot record — or act on — a stale decision.
+    """
+    from mycelium.decision import DecisionIntent, build_snapshot, get_decision_engine
+
+    intent = DecisionIntent(
+        tool=tool,
+        args=tuple(args),
+        kwargs=dict(kwargs),
+        request_id=request_id,
+        transition_key=transition_key,
+    )
+    snapshot = build_snapshot(
+        intent,
+        authority_decision=auth_decision,
+        currency_decision=currency_decision,
+    )
+    decision = get_decision_engine().evaluate(intent, snapshot)
+    try:
+        ledger.record_decision(
+            request_id,
+            decision.to_dict(),
+            expected_owner=owner,
+            expected_fence=fence,
+        )
+    except LedgerOutcomeAlreadySetError:
+        _logger.warning(
+            "could not record decision for %s: transition superseded "
+            "(stale fence/owner) — refusing to advance",
+            request_id,
+        )
+        raise
+    return decision
+
+
+def _boundary_denial_facts(
+    blocked: Exception,
+    *,
+    authority_offset: int,
+    currency_offset: int,
+) -> tuple[Any, Any]:
+    from mycelium.authority_window import (
+        AuthorityExpiredError,
+        get_authority_decisions,
+    )
+    from mycelium.use_time_currency import get_use_time_decisions
+
+    authority = get_authority_decisions()[authority_offset:]
+    currency = get_use_time_decisions()[currency_offset:]
+    auth_decision = authority[-1] if authority else None
+    currency_decision = currency[-1] if currency else None
+    denied = SimpleNamespace(
+        decision="denied",
+        reason=getattr(blocked, "reason", None)
+        or getattr(blocked, "violation", None)
+        or type(blocked).__name__,
+    )
+    if isinstance(blocked, AuthorityExpiredError) and auth_decision is None:
+        auth_decision = denied
+    elif currency_decision is None:
+        currency_decision = denied
+    return auth_decision, currency_decision
+
+
+def _raise_denied_decision(request_id: str, decision: Any) -> None:
+    if not decision.allowed:
+        raise LedgerHardBlockError(
+            f"decision denied for {request_id!r}: "
+            f"{'; '.join(decision.denied_reasons) or 'policy predicate refused'}"
+        )
 
 
 def _identity_lookup_kwargs(
@@ -3698,8 +4241,7 @@ def _run_ledgered(
             )
         except Exception:
             _logger.exception(
-                "could not emit HARD_BLOCK outcome for %s; "
-                "original ledger error follows",
+                "could not emit HARD_BLOCK outcome for %s; original ledger error follows",
                 request_id,
             )
         raise
@@ -3714,8 +4256,7 @@ def _run_ledgered(
             )
         except Exception:
             _logger.exception(
-                "could not emit SOFT_BLOCK outcome for %s; "
-                "original ledger error follows",
+                "could not emit SOFT_BLOCK outcome for %s; original ledger error follows",
                 request_id,
             )
         raise
@@ -3730,11 +4271,10 @@ def _run_ledgered(
         return existing.result
 
     owner = _ledger_owner()
+    fence = existing.fence
     authorized_reexec = _outcome_reexec_authorized.get()
     side_effect_class = (
-        transition_binding.side_effect_class
-        if transition_binding is not None
-        else None
+        transition_binding.side_effect_class if transition_binding is not None else None
     )
     ledger._emit_outcome(
         request_id=request_id,
@@ -3754,19 +4294,33 @@ def _run_ledgered(
             request_id,
             transition_binding,
             call_mapping,
+            owner,
+            fence,
         )
     )
     try:
-        from mycelium.authority_window import AuthorityExpiredError
+        from mycelium.authority_window import (
+            AuthorityExpiredError,
+            get_authority_decisions,
+        )
         from mycelium.use_time_currency import (
             UseTimeCurrencyError,
             enforce_use_boundary,
+            get_use_time_decisions,
         )
 
-        # Use-phase authority + currency after claim/lease wait, before body_start.
+        blocked: AuthorityExpiredError | UseTimeCurrencyError | None = None
+        authority_offset = len(get_authority_decisions())
+        currency_offset = len(get_use_time_decisions())
         try:
             auth_decision, currency_decision = enforce_use_boundary(kwargs=call_mapping)
-        except (AuthorityExpiredError, UseTimeCurrencyError) as blocked:
+        except (AuthorityExpiredError, UseTimeCurrencyError) as exc:
+            blocked = exc
+            auth_decision, currency_decision = _boundary_denial_facts(
+                blocked,
+                authority_offset=authority_offset,
+                currency_offset=currency_offset,
+            )
             event = (
                 "use_time_currency"
                 if isinstance(blocked, UseTimeCurrencyError)
@@ -3796,9 +4350,8 @@ def _run_ledgered(
                     event,
                     request_id,
                 )
-            raise
 
-        if getattr(auth_decision, "decision", "skipped") != "skipped":
+        if getattr(auth_decision, "decision", "skipped") == "allowed":
             try:
                 ledger._emit_outcome(
                     request_id=request_id,
@@ -3823,7 +4376,7 @@ def _run_ledgered(
                     request_id,
                 )
 
-        if currency_decision.decision != "skipped":
+        if getattr(currency_decision, "decision", "skipped") == "allowed":
             try:
                 ledger._emit_outcome(
                     request_id=request_id,
@@ -3848,6 +4401,26 @@ def _run_ledgered(
                     request_id,
                 )
 
+        decision = _record_boundary_decision(
+            ledger,
+            request_id,
+            tool=tool_name,
+            args=args,
+            kwargs=call_mapping,
+            transition_key=(
+                derive_transition_key_for_call(tool_name, args, dict(kwargs), transition_binding)
+                if transition_binding is not None
+                else None
+            ),
+            auth_decision=auth_decision,
+            currency_decision=currency_decision,
+            owner=owner,
+            fence=fence,
+        )
+        if blocked is not None:
+            raise blocked
+        _raise_denied_decision(request_id, decision)
+
         ledger._emit_outcome(
             request_id=request_id,
             tool=tool_name,
@@ -3869,12 +4442,25 @@ def _run_ledgered(
         exec_args, exec_kwargs = resolve_declared_secret_fields(
             func, args, clean_kwargs, extra_fields=extra
         )
-        with _lease_auto_renew(ledger, request_id):
+        with _lease_auto_renew(
+            ledger,
+            request_id,
+            owner=owner,
+            fence=fence,
+        ):
             result = func(*exec_args, **exec_kwargs)
     except (AuthorityExpiredError, UseTimeCurrencyError) as blocked:
         try:
-            _record_failure(ledger, request_id, blocked, _expected_owner=owner)
-            _emit_tool_receipt(audit_emitter, ledger, request_id)
+            _record_failure(
+                ledger, request_id, blocked, _expected_owner=owner, _expected_fence=fence
+            )
+            _emit_tool_receipt(
+                audit_emitter,
+                ledger,
+                request_id,
+                expected_owner=owner,
+                expected_fence=fence,
+            )
         except LedgerOutcomeAlreadySetError:
             pass
         except Exception:
@@ -3899,8 +4485,14 @@ def _run_ledgered(
         # An outcome-already-set error also does not mask — the transition was
         # resolved elsewhere after the tool started.
         try:
-            _record_failure(ledger, request_id, exc, _expected_owner=owner)
-            _emit_tool_receipt(audit_emitter, ledger, request_id)
+            _record_failure(ledger, request_id, exc, _expected_owner=owner, _expected_fence=fence)
+            _emit_tool_receipt(
+                audit_emitter,
+                ledger,
+                request_id,
+                expected_owner=owner,
+                expected_fence=fence,
+            )
         except LedgerOutcomeAlreadySetError:
             _logger.warning(
                 "outcome already set for %s while recording failure "
@@ -3910,8 +4502,7 @@ def _run_ledgered(
             )
         except Exception:
             _logger.exception(
-                "could not record failure for %s (storage down?); "
-                "original tool error follows",
+                "could not record failure for %s (storage down?); original tool error follows",
                 request_id,
             )
         try:
@@ -3924,15 +4515,12 @@ def _run_ledgered(
                 owner=owner,
                 error_class=type(exc).__name__,
                 policy_version=(
-                    transition_binding.policy_version
-                    if transition_binding is not None
-                    else None
+                    transition_binding.policy_version if transition_binding is not None else None
                 ),
             )
         except Exception:
             _logger.exception(
-                "could not emit body_fail outcome for %s; "
-                "original tool error follows",
+                "could not emit body_fail outcome for %s; original tool error follows",
                 request_id,
             )
         raise exc
@@ -3940,7 +4528,7 @@ def _run_ledgered(
         _active_transition_var.reset(token)
 
     try:
-        ledger.complete(request_id, result, _expected_owner=owner)
+        ledger.complete(request_id, result, _expected_owner=owner, _expected_fence=fence)
         complete_ok = True
     except LedgerOutcomeAlreadySetError:
         _logger.warning(
@@ -3950,7 +4538,13 @@ def _run_ledgered(
             request_id,
         )
         complete_ok = False
-    _emit_tool_receipt(audit_emitter, ledger, request_id)
+    _emit_tool_receipt(
+        audit_emitter,
+        ledger,
+        request_id,
+        expected_owner=owner,
+        expected_fence=fence,
+    )
     ledger._emit_outcome(
         request_id=request_id,
         tool=tool_name,
@@ -3960,9 +4554,7 @@ def _run_ledgered(
         owner=owner,
         error_class=None if complete_ok else "LedgerOutcomeAlreadySetError",
         policy_version=(
-            transition_binding.policy_version
-            if transition_binding is not None
-            else None
+            transition_binding.policy_version if transition_binding is not None else None
         ),
     )
     return result
@@ -4008,8 +4600,7 @@ async def _run_ledgered_async(
             )
         except Exception:
             _logger.exception(
-                "could not emit HARD_BLOCK outcome for %s; "
-                "original ledger error follows",
+                "could not emit HARD_BLOCK outcome for %s; original ledger error follows",
                 request_id,
             )
         raise
@@ -4024,8 +4615,7 @@ async def _run_ledgered_async(
             )
         except Exception:
             _logger.exception(
-                "could not emit SOFT_BLOCK outcome for %s; "
-                "original ledger error follows",
+                "could not emit SOFT_BLOCK outcome for %s; original ledger error follows",
                 request_id,
             )
         raise
@@ -4040,11 +4630,10 @@ async def _run_ledgered_async(
         return existing.result
 
     owner = _ledger_owner()
+    fence = existing.fence
     authorized_reexec = _outcome_reexec_authorized.get()
     side_effect_class = (
-        transition_binding.side_effect_class
-        if transition_binding is not None
-        else None
+        transition_binding.side_effect_class if transition_binding is not None else None
     )
     ledger._emit_outcome(
         request_id=request_id,
@@ -4064,20 +4653,33 @@ async def _run_ledgered_async(
             request_id,
             transition_binding,
             call_mapping,
+            owner,
+            fence,
         )
     )
     try:
-        from mycelium.authority_window import AuthorityExpiredError
+        from mycelium.authority_window import (
+            AuthorityExpiredError,
+            get_authority_decisions,
+        )
         from mycelium.use_time_currency import (
             UseTimeCurrencyError,
             enforce_use_boundary_async,
+            get_use_time_decisions,
         )
 
+        blocked: AuthorityExpiredError | UseTimeCurrencyError | None = None
+        authority_offset = len(get_authority_decisions())
+        currency_offset = len(get_use_time_decisions())
         try:
-            auth_decision, currency_decision = await enforce_use_boundary_async(
-                kwargs=call_mapping
+            auth_decision, currency_decision = await enforce_use_boundary_async(kwargs=call_mapping)
+        except (AuthorityExpiredError, UseTimeCurrencyError) as exc:
+            blocked = exc
+            auth_decision, currency_decision = _boundary_denial_facts(
+                blocked,
+                authority_offset=authority_offset,
+                currency_offset=currency_offset,
             )
-        except (AuthorityExpiredError, UseTimeCurrencyError) as blocked:
             event = (
                 "use_time_currency"
                 if isinstance(blocked, UseTimeCurrencyError)
@@ -4107,9 +4709,8 @@ async def _run_ledgered_async(
                     event,
                     request_id,
                 )
-            raise
 
-        if getattr(auth_decision, "decision", "skipped") != "skipped":
+        if getattr(auth_decision, "decision", "skipped") == "allowed":
             try:
                 ledger._emit_outcome(
                     request_id=request_id,
@@ -4134,7 +4735,7 @@ async def _run_ledgered_async(
                     request_id,
                 )
 
-        if currency_decision.decision != "skipped":
+        if getattr(currency_decision, "decision", "skipped") == "allowed":
             try:
                 ledger._emit_outcome(
                     request_id=request_id,
@@ -4159,6 +4760,26 @@ async def _run_ledgered_async(
                     request_id,
                 )
 
+        decision = _record_boundary_decision(
+            ledger,
+            request_id,
+            tool=tool_name,
+            args=args,
+            kwargs=call_mapping,
+            transition_key=(
+                derive_transition_key_for_call(tool_name, args, dict(kwargs), transition_binding)
+                if transition_binding is not None
+                else None
+            ),
+            auth_decision=auth_decision,
+            currency_decision=currency_decision,
+            owner=owner,
+            fence=fence,
+        )
+        if blocked is not None:
+            raise blocked
+        _raise_denied_decision(request_id, decision)
+
         ledger._emit_outcome(
             request_id=request_id,
             tool=tool_name,
@@ -4180,12 +4801,25 @@ async def _run_ledgered_async(
         exec_args, exec_kwargs = resolve_declared_secret_fields(
             func, args, clean_kwargs, extra_fields=extra
         )
-        with _lease_auto_renew(ledger, request_id):
+        with _lease_auto_renew(
+            ledger,
+            request_id,
+            owner=owner,
+            fence=fence,
+        ):
             result = await func(*exec_args, **exec_kwargs)
     except (AuthorityExpiredError, UseTimeCurrencyError) as blocked:
         try:
-            _record_failure(ledger, request_id, blocked, _expected_owner=owner)
-            _emit_tool_receipt(audit_emitter, ledger, request_id)
+            _record_failure(
+                ledger, request_id, blocked, _expected_owner=owner, _expected_fence=fence
+            )
+            _emit_tool_receipt(
+                audit_emitter,
+                ledger,
+                request_id,
+                expected_owner=owner,
+                expected_fence=fence,
+            )
         except LedgerOutcomeAlreadySetError:
             pass
         except Exception:
@@ -4210,8 +4844,14 @@ async def _run_ledgered_async(
         # An outcome-already-set error also does not mask — the transition was
         # resolved elsewhere after the tool started.
         try:
-            _record_failure(ledger, request_id, exc, _expected_owner=owner)
-            _emit_tool_receipt(audit_emitter, ledger, request_id)
+            _record_failure(ledger, request_id, exc, _expected_owner=owner, _expected_fence=fence)
+            _emit_tool_receipt(
+                audit_emitter,
+                ledger,
+                request_id,
+                expected_owner=owner,
+                expected_fence=fence,
+            )
         except LedgerOutcomeAlreadySetError:
             _logger.warning(
                 "outcome already set for %s while recording failure "
@@ -4221,8 +4861,7 @@ async def _run_ledgered_async(
             )
         except Exception:
             _logger.exception(
-                "could not record failure for %s (storage down?); "
-                "original tool error follows",
+                "could not record failure for %s (storage down?); original tool error follows",
                 request_id,
             )
         try:
@@ -4235,15 +4874,12 @@ async def _run_ledgered_async(
                 owner=owner,
                 error_class=type(exc).__name__,
                 policy_version=(
-                    transition_binding.policy_version
-                    if transition_binding is not None
-                    else None
+                    transition_binding.policy_version if transition_binding is not None else None
                 ),
             )
         except Exception:
             _logger.exception(
-                "could not emit body_fail outcome for %s; "
-                "original tool error follows",
+                "could not emit body_fail outcome for %s; original tool error follows",
                 request_id,
             )
         raise exc
@@ -4251,7 +4887,7 @@ async def _run_ledgered_async(
         _active_transition_var.reset(token)
 
     try:
-        ledger.complete(request_id, result, _expected_owner=owner)
+        ledger.complete(request_id, result, _expected_owner=owner, _expected_fence=fence)
         complete_ok = True
     except LedgerOutcomeAlreadySetError:
         _logger.warning(
@@ -4261,7 +4897,13 @@ async def _run_ledgered_async(
             request_id,
         )
         complete_ok = False
-    _emit_tool_receipt(audit_emitter, ledger, request_id)
+    _emit_tool_receipt(
+        audit_emitter,
+        ledger,
+        request_id,
+        expected_owner=owner,
+        expected_fence=fence,
+    )
     ledger._emit_outcome(
         request_id=request_id,
         tool=tool_name,
@@ -4271,9 +4913,7 @@ async def _run_ledgered_async(
         owner=owner,
         error_class=None if complete_ok else "LedgerOutcomeAlreadySetError",
         policy_version=(
-            transition_binding.policy_version
-            if transition_binding is not None
-            else None
+            transition_binding.policy_version if transition_binding is not None else None
         ),
     )
     return result

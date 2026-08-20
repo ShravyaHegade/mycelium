@@ -180,10 +180,12 @@ from mycelium.transition import (
     SideEffectBoundary,
     SideEffectClass,
     Spendability,
+    ToolCapability,
     ToolTransitionBinding,
     TransitionConfig,
     TransitionScope,
     execution_scope,
+    parse_capability,
     parse_retry_permission,
     parse_side_effect_boundary,
     parse_side_effect_class,
@@ -351,6 +353,7 @@ class ToolConfig:
     retry_permission: RetryPermission | None = None
     side_effect_boundary: SideEffectBoundary | None = None
     spendability: Spendability | None = None
+    capability: ToolCapability | None = None
     provider_idempotency_key_param: str | None = None
     provider_idempotency_key_ttl: float | None = None
     request_id_from: str | None = None
@@ -1707,6 +1710,7 @@ class MyceliumConfig:
             retry_permission=tool_config.retry_permission,
             side_effect_boundary=tool_config.side_effect_boundary,
             spendability=tool_config.spendability,
+            capability=tool_config.capability,
             provider_idempotency_key_param=(
                 tool_config.provider_idempotency_key_param
             ),
@@ -2176,6 +2180,13 @@ def _parse_tool_config(
         except ValueError as exc:
             raise ConfigError(f"tool '{name}': {exc}") from exc
 
+    capability: ToolCapability | None = None
+    if "capability" in raw:
+        try:
+            capability = parse_capability(raw["capability"])
+        except ValueError as exc:
+            raise ConfigError(f"tool '{name}': {exc}") from exc
+
     provider_idempotency_key_param: str | None = None
     if "provider_idempotency_key_param" in raw:
         value = raw["provider_idempotency_key_param"]
@@ -2321,6 +2332,7 @@ def _parse_tool_config(
         retry_permission=retry_permission,
         side_effect_boundary=side_effect_boundary,
         spendability=spendability,
+        capability=capability,
         provider_idempotency_key_param=provider_idempotency_key_param,
         provider_idempotency_key_ttl=provider_idempotency_key_ttl,
         request_id_from=request_id_from,

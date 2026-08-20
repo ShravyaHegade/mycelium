@@ -164,6 +164,7 @@ def _seed_crashed_charge(
     storage,
     *,
     status: str,
+    tool_call_id: str = "c1",
 ) -> tuple[str, str]:
     """Persist an expired, maybe-crossed IN_FLIGHT entry whose provider intent
     sits in *status* — the durable leftovers of a worker that died mid-charge.
@@ -175,7 +176,7 @@ def _seed_crashed_charge(
         provider.set_status(pid, status)
     with execution_scope(_scope()):
         derived = ActionLedger(storage=InMemoryLedgerStorage()).derive_request_id(
-            "charge", (), {"amount": 10.0, "tool_call_id": "c1"},
+            "charge", (), {"amount": 10.0, "tool_call_id": tool_call_id},
             transition_binding=_binding(),
         )
     storage.set(
@@ -184,7 +185,7 @@ def _seed_crashed_charge(
             tool="charge",
             # Match decorator call shape: charge(amount=10.0, tool_call_id="c1")
             args=[],
-            kwargs={"amount": 10.0, "tool_call_id": "c1"},
+            kwargs={"amount": 10.0, "tool_call_id": tool_call_id},
             status="in-flight",
             terminal_outcome=TerminalOutcome.IN_FLIGHT.value,
             lease_until=time.time() - 1,
@@ -271,6 +272,7 @@ def test_reconcile_requires_payment_method_grants_one_recharge(storage) -> None:
 
 def test_reconcile_canceled_or_missing_grants_one_recharge(storage) -> None:
     for status in ("canceled", "missing"):
+        tool_call_id = f"c1-{status}"
         provider = _FakePaymentProvider()
         reconciler = _StripeReconciler(provider)
         charge = _make_charge(provider, storage, reconciler=reconciler)
@@ -280,7 +282,7 @@ def test_reconcile_canceled_or_missing_grants_one_recharge(storage) -> None:
             # ref points at a payment intent the store does not know.
             with execution_scope(_scope()):
                 derived = ActionLedger(storage=InMemoryLedgerStorage()).derive_request_id(
-                    "charge", (), {"amount": 10.0, "tool_call_id": "c1"},
+                    "charge", (), {"amount": 10.0, "tool_call_id": tool_call_id},
                     transition_binding=_binding(),
                 )
             storage.set(
@@ -288,7 +290,7 @@ def test_reconcile_canceled_or_missing_grants_one_recharge(storage) -> None:
                     request_id=derived,
                     tool="charge",
                     args=[],
-                    kwargs={"amount": 10.0, "tool_call_id": "c1"},
+                    kwargs={"amount": 10.0, "tool_call_id": tool_call_id},
                     status="in-flight",
                     terminal_outcome=TerminalOutcome.IN_FLIGHT.value,
                     lease_until=time.time() - 1,
@@ -297,10 +299,12 @@ def test_reconcile_canceled_or_missing_grants_one_recharge(storage) -> None:
                 )
             )
         else:
-            _seed_crashed_charge(provider, storage, status="canceled")
+            _seed_crashed_charge(
+                provider, storage, status="canceled", tool_call_id=tool_call_id
+            )
 
         with execution_scope(_scope()):
-            result = charge(amount=10.0, tool_call_id="c1")
+            result = charge(amount=10.0, tool_call_id=tool_call_id)
 
         assert result["charged"] is True
         assert len(provider.charges) == 1, (

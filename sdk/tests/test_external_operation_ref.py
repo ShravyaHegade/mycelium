@@ -66,9 +66,16 @@ def test_attach_external_operation_ref_low_level() -> None:
     storage = InMemoryLedgerStorage()
     action_ledger = ActionLedger(storage=storage)
     rid = "rid-attach"
-    action_ledger.claim_side_effecting(rid, "charge", (), {}, _binding())
+    claimed = action_ledger.claim_side_effecting(rid, "charge", (), {}, _binding())
+    action_ledger.record_decision(
+        rid,
+        {"allowed": True, "verdicts": [], "denied_reasons": []},
+        expected_fence=claimed.fence,
+    )
 
-    action_ledger.attach_external_operation_ref(rid, "pi_abc")
+    action_ledger.attach_external_operation_ref(
+        rid, "pi_abc", expected_fence=claimed.fence
+    )
     assert storage.get(rid).external_operation_ref == "pi_abc"
 
 

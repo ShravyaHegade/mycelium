@@ -27,6 +27,7 @@ from mycelium import (
     FileLedgerStorage,
     InMemoryLedgerStorage,
     LedgerEntry,
+    LedgerError,
     LedgerOutcomeAlreadySetError,
     ReconcileResult,
     RedisLedgerStorage,
@@ -72,9 +73,25 @@ def _claim(ledger: ActionLedger, request_id: str) -> LedgerEntry:
     return ledger.claim(request_id, "test_tool", (), {})
 
 
-def _set_entry_on_storage(
-    ledger: ActionLedger, request_id: str, entry: LedgerEntry
-) -> None:
+def _scope():
+    from mycelium.transition import execution_scope
+
+    return execution_scope(_SCOPE)
+
+
+def _replace_fence(entry: LedgerEntry, fence: int) -> LedgerEntry:
+    from dataclasses import replace
+
+    return replace(entry, fence=fence)
+
+
+def _replace_lease(entry: LedgerEntry, lease_until: float) -> LedgerEntry:
+    from dataclasses import replace
+
+    return replace(entry, lease_until=lease_until)
+
+
+def _set_entry_on_storage(ledger: ActionLedger, request_id: str, entry: LedgerEntry) -> None:
     """Directly write an entry bypassing CAS (for test setup)."""
     ledger.get  # ensure ledger is alive
     from mycelium.action_ledger import InMemoryLedgerStorage as _Mem
@@ -185,15 +202,20 @@ def test_transition_matrix(
 
     if expect_success:
         if action == "complete":
-            ledger.complete(request_id, {"ok": True})
+            ledger.complete(request_id, {"ok": True}, expected_fence=entry.fence)
         elif action == "fail_before":
-            ledger.fail(request_id, ValueError("x"))
+            ledger.fail(request_id, ValueError("x"), expected_fence=entry.fence)
         elif action == "fail_after":
-            ledger.fail(request_id, ValueError("x"), failed_after_effect=True)
+            ledger.fail(
+                request_id,
+                ValueError("x"),
+                failed_after_effect=True,
+                expected_fence=entry.fence,
+            )
         elif action == "mark_blocked":
-            ledger.mark_blocked(request_id, error="blocked")
+            ledger.mark_blocked(request_id, error="blocked", expected_fence=entry.fence)
         elif action == "mark_unknown":
-            ledger.mark_unknown(request_id, error="unknown")
+            ledger.mark_unknown(request_id, error="unknown", expected_fence=entry.fence)
         stored = ledger.get(request_id)
         assert stored is not None
         if action == "complete":
@@ -209,25 +231,33 @@ def test_transition_matrix(
     else:
         with pytest.raises(LedgerOutcomeAlreadySetError):
             if action == "complete":
-                ledger.complete(request_id, {"ok": True})
+                    ledger.complete(request_id, {"ok": True}, expected_fence=entry.fence)
             elif action == "fail_before":
-                ledger.fail(request_id, ValueError("x"))
+                    ledger.fail(request_id, ValueError("x"), expected_fence=entry.fence)
             elif action == "fail_after":
-                ledger.fail(request_id, ValueError("x"), failed_after_effect=True)
+                    ledger.fail(
+                        request_id,
+                        ValueError("x"),
+                        failed_after_effect=True,
+                        expected_fence=entry.fence,
+                    )
             elif action == "mark_blocked":
-                ledger.mark_blocked(request_id, error="blocked")
+                    ledger.mark_blocked(
+                        request_id, error="blocked", expected_fence=entry.fence
+                    )
             elif action == "mark_unknown":
-                ledger.mark_unknown(request_id, error="unknown")
+                    ledger.mark_unknown(
+                        request_id, error="unknown", expected_fence=entry.fence
+                    )
 
 
 # ---------------------------------------------------------------------------
 # Resolution paths (release, reconcile) accept the broader set of outcomes
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.parametrize("from_outcome", ["BLOCKED", "UNKNOWN", "FAILED_AFTER_EFFECT"])
-def test_release_completed_from_terminal_outcomes(
-    ledger: ActionLedger, from_outcome: str
-) -> None:
+def test_release_completed_from_terminal_outcomes(ledger: ActionLedger, from_outcome: str) -> None:
     request_id = f"release-{from_outcome}"
     entry = _make_entry(
         request_id=request_id,
@@ -267,17 +297,18 @@ def test_release_not_executed_from_blocked(ledger: ActionLedger) -> None:
 # Stalled-worker scenario
 # ---------------------------------------------------------------------------
 
+
 def test_stalled_worker_cannot_overwrite_completed(ledger: ActionLedger) -> None:
     """A stale worker that wakes after the transition was resolved by an
     operator or a retry must not silently overwrite the true outcome."""
     request_id = "stalled-worker"
-    _claim(ledger, request_id)
+    claimed = _claim(ledger, request_id)
 
-    ledger.complete(request_id, {"real": "result"})
+    ledger.complete(request_id, {"real": "result"}, expected_fence=claimed.fence)
 
     # Stale worker tries to fail
     with pytest.raises(LedgerOutcomeAlreadySetError):
-        ledger.fail(request_id, RuntimeError("stale"))
+        ledger.fail(request_id, RuntimeError("stale"), expected_fence=claimed.fence)
 
     stored = ledger.get(request_id)
     assert stored is not None
@@ -288,13 +319,13 @@ def test_stalled_worker_cannot_overwrite_completed(ledger: ActionLedger) -> None
 def test_stalled_worker_cannot_overwrite_failed(ledger: ActionLedger) -> None:
     """Same as above but the entry was already failed by another worker."""
     request_id = "stalled-worker-fail"
-    _claim(ledger, request_id)
+    claimed = _claim(ledger, request_id)
 
-    ledger.fail(request_id, ValueError("real failure"))
+    ledger.fail(request_id, ValueError("real failure"), expected_fence=claimed.fence)
 
     # Stale worker tries to complete
     with pytest.raises(LedgerOutcomeAlreadySetError):
-        ledger.complete(request_id, {"fake": "result"})
+        ledger.complete(request_id, {"fake": "result"}, expected_fence=claimed.fence)
 
     stored = ledger.get(request_id)
     assert stored is not None
@@ -305,6 +336,7 @@ def test_stalled_worker_cannot_overwrite_failed(ledger: ActionLedger) -> None:
 # Owner fencing
 # ---------------------------------------------------------------------------
 
+
 def test_owner_mismatch_on_complete(ledger: ActionLedger) -> None:
     """When owner fencing is enabled, a different owner's write is refused."""
     request_id = "owner-fence"
@@ -313,7 +345,12 @@ def test_owner_mismatch_on_complete(ledger: ActionLedger) -> None:
 
     # worker-B cannot complete
     with pytest.raises(LedgerOutcomeAlreadySetError):
-        ledger.complete(request_id, {"ok": True}, _expected_owner="worker-B")
+        ledger.complete(
+            request_id,
+            {"ok": True},
+            _expected_owner="worker-B",
+            expected_fence=entry.fence,
+        )
 
 
 def test_owner_match_succeeds(ledger: ActionLedger) -> None:
@@ -322,7 +359,12 @@ def test_owner_match_succeeds(ledger: ActionLedger) -> None:
     entry = _make_entry(request_id=request_id, owner="worker-A")
     _set_entry_on_storage(ledger, request_id, entry)
 
-    ledger.complete(request_id, {"ok": True}, _expected_owner="worker-A")
+    ledger.complete(
+        request_id,
+        {"ok": True},
+        _expected_owner="worker-A",
+        expected_fence=entry.fence,
+    )
     stored = ledger.get(request_id)
     assert stored.terminal_outcome == TerminalOutcome.COMPLETED.value
 
@@ -330,6 +372,7 @@ def test_owner_match_succeeds(ledger: ActionLedger) -> None:
 # ---------------------------------------------------------------------------
 # Two-thread race: concurrent writers must converge to at most one outcome
 # ---------------------------------------------------------------------------
+
 
 def test_concurrent_complete_race(ledger: ActionLedger) -> None:
     """Two threads racing to complete the same in-flight entry must not both
@@ -346,7 +389,7 @@ def test_concurrent_complete_race(ledger: ActionLedger) -> None:
     reach the check phase before either writes.
     """
     request_id = "race-complete"
-    _claim(ledger, request_id)
+    claimed = _claim(ledger, request_id)
 
     results: list[Exception | str] = []
     barrier = threading.Barrier(2, timeout=5)
@@ -354,7 +397,9 @@ def test_concurrent_complete_race(ledger: ActionLedger) -> None:
     def _racer(result_value: str) -> None:
         barrier.wait()
         try:
-            ledger.complete(request_id, {"result": result_value})
+            ledger.complete(
+                request_id, {"result": result_value}, expected_fence=claimed.fence
+            )
             results.append(result_value)
         except LedgerOutcomeAlreadySetError as e:
             results.append(e)
@@ -372,9 +417,7 @@ def test_concurrent_complete_race(ledger: ActionLedger) -> None:
     assert len(successes) == 1, (
         f"expected exactly one successful write, got {len(successes)}: {successes}"
     )
-    assert len(errors) == 1, (
-        f"expected exactly one refusal, got {len(errors)}"
-    )
+    assert len(errors) == 1, f"expected exactly one refusal, got {len(errors)}"
     stored = ledger.get(request_id)
     assert stored is not None
     assert stored.terminal_outcome == TerminalOutcome.COMPLETED.value
@@ -383,7 +426,7 @@ def test_concurrent_complete_race(ledger: ActionLedger) -> None:
 def test_concurrent_complete_and_fail_race(ledger: ActionLedger) -> None:
     """Thread 1 completes, thread 2 fails — only one should win."""
     request_id = "race-complete-fail"
-    _claim(ledger, request_id)
+    claimed = _claim(ledger, request_id)
 
     success: list[str] = []
     barrier = threading.Barrier(2, timeout=5)
@@ -391,7 +434,7 @@ def test_concurrent_complete_and_fail_race(ledger: ActionLedger) -> None:
     def _completer() -> None:
         barrier.wait()
         try:
-            ledger.complete(request_id, {"ok": True})
+            ledger.complete(request_id, {"ok": True}, expected_fence=claimed.fence)
             success.append("complete")
         except LedgerOutcomeAlreadySetError:
             pass
@@ -399,7 +442,7 @@ def test_concurrent_complete_and_fail_race(ledger: ActionLedger) -> None:
     def _failer() -> None:
         barrier.wait()
         try:
-            ledger.fail(request_id, RuntimeError("fail"))
+            ledger.fail(request_id, RuntimeError("fail"), expected_fence=claimed.fence)
             success.append("fail")
         except LedgerOutcomeAlreadySetError:
             pass
@@ -429,6 +472,7 @@ def test_concurrent_complete_and_fail_race(ledger: ActionLedger) -> None:
 # Wrapper-path owner fencing (via _run_ledgered)
 # ---------------------------------------------------------------------------
 
+
 def test_wrapper_owner_fencing_prevents_stale_overwrite(ledger: ActionLedger) -> None:
     """The @ledger_sync / @ledger wrapper passes _ledger_owner() as
     _expected_owner, so a different process's write is refused."""
@@ -437,7 +481,12 @@ def test_wrapper_owner_fencing_prevents_stale_overwrite(ledger: ActionLedger) ->
     _set_entry_on_storage(ledger, request_id, entry)
 
     # alice's owner matches — allowed
-    ledger.complete(request_id, {"ok": True}, _expected_owner="alice")
+    ledger.complete(
+        request_id,
+        {"ok": True},
+        _expected_owner="alice",
+        expected_fence=entry.fence,
+    )
     stored = ledger.get(request_id)
     assert stored.terminal_outcome == TerminalOutcome.COMPLETED.value
 
@@ -448,7 +497,12 @@ def test_wrapper_owner_fencing_prevents_stale_overwrite(ledger: ActionLedger) ->
 
     # bob (wrong owner) — refused
     with pytest.raises(LedgerOutcomeAlreadySetError):
-        ledger.complete(request_id2, {"ok": True}, _expected_owner="bob")
+        ledger.complete(
+            request_id2,
+            {"ok": True},
+            _expected_owner="bob",
+            expected_fence=entry2.fence,
+        )
     stored2 = ledger.get(request_id2)
     assert stored2.terminal_outcome == TerminalOutcome.IN_FLIGHT.value
 
@@ -504,9 +558,7 @@ def test_concurrent_reclaim_race_inmemory() -> None:
 
     outcomes = [r[0] for r in results]
     claimed = [o for o in outcomes if o == "claimed"]
-    assert len(claimed) == 1, (
-        f"expected exactly one 'claimed', got {len(claimed)}: {results}"
-    )
+    assert len(claimed) == 1, f"expected exactly one 'claimed', got {len(claimed)}: {results}"
 
 
 def test_concurrent_reclaim_race_redis(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -565,9 +617,7 @@ def test_concurrent_reclaim_race_redis(monkeypatch: pytest.MonkeyPatch) -> None:
 
     outcomes = [r[0] for r in results]
     claimed = [o for o in outcomes if o == "claimed"]
-    assert len(claimed) == 1, (
-        f"expected exactly one 'claimed', got {len(claimed)}: {results}"
-    )
+    assert len(claimed) == 1, f"expected exactly one 'claimed', got {len(claimed)}: {results}"
 
 
 # ---------------------------------------------------------------------------
@@ -594,6 +644,7 @@ def test_concurrent_reconcile_not_executed_race(
         fakeredis = pytest.importorskip("fakeredis")
         fake = fakeredis.FakeRedis(decode_responses=True)
         import redis as redis_mod
+
         monkeypatch.setattr(redis_mod.Redis, "from_url", lambda url, **kw: fake)
         storage = RedisLedgerStorage("redis://test")
 
@@ -622,9 +673,7 @@ def test_concurrent_reconcile_not_executed_race(
     stored = ledger_inst.get(request_id)
     from dataclasses import replace
 
-    ledger_inst._set_entry(
-        replace(stored, external_operation_ref="pi_race")
-    )
+    ledger_inst._set_entry(replace(stored, external_operation_ref="pi_race"))
 
     exec_count = 0
     results: list[tuple[str, Any]] = []
@@ -634,14 +683,26 @@ def test_concurrent_reconcile_not_executed_race(
         nonlocal exec_count
         barrier.wait()
         entry = ledger_inst.claim_side_effecting(
-            request_id, "test_tool", (), {}, binding,
+            request_id,
+            "test_tool",
+            (),
+            {},
+            binding,
         )
         if entry.terminal_outcome == TerminalOutcome.COMPLETED.value:
             results.append(("completed", entry.result))
         elif entry.terminal_outcome == TerminalOutcome.IN_FLIGHT.value:
             exec_count += 1
             result_value = {"ran": True}
-            ledger_inst.complete(request_id, result_value)
+            ledger_inst.record_decision(
+                request_id,
+                {"allowed": True, "verdicts": [], "denied_reasons": []},
+                expected_owner=entry.owner,
+                expected_fence=entry.fence,
+            )
+            ledger_inst.complete(
+                request_id, result_value, expected_fence=entry.fence
+            )
             results.append(("ran_tool", result_value))
         else:
             results.append((entry.terminal_outcome or "unknown", None))
@@ -653,9 +714,7 @@ def test_concurrent_reconcile_not_executed_race(
     t1.join(timeout=10)
     t2.join(timeout=10)
 
-    assert exec_count == 1, (
-        f"expected exactly 1 tool execution, got {exec_count}"
-    )
+    assert exec_count == 1, f"expected exactly 1 tool execution, got {exec_count}"
     statuses = [r[0] for r in results]
     assert "ran_tool" in statuses, f"nobody ran the tool: {results}"
     assert "completed" in statuses, f"nobody saw the completed result: {results}"
@@ -685,6 +744,7 @@ def test_concurrent_reconcile_not_executed_race_expired_seed(
         fakeredis = pytest.importorskip("fakeredis")
         fake = fakeredis.FakeRedis(decode_responses=True)
         import redis as redis_mod
+
         monkeypatch.setattr(redis_mod.Redis, "from_url", lambda url, **kw: fake)
         storage = RedisLedgerStorage("redis://test")
 
@@ -703,20 +763,20 @@ def test_concurrent_reconcile_not_executed_race_expired_seed(
 
     _seed_owner = str(uuid.uuid4())
     storage.set(
-            LedgerEntry(
-                request_id=request_id,
-                tool="test_tool",
-                args=[],
-                kwargs={},
-                status="in-flight",
-                terminal_outcome=TerminalOutcome.IN_FLIGHT.value,
-                owner=_seed_owner,
-                lease_until=time_mod.time() - 1,
-                side_effect_boundary=SideEffectBoundary.NOT_CROSSED.value,
-                external_operation_ref="pi_expired_race",
-                idempotency_key=request_id,
-            )
+        LedgerEntry(
+            request_id=request_id,
+            tool="test_tool",
+            args=[],
+            kwargs={},
+            status="in-flight",
+            terminal_outcome=TerminalOutcome.IN_FLIGHT.value,
+            owner=_seed_owner,
+            lease_until=time_mod.time() - 1,
+            side_effect_boundary=SideEffectBoundary.NOT_CROSSED.value,
+            external_operation_ref="pi_expired_race",
+            idempotency_key=request_id,
         )
+    )
 
     exec_count = 0
     results: list[tuple[str, Any]] = []
@@ -726,14 +786,26 @@ def test_concurrent_reconcile_not_executed_race_expired_seed(
         nonlocal exec_count
         barrier.wait()
         entry = ledger_inst.claim_side_effecting(
-            request_id, "test_tool", (), {}, binding,
+            request_id,
+            "test_tool",
+            (),
+            {},
+            binding,
         )
         if entry.terminal_outcome == TerminalOutcome.COMPLETED.value:
             results.append(("completed", entry.result))
         elif entry.terminal_outcome == TerminalOutcome.IN_FLIGHT.value:
             exec_count += 1
             result_value = {"ran": True}
-            ledger_inst.complete(request_id, result_value)
+            ledger_inst.record_decision(
+                request_id,
+                {"allowed": True, "verdicts": [], "denied_reasons": []},
+                expected_owner=entry.owner,
+                expected_fence=entry.fence,
+            )
+            ledger_inst.complete(
+                request_id, result_value, expected_fence=entry.fence
+            )
             results.append(("ran_tool", result_value))
         else:
             results.append((entry.terminal_outcome or "unknown", None))
@@ -745,9 +817,7 @@ def test_concurrent_reconcile_not_executed_race_expired_seed(
     t1.join(timeout=10)
     t2.join(timeout=10)
 
-    assert exec_count == 1, (
-        f"expected exactly 1 tool execution, got {exec_count}"
-    )
+    assert exec_count == 1, f"expected exactly 1 tool execution, got {exec_count}"
     statuses = [r[0] for r in results]
     assert "ran_tool" in statuses, f"nobody ran the tool: {results}"
     assert "completed" in statuses, f"nobody saw the completed result: {results}"
@@ -816,9 +886,7 @@ def test_raise_hard_block_stale_snapshot_returns_inflight_held_lease() -> None:
 
     _action_ledger._reconcile_cas_lost.val = False
     try:
-        result = ledger_inst._raise_hard_block(
-            request_id, "test_tool", stale, binding=_BINDING
-        )
+        result = ledger_inst._raise_hard_block(request_id, "test_tool", stale, binding=_BINDING)
         assert result.terminal_outcome == TerminalOutcome.IN_FLIGHT.value
         assert result.owner == "worker-A"
 
@@ -832,3 +900,378 @@ def test_raise_hard_block_stale_snapshot_returns_inflight_held_lease() -> None:
         _action_ledger._reconcile_cas_lost.val = False
 
 
+# ---------------------------------------------------------------------------
+# Fencing tokens (Kleppmann monotonic fence)
+# ---------------------------------------------------------------------------
+
+
+def test_fence_round_trips_and_defaults_to_zero() -> None:
+    """fence survives to_dict/from_dict; a row without a fence loads as 0."""
+    entry = _make_entry(request_id="fence-serde")
+    entry = _replace_fence(entry, 7)
+    assert entry.to_dict()["fence"] == 7
+    assert LedgerEntry.from_dict(entry.to_dict()).fence == 7
+
+    legacy = entry.to_dict()
+    del legacy["fence"]
+    assert LedgerEntry.from_dict(legacy).fence == 0
+
+
+def test_claim_bumps_fence_monotonically(ledger: ActionLedger) -> None:
+    """First claim carries fence 1; a reclaim of a reclaimable prior bumps to 2.
+
+    Driven at the storage layer so the check is independent of the higher-level
+    reclaim policy (a NON_IDEMPOTENT_MUTATE hard-blocks rather than reclaims —
+    that safety gate is orthogonal to the monotonic fence).
+    """
+    request_id = "fence-bump"
+    storage = ledger._storage
+
+    outcome, _ = storage.try_claim_inflight(_make_entry(request_id), lease_ttl=30.0)
+    assert outcome == "claimed"
+    assert storage.get(request_id).fence == 1
+
+    # A previously-failed entry is reclaimable; the next claim bumps the fence.
+    ledger.fail(request_id, RuntimeError("boom"), expected_fence=1)
+    outcome, _ = storage.try_claim_inflight(_make_entry(request_id), lease_ttl=30.0)
+    assert outcome == "claimed"
+    reclaimed = storage.get(request_id)
+    assert reclaimed is not None
+    assert reclaimed.fence == 2
+
+
+def test_stale_fence_rejected_even_when_lease_valid(ledger: ActionLedger) -> None:
+    """A write carrying a stale fence is refused even though the lease is HELD.
+
+    This is the core fencing guarantee: lease-based reasoning would allow the
+    write (lease still valid), but the stored fence has moved on, so the CAS
+    rejects it.
+    """
+    request_id = "fence-stale-vs-lease"
+    now = time.time()
+    # Stored entry: fence 2, lease firmly HELD (an hour out).
+    _set_entry_on_storage(
+        ledger,
+        request_id,
+        LedgerEntry(
+            request_id=request_id,
+            tool="test_tool",
+            args=(),
+            kwargs={},
+            status="in-flight",
+            terminal_outcome=TerminalOutcome.IN_FLIGHT.value,
+            fence=2,
+            owner="worker-B",
+            lease_until=now + 3600,
+            idempotency_key=request_id,
+            effect_protocol_required=True,
+        ),
+    )
+    # Stale worker holds fence 1 (its claim was superseded).
+    with pytest.raises(LedgerError, match="requires the claim fence"):
+        ledger.complete(request_id, {"stale": True})
+    with pytest.raises(LedgerOutcomeAlreadySetError):
+        ledger.complete(
+            request_id,
+            {"stale": True},
+            _expected_owner="worker-B",
+            _expected_fence=1,
+        )
+    stored = ledger.get(request_id)
+    assert stored is not None
+    assert stored.terminal_outcome == TerminalOutcome.IN_FLIGHT.value
+    assert stored.fence == 2
+
+
+def test_legacy_claim_mutations_require_and_reject_stale_fences(
+    ledger: ActionLedger,
+) -> None:
+    request_id = "legacy-fence-takeover"
+    worker_a = ledger.claim(request_id, "legacy_tool", (), {})
+    ledger.fail(
+        request_id,
+        RuntimeError("worker A stopped"),
+        expected_fence=worker_a.fence,
+    )
+    worker_b = ledger.claim(request_id, "legacy_tool", (), {})
+    assert worker_b.fence == worker_a.fence + 1
+
+    with pytest.raises(LedgerError, match="requires the claim fence"):
+        ledger.complete(request_id, {"worker": "A"})
+    with pytest.raises(LedgerOutcomeAlreadySetError):
+        ledger.complete(
+            request_id,
+            {"worker": "A"},
+            expected_fence=worker_a.fence,
+        )
+    with pytest.raises(LedgerOutcomeAlreadySetError):
+        ledger.fail(
+            request_id,
+            RuntimeError("stale failure"),
+            expected_fence=worker_a.fence,
+        )
+
+    completed = ledger.complete(
+        request_id,
+        {"worker": "B"},
+        expected_fence=worker_b.fence,
+    )
+    assert completed.result == {"worker": "B"}
+
+
+def test_resumed_stale_worker_cannot_commit_after_takeover(
+    ledger: ActionLedger,
+) -> None:
+    """Worker A claims, its slot is reclaimed by worker B (fence bumps). A resumes
+    and cannot complete/commit its effect — rejected by fence, not by clock."""
+    request_id = "fence-takeover"
+    storage = ledger._storage
+
+    # Worker A wins the first claim (fence 1).
+    storage.try_claim_inflight(_make_entry(request_id), lease_ttl=30.0)
+    a_entry = storage.get(request_id)
+    assert a_entry is not None and a_entry.fence == 1
+    a_owner = a_entry.owner
+
+    # A's slot becomes reclaimable; worker B reclaims and bumps to fence 2.
+    ledger.fail(
+        request_id,
+        RuntimeError("A appeared dead"),
+        expected_fence=a_entry.fence,
+    )
+    b_owner = "worker-B"
+    storage.try_claim_inflight(_make_entry(request_id, owner=b_owner), lease_ttl=30.0)
+    b_entry = storage.get(request_id)
+    assert b_entry is not None and b_entry.fence == 2
+
+    # A resumes and tries to commit with its stale fence — refused.
+    with pytest.raises(LedgerOutcomeAlreadySetError):
+        ledger.complete(
+            request_id,
+            {"from": "A"},
+            _expected_owner=a_owner,
+            _expected_fence=1,
+        )
+
+    # B (current holder, fence 2) can commit.
+    ledger.complete(
+        request_id,
+        {"from": "B"},
+        _expected_owner=b_entry.owner,
+        _expected_fence=b_entry.fence,
+    )
+    final = ledger.get(request_id)
+    assert final is not None
+    assert final.terminal_outcome == TerminalOutcome.COMPLETED.value
+    assert final.result == {"from": "B"}
+
+
+def test_resumed_stale_worker_cannot_cross_provider_boundary(
+    ledger: ActionLedger,
+) -> None:
+    request_id = "fence-before-provider"
+    storage = ledger._storage
+    storage.try_claim_inflight(_make_entry(request_id), lease_ttl=30.0)
+    worker_a = storage.get(request_id)
+    assert worker_a is not None
+    ledger.fail(
+        request_id,
+        RuntimeError("A appeared dead"),
+        expected_fence=worker_a.fence,
+    )
+    storage.try_claim_inflight(_make_entry(request_id, owner="worker-B"), lease_ttl=30.0)
+
+    with pytest.raises(LedgerOutcomeAlreadySetError):
+        ledger.advance_boundary(
+            request_id,
+            SideEffectBoundary.MAYBE_CROSSED,
+            expected_owner=worker_a.owner,
+            expected_fence=worker_a.fence,
+        )
+
+    assert storage.get(request_id).side_effect_boundary == (SideEffectBoundary.NOT_CROSSED.value)
+
+
+def test_auto_renew_does_not_adopt_successor_fence() -> None:
+    from dataclasses import replace
+
+    from mycelium.action_ledger import _lease_auto_renew
+
+    storage = InMemoryLedgerStorage()
+    ledger = ActionLedger(
+        storage=storage,
+        lease_ttl=0.03,
+        lease_renew_interval=0.01,
+    )
+    worker_a = replace(
+        _make_entry("fence-auto-renew", owner="worker-A"),
+        fence=1,
+        lease_until=time.time() + 10,
+    )
+    storage.set(worker_a)
+    successor = replace(
+        worker_a,
+        owner="worker-B",
+        fence=2,
+        lease_until=time.time() + 20,
+        last_heartbeat_at=123.0,
+    )
+
+    with _lease_auto_renew(
+        ledger,
+        worker_a.request_id,
+        owner=worker_a.owner,
+        fence=worker_a.fence,
+    ):
+        storage.set(successor)
+        time.sleep(0.05)
+
+    assert storage.get(worker_a.request_id) == successor
+
+
+def test_poll_timeout_cannot_mark_successor_unknown() -> None:
+    from dataclasses import replace
+
+    storage = InMemoryLedgerStorage()
+
+    class TakeoverBeforeUnknownLedger(ActionLedger):
+        def mark_unknown(self, request_id: str, **kwargs: Any) -> LedgerEntry:
+            current = storage.get(request_id)
+            assert current is not None
+            storage.set(
+                replace(
+                    current,
+                    owner="worker-B",
+                    fence=current.fence + 1,
+                    lease_until=time.time() + 30,
+                )
+            )
+            return super().mark_unknown(request_id, **kwargs)
+
+    ledger = TakeoverBeforeUnknownLedger(storage=storage)
+    observed = replace(
+        _make_entry("fence-poll-timeout", owner="worker-A"),
+        fence=1,
+        lease_until=time.time() + 30,
+    )
+    storage.set(observed)
+
+    ledger._poll_side_effecting(
+        observed.request_id,
+        tool=observed.tool,
+        interval=0.01,
+        poll_deadline=time.time() - 1,
+    )
+
+    successor = storage.get(observed.request_id)
+    assert successor is not None
+    assert successor.owner == "worker-B"
+    assert successor.fence == 2
+    assert successor.terminal_outcome == TerminalOutcome.IN_FLIGHT.value
+
+
+def test_delayed_reconcile_cannot_complete_successor() -> None:
+    from dataclasses import replace
+
+    started = threading.Event()
+    finish = threading.Event()
+
+    class DelayedCompletedReconciler:
+        def reconcile(self, entry: LedgerEntry) -> ReconcileResult:
+            started.set()
+            assert finish.wait(timeout=2)
+            return ReconcileResult.completed({"provider": "worker-A"})
+
+    storage = InMemoryLedgerStorage()
+    ledger = ActionLedger(storage=storage, reconciler=DelayedCompletedReconciler())
+    observed = replace(
+        _make_entry(
+            "fence-delayed-reconcile",
+            terminal_outcome=TerminalOutcome.BLOCKED.value,
+            owner="worker-A",
+        ),
+        fence=1,
+        external_operation_ref="provider-A",
+    )
+    storage.set(observed)
+    results: list[LedgerEntry | None] = []
+
+    def reconcile() -> None:
+        results.append(
+            ledger._attempt_reconcile(
+                observed.request_id,
+                observed.tool,
+                (),
+                {},
+                observed,
+                _BINDING,
+            )
+        )
+
+    thread = threading.Thread(target=reconcile, daemon=True)
+    thread.start()
+    assert started.wait(timeout=2)
+    successor = replace(
+        observed,
+        status="in-flight",
+        terminal_outcome=TerminalOutcome.IN_FLIGHT.value,
+        owner="worker-B",
+        fence=2,
+        lease_until=time.time() + 30,
+        external_operation_ref=None,
+    )
+    storage.set(successor)
+    finish.set()
+    thread.join(timeout=2)
+
+    assert results == [successor]
+    assert storage.get(observed.request_id) == successor
+
+
+def test_matching_fence_allows_single_worker_flow(ledger: ActionLedger) -> None:
+    """The uncontended single-worker path completes normally under fencing."""
+    request_id = "fence-happy"
+    binding = _BINDING
+    kwargs = {"request_id": request_id, "thread_id": "t", "run_id": "r"}
+    with _scope():
+        claimed = ledger.claim_side_effecting(
+            request_id, "charge", (1,), dict(kwargs), binding, lease_ttl=30.0
+        )
+    ledger.record_decision(
+        request_id,
+        {"allowed": True, "verdicts": [], "denied_reasons": []},
+        expected_owner=claimed.owner,
+        expected_fence=claimed.fence,
+    )
+    ledger.complete(
+        request_id,
+        {"ok": True},
+        _expected_owner=claimed.owner,
+        _expected_fence=claimed.fence,
+    )
+    stored = ledger.get(request_id)
+    assert stored is not None
+    assert stored.terminal_outcome == TerminalOutcome.COMPLETED.value
+    assert stored.result == {"ok": True}
+
+
+def test_wrapper_single_worker_flow_unaffected_by_fence(ledger: ActionLedger) -> None:
+    """End-to-end @ledger flow through the wrapper is unchanged by fencing."""
+    from mycelium.action_ledger import ledger_sync
+
+    storage = ledger._storage
+    calls: list[int] = []
+
+    @ledger_sync(storage=storage, transition_binding=_BINDING)
+    def charge(amount: int) -> dict[str, Any]:
+        calls.append(amount)
+        return {"charged": amount}
+
+    with _scope():
+        result = charge(5, request_id="fence-wrapper")
+    assert result == {"charged": 5}
+    assert calls == [5]
+    stored = ledger.get("fence-wrapper")
+    assert stored is not None
+    assert stored.terminal_outcome == TerminalOutcome.COMPLETED.value
+    assert stored.fence == 1
