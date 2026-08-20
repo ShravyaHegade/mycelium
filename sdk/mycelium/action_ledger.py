@@ -4419,6 +4419,11 @@ def _run_ledgered(
         )
         if blocked is not None:
             raise blocked
+        from mycelium.decision import get_policy_blocked_error
+
+        policy_blocked = get_policy_blocked_error()
+        if policy_blocked is not None:
+            raise policy_blocked
         _raise_denied_decision(request_id, decision)
 
         ledger._emit_outcome(
@@ -4778,6 +4783,11 @@ async def _run_ledgered_async(
         )
         if blocked is not None:
             raise blocked
+        from mycelium.decision import get_policy_blocked_error
+
+        policy_blocked = get_policy_blocked_error()
+        if policy_blocked is not None:
+            raise policy_blocked
         _raise_denied_decision(request_id, decision)
 
         ledger._emit_outcome(

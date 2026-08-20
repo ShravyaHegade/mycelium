@@ -208,6 +208,72 @@ def test_decision_recorded_on_successful_boundary_advance(ledger: ActionLedger) 
     assert set(decision.predicate_results) >= {"authority_window", "use_time_currency"}
 
 
+def test_config_policies_compose_into_the_atomic_ledger_decision() -> None:
+    """Independent catalog guards cannot reject before the fenced CAS."""
+    from mycelium import SecretInArgsError, get_ledger, load_config_from_string
+
+    config = load_config_from_string(
+        """
+action_ledger:
+  storage: memory
+  tools: [send_email]
+secret_args:
+  enabled: true
+  policy: error
+entity_guard:
+  enabled: true
+  missing_policy: error
+  tools:
+    send_email:
+      destinations:
+        - path: recipient
+          type: email
+          allow:
+            domains: [customer.com]
+tools:
+  send_email:
+    side_effect_class: non_idempotent_mutate
+"""
+    )
+    body_ran: list[bool] = []
+
+    def send_email(recipient: str, api_key: str) -> None:
+        del recipient, api_key
+        body_ran.append(True)
+
+    wrapped = config.apply_tool("send_email", send_email)
+    assert getattr(wrapped, "_mycelium_atomic_decision_policy", False) is True
+    assert getattr(wrapped, "_mycelium_entity_guard", False) is False
+    assert getattr(wrapped, "_mycelium_secret_args", False) is False
+
+    with pytest.raises(SecretInArgsError):
+        wrapped(
+            recipient="attacker@example.net",
+            api_key="ghp_abcdefghijklmnopqrstuvwxyz123456",
+            request_id="atomic-policy-denial",
+        )
+
+    ledger_instance = get_ledger(wrapped)
+    assert ledger_instance is not None
+    stored = ledger_instance.get("atomic-policy-denial")
+    assert stored is not None
+    # The decision CAS advanced to ATTEMPTING; compatibility error handling
+    # subsequently closes the denied attempt as ABORTED.
+    assert stored.effect_phase == "ABORTED"
+    assert body_ran == []
+    decision = Decision.from_dict(stored.decision)
+    assert decision.allowed is False
+    assert decision.predicate_results == {
+        "destination_policy": False,
+        "destructive_confirm": True,
+        "secret_protection": False,
+        "authority_window": True,
+        "use_time_currency": True,
+    }
+    # The CAS record stores predicate outcomes, never the original credential.
+    assert "ghp_abcdefghijklmnopqrstuvwxyz123456" not in str(stored.to_dict())
+
+
 def test_plugin_predicate_evaluated_and_recorded_end_to_end(
     ledger: ActionLedger,
 ) -> None:

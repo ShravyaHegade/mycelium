@@ -63,6 +63,7 @@ from mycelium.completion_contract import (
     registered_terminal_adapters,
     set_active_completion_contract,
 )
+from mycelium.decision import DecisionPolicyBundle, apply_decision_policy
 from mycelium.destructive_confirm import (
     MISSING_POLICIES as DESTRUCTIVE_MISSING_POLICIES,
 )
@@ -173,6 +174,7 @@ from mycelium.tool_boundary import bounded, bounded_sync
 from mycelium.tool_registry import ToolRegistry
 from mycelium.tool_runner import ToolRunner
 from mycelium.transition import (
+    CONSEQUENTIAL_SIDE_EFFECT_CLASSES,
     REQUEST_IDENTITY_POLICIES,
     REQUEST_IDENTITY_POLICY_DERIVED,
     REQUEST_IDENTITY_POLICY_REQUIRE_EXPLICIT,
@@ -716,6 +718,13 @@ class MyceliumConfig:
         if tool_config.secret_fields:
             setattr(func, "_mycelium_secret_fields", tool_config.secret_fields)
         is_async = inspect.iscoroutinefunction(func)
+        atomic_policy_kwargs: dict[str, Any] = {}
+        uses_atomic_decision_policy = tool_config.ledger is not None
+        consequential = (
+            tool_config.side_effect_class in CONSEQUENTIAL_SIDE_EFFECT_CLASSES
+            if tool_config.side_effect_class is not None
+            else False
+        )
 
         # Apply protect first so it sits inside bounded.
         if tool_config.protect is not None:
@@ -822,12 +831,16 @@ class MyceliumConfig:
                     f"use_time_currency.missing_policy is {policy.missing_policy!r}; "
                     "production requires 'error'"
                 )
-            func = apply_use_time_currency(
-                func,
-                use_time_currency_policy_for_tool(policy, name),
-                tool_name=name,
-                outcome_emitter=self.build_outcome_emitter(),
-            )
+            tool_policy = use_time_currency_policy_for_tool(policy, name)
+            if uses_atomic_decision_policy:
+                atomic_policy_kwargs["use_time_policy"] = tool_policy
+            else:
+                func = apply_use_time_currency(
+                    func,
+                    tool_policy,
+                    tool_name=name,
+                    outcome_emitter=self.build_outcome_emitter(),
+                )
 
         # Destructive confirm outside claim: ungranted objects never execute.
         if applies_destructive:
@@ -843,13 +856,18 @@ class MyceliumConfig:
                     "production requires 'error'"
                 )
             store = self.build_destructive_grant_store()
-            func = apply_destructive_confirm(
-                func,
-                destructive_confirm_policy_for_tool(policy, name),
-                tool_name=name,
-                store=store,
-                outcome_emitter=self.build_outcome_emitter(),
-            )
+            tool_policy = destructive_confirm_policy_for_tool(policy, name)
+            if uses_atomic_decision_policy:
+                atomic_policy_kwargs["destructive_policy"] = tool_policy
+                atomic_policy_kwargs["destructive_store"] = store
+            else:
+                func = apply_destructive_confirm(
+                    func,
+                    tool_policy,
+                    tool_name=name,
+                    store=store,
+                    outcome_emitter=self.build_outcome_emitter(),
+                )
 
         # Destination policy outside claim: unauthorized recipients never execute.
         if applies_entity:
@@ -872,22 +890,19 @@ class MyceliumConfig:
                     f"entity_guard.missing_policy is {policy.missing_policy!r}; "
                     "production requires 'error'"
                 )
-            func = apply_entity_guard(
-                func,
-                entity_guard_policy_for_tool(policy, name),
-                tool_name=name,
-            )
+            tool_policy = entity_guard_policy_for_tool(policy, name)
+            if uses_atomic_decision_policy:
+                atomic_policy_kwargs["entity_policy"] = tool_policy
+            else:
+                func = apply_entity_guard(
+                    func,
+                    tool_policy,
+                    tool_name=name,
+                )
 
         # Secret-in-args outside every other guard: scan before claim/fingerprint.
         if applies_secret:
-            from mycelium.transition import CONSEQUENTIAL_SIDE_EFFECT_CLASSES
-
             policy = secret_args_policy_from_mapping(self.secret_args or {})
-            consequential = (
-                tool_config.side_effect_class in CONSEQUENTIAL_SIDE_EFFECT_CLASSES
-                if tool_config.side_effect_class is not None
-                else False
-            )
             if (
                 self.profile == PROFILE_PRODUCTION
                 and consequential
@@ -898,12 +913,24 @@ class MyceliumConfig:
                     f"is {policy.policy!r}; consequential tool {name!r} requires "
                     "'error'"
                 )
-            func = apply_secret_args(
+            if uses_atomic_decision_policy:
+                atomic_policy_kwargs["secret_policy"] = policy
+                atomic_policy_kwargs["secret_fields"] = tool_config.secret_fields
+                atomic_policy_kwargs["consequential"] = consequential
+            else:
+                func = apply_secret_args(
+                    func,
+                    policy,
+                    tool_name=name,
+                    secret_fields=tool_config.secret_fields,
+                    consequential=consequential,
+                )
+
+        if atomic_policy_kwargs:
+            func = apply_decision_policy(
                 func,
-                policy,
+                DecisionPolicyBundle(**atomic_policy_kwargs),
                 tool_name=name,
-                secret_fields=tool_config.secret_fields,
-                consequential=consequential,
             )
 
         # LangGraph outermost so it can inject scope/dispatch before inner guards.
