@@ -5,6 +5,12 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
 
 ## Unreleased
 
+- Budget accounting now warns when `record_usage(steps=...)` is combined with
+  the step meter that `check()` and `@budget_guard` enable by default, preventing
+  silent double metering. `get_state()` now matches `remaining_budget()` by
+  resolving the active execution scope when no key is passed, and the runway
+  contract explicitly distinguishes a missing scope from a hard-blocked run.
+
 - Deterministic simulation proof (effect-commit Change 4). New
   `mycelium.verify.invariants` module (`InvariantViolation`,
   `committed_effect_ids`, `check_at_most_one_committed`,

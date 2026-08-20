@@ -1219,11 +1219,19 @@ without token metadata.
 Custom providers only: `wrap_llm_callable` / `instrument_llm` /
 `register_llm_budget_adapter` / manual `check("llm")` + `record_usage()`.
 Official LangGraph/LangChain integrations do not need those calls.
+`check()` and `@budget_guard` reserve one step automatically. Use
+`record_usage()` for observed token/USD usage without passing `steps`; combining
+the default check/decorator behavior with `record_usage(steps=...)` double-meters
+the run and emits a warning. A fully manual host that owns step accounting may
+use `check(..., increment_steps=False)` before reporting steps explicitly.
 Soft warn (`warn_at`) → `warnings.warn` once per dimension; the step **still
 runs**. Hard → `LedgerHardBlockError` only at the declared ceiling (never kill
 mid-flight). Operator: `mycelium budget status|release` (`clear` /
 `allow-once` / `abort-run`). Status exposes deterministic `remaining_budget`
-(pitch word: runway).
+(pitch word: runway). `get_state()` and `remaining_budget()` both resolve the
+active execution scope when called without a key. Outside that scope, pass the
+run key explicitly; `remaining_budget() is None` means no scope was resolvable,
+not that the run was hard-blocked.
 
 ```bash
 mycelium loops status --stuck --config mycelium.yaml
