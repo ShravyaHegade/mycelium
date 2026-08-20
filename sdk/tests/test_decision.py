@@ -274,6 +274,143 @@ tools:
     assert "ghp_abcdefghijklmnopqrstuvwxyz123456" not in str(stored.to_dict())
 
 
+def test_rejected_secret_is_redacted_before_plugin_evaluation() -> None:
+    from mycelium import SecretInArgsError, load_config_from_string
+
+    secret = "ghp_abcdefghijklmnopqrstuvwxyz123456"
+    seen: list[DecisionIntent] = []
+    register_decision_predicate("observe", lambda intent, snapshot: seen.append(intent) or True)
+    config = load_config_from_string(
+        """
+action_ledger:
+  storage: memory
+  tools: [send]
+secret_args:
+  enabled: true
+  policy: error
+tools:
+  send:
+    side_effect_class: non_idempotent_mutate
+"""
+    )
+
+    def send(api_key: str) -> None:
+        raise AssertionError("body must not run")
+
+    wrapped = config.apply_tool("send", send)
+    with pytest.raises(SecretInArgsError):
+        wrapped(api_key=secret, request_id="plugin-secret-input")
+
+    assert len(seen) == 1
+    assert secret not in repr(seen[0])
+    assert seen[0].kwargs["api_key"] == "[REDACTED]"
+
+
+def test_plugin_reason_is_sanitized_before_decision_persistence(
+    ledger: ActionLedger,
+) -> None:
+    from mycelium.action_ledger import ledger_sync
+
+    secret = "ghp_abcdefghijklmnopqrstuvwxyz123456"
+    register_decision_predicate(
+        "unsafe_plugin",
+        lambda intent, snapshot: PredicateVerdict(
+            "unsafe_plugin", False, f"credential={secret}"
+        ),
+    )
+
+    @ledger_sync(storage=ledger._storage, transition_binding=_BINDING)
+    def charge() -> None:
+        raise AssertionError("body must not run")
+
+    with _scope(), pytest.raises(LedgerHardBlockError):
+        charge(request_id="plugin-secret-reason")
+
+    stored = ledger.get("plugin-secret-reason")
+    assert stored is not None
+    assert secret not in str(stored.to_dict())
+    assert "[REDACTED]" in str(stored.decision)
+
+
+def test_destructive_grant_expiry_is_decided_at_final_boundary(
+    ledger: ActionLedger,
+) -> None:
+    from mycelium import DecisionPolicyBundle, apply_decision_policy, get_ledger
+    from mycelium.action_ledger import ledger_sync
+    from mycelium.destructive_confirm import (
+        DestructiveConfirmPolicy,
+        DestructiveGrantError,
+        DestructiveGrantSpec,
+        DestructiveObjectSpec,
+        DestructiveToolPolicy,
+        InMemoryDestructiveGrantStore,
+        issue_destructive_grant,
+        reset_destructive_clock,
+        set_destructive_clock,
+    )
+    from mycelium.transition import execution_scope
+
+    now = {"value": 100.0}
+    clock_token = set_destructive_clock(lambda: now["value"])
+    store = InMemoryDestructiveGrantStore()
+    policy = DestructiveConfirmPolicy(
+        policy_version="test",
+        tools={
+            "refund": DestructiveToolPolicy(
+                operation="refund",
+                object=DestructiveObjectSpec(object_type="payment", id_from="payment_id"),
+                grant=DestructiveGrantSpec(bind_request_id=True),
+            )
+        },
+    )
+    grant = issue_destructive_grant(
+        operation="refund",
+        object_type="payment",
+        object_id="pay_1",
+        request_id="expires-at-boundary",
+        expires_in=5,
+        policy_version="test",
+        store=store,
+        bind_request_id=True,
+    )
+    body_ran: list[bool] = []
+
+    @ledger_sync(storage=ledger._storage, transition_binding=_BINDING)
+    def refund(payment_id: str) -> None:
+        body_ran.append(True)
+
+    wrapped = apply_decision_policy(
+        refund,
+        DecisionPolicyBundle(destructive_policy=policy, destructive_store=store),
+        tool_name="refund",
+    )
+    wrapped_ledger = get_ledger(refund)
+    assert wrapped_ledger is not None
+    original_derive = wrapped_ledger.derive_request_id
+
+    def expire_before_claim(*args: Any, **kwargs: Any) -> str:
+        now["value"] = 106.0
+        return original_derive(*args, **kwargs)
+
+    wrapped_ledger.derive_request_id = expire_before_claim  # type: ignore[method-assign]
+    try:
+        scope = TransitionScope(
+            thread_id="t", run_id="r", destructive_grants=(grant,)
+        )
+        with execution_scope(scope), pytest.raises(DestructiveGrantError) as caught:
+            wrapped(payment_id="pay_1", request_id="expires-at-boundary")
+    finally:
+        wrapped_ledger.derive_request_id = original_derive  # type: ignore[method-assign]
+        reset_destructive_clock(clock_token)
+
+    assert caught.value.reason == "expired"
+    assert body_ran == []
+    stored = ledger.get("expires-at-boundary")
+    assert stored is not None
+    decision = Decision.from_dict(stored.decision)
+    assert decision.predicate_results["destructive_confirm"] is False
+
+
 def test_plugin_predicate_evaluated_and_recorded_end_to_end(
     ledger: ActionLedger,
 ) -> None:

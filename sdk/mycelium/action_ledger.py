@@ -3597,6 +3597,9 @@ class ActionLedger:
             parsed = Decision.from_dict(decision)
         except (KeyError, TypeError, ValueError) as exc:
             raise LedgerError(f"Invalid decision for request {request_id!r}: {exc}") from exc
+        from mycelium.secret_protection import sanitize_for_evidence
+
+        parsed = Decision.from_dict(sanitize_for_evidence(parsed.to_dict()))
         entry = replace(
             existing,
             decision=parsed.to_dict(),
@@ -4115,7 +4118,13 @@ def _record_boundary_decision(
     result is written under the same fenced CAS as every in-flight mutation, so
     a superseded worker cannot record — or act on — a stale decision.
     """
-    from mycelium.decision import DecisionIntent, build_snapshot, get_decision_engine
+    from mycelium.decision import (
+        Decision,
+        DecisionIntent,
+        build_snapshot,
+        get_decision_engine,
+    )
+    from mycelium.secret_protection import sanitize_for_evidence
 
     intent = DecisionIntent(
         tool=tool,
@@ -4130,6 +4139,7 @@ def _record_boundary_decision(
         currency_decision=currency_decision,
     )
     decision = get_decision_engine().evaluate(intent, snapshot)
+    decision = Decision.from_dict(sanitize_for_evidence(decision.to_dict()))
     try:
         ledger.record_decision(
             request_id,

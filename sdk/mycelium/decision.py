@@ -89,11 +89,24 @@ class DecisionPolicyBundle:
     use_time_policy: Any = None
 
 
+@dataclass(frozen=True)
+class _PendingDestructiveCheck:
+    func: Any
+    tool: str
+    args: tuple[Any, ...]
+    kwargs: Mapping[str, Any]
+    policy: Any
+    store: Any
+
+
 _policy_facts_var: ContextVar[tuple[PolicyFact, ...]] = ContextVar(
     "mycelium_atomic_policy_facts", default=()
 )
 _policy_blocked_var: ContextVar[Exception | None] = ContextVar(
     "mycelium_atomic_policy_blocked", default=None
+)
+_pending_destructive_var: ContextVar[_PendingDestructiveCheck | None] = ContextVar(
+    "mycelium_atomic_pending_destructive", default=None
 )
 
 
@@ -338,10 +351,44 @@ def build_snapshot(
     from mycelium.authority_window import _pending_var as _authority_pending
     from mycelium.use_time_currency import _pending_var as _use_time_pending
 
+    policy_facts = list(_policy_facts_var.get())
+    pending_destructive = _pending_destructive_var.get()
+    if pending_destructive is not None:
+        from mycelium.destructive_confirm import (
+            DestructiveGrantError,
+            enforce_destructive_confirm,
+        )
+
+        try:
+            _, _, destructive_decision = enforce_destructive_confirm(
+                pending_destructive.tool,
+                pending_destructive.args,
+                dict(pending_destructive.kwargs),
+                policy=pending_destructive.policy,
+                func=pending_destructive.func,
+                store=pending_destructive.store,
+            )
+            policy_facts.append(
+                _fact(
+                    PREDICATE_DESTRUCTIVE_CONFIRM,
+                    allowed=destructive_decision.decision in {"allow", "allowed"},
+                    reason=destructive_decision.reason,
+                )
+            )
+        except DestructiveGrantError as exc:
+            _policy_blocked_var.set(exc)
+            policy_facts.append(
+                _fact(
+                    PREDICATE_DESTRUCTIVE_CONFIRM,
+                    allowed=False,
+                    reason=exc.reason,
+                )
+            )
+
     return DecisionSnapshot(
         authority_facts=tuple(_authority_pending.get()),
         use_time_facts=tuple(_use_time_pending.get()),
-        policy_facts=tuple(_policy_facts_var.get()),
+        policy_facts=tuple(policy_facts),
         extra={
             "authority_decision": authority_decision,
             "currency_decision": currency_decision,
@@ -449,8 +496,6 @@ def _prepare_policy_call(
     """Capture policy facts without making an execution decision."""
     from mycelium.authority_window import _pending_var as authority_pending
     from mycelium.destructive_confirm import (
-        DestructiveGrantError,
-        enforce_destructive_confirm,
         reset_active_destructive_policy,
         reset_destructive_grant_store,
         set_active_destructive_policy,
@@ -473,6 +518,7 @@ def _prepare_policy_call(
         SecretInArgsError,
         enforce_secret_args,
         reset_active_secret_policy,
+        sanitize_secrets,
         set_active_secret_policy,
     )
     from mycelium.use_time_currency import (
@@ -490,6 +536,7 @@ def _prepare_policy_call(
     cleanup.append((currency_pending, currency_pending.set(())))
     cleanup.append((entity_decision, entity_decision.set(None)))
     cleanup.append((destructive_decision, destructive_decision.set(None)))
+    cleanup.append((_pending_destructive_var, _pending_destructive_var.set(None)))
     if bundle.secret_policy is not None:
         cleanup.append(
             (reset_active_secret_policy, set_active_secret_policy(bundle.secret_policy))
@@ -537,6 +584,13 @@ def _prepare_policy_call(
             facts.append(_fact(PREDICATE_SECRET_PROTECTION, allowed=True))
         except SecretInArgsError as exc:
             blocked = blocked or exc
+            call_args, call_kwargs = sanitize_secrets(
+                (call_args, call_kwargs),
+                entropy_detection=bundle.secret_policy.entropy_detection,
+                allow_fields=bundle.secret_policy.allow_fields,
+            )
+            call_args = tuple(call_args)
+            call_kwargs = dict(call_kwargs)
             reason = ",".join(exc.kinds) if exc.kinds else "raw secret material"
             facts.append(
                 _fact(PREDICATE_SECRET_PROTECTION, allowed=False, reason=reason)
@@ -593,31 +647,16 @@ def _prepare_policy_call(
                 )
             )
         else:
-            try:
-                call_args, call_kwargs, decision = enforce_destructive_confirm(
-                    name,
-                    call_args,
-                    call_kwargs,
-                    policy=bundle.destructive_policy,
+            _pending_destructive_var.set(
+                _PendingDestructiveCheck(
                     func=func,
+                    tool=name,
+                    args=call_args,
+                    kwargs=dict(call_kwargs),
+                    policy=bundle.destructive_policy,
                     store=bundle.destructive_store,
                 )
-                facts.append(
-                    _fact(
-                        PREDICATE_DESTRUCTIVE_CONFIRM,
-                        allowed=decision.decision in {"allow", "allowed"},
-                        reason=decision.reason,
-                    )
-                )
-            except DestructiveGrantError as exc:
-                blocked = exc
-                facts.append(
-                    _fact(
-                        PREDICATE_DESTRUCTIVE_CONFIRM,
-                        allowed=False,
-                        reason=exc.reason,
-                    )
-                )
+            )
     return call_args, call_kwargs, facts, blocked, cleanup
 
 
