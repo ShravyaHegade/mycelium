@@ -714,8 +714,17 @@ class BudgetGuard:
     def ceilings(self) -> BudgetCeilings:
         return self._ceilings
 
-    def get_state(self, scope_key: str) -> BudgetRunState | None:
-        return self._storage.get(scope_key)
+    def get_state(
+        self,
+        scope_key: str | None = None,
+        *,
+        kwargs: dict[str, Any] | None = None,
+    ) -> BudgetRunState | None:
+        """Return state for an explicit or currently active execution scope."""
+        key = scope_key or resolve_loop_scope_key(kwargs=kwargs)
+        if key is None:
+            return None
+        return self._storage.get(key)
 
     def remaining_budget(
         self,
@@ -723,6 +732,13 @@ class BudgetGuard:
         *,
         kwargs: dict[str, Any] | None = None,
     ) -> RemainingBudget | None:
+        """Return runway for an explicit or currently active execution scope.
+
+        A hard-blocked run still has a deterministic snapshot (normally zero
+        in the blocked dimension). ``None`` means no scope key could be
+        resolved, not that the run is blocked. Pass ``scope_key`` when querying
+        after leaving ``execution_scope``.
+        """
         key = scope_key or resolve_loop_scope_key(kwargs=kwargs)
         if key is None:
             return None
@@ -874,8 +890,10 @@ class BudgetGuard:
         """Atomically add host-reported usage and gate for the next step.
 
         Prefer ``check()`` to reserve steps before work; use ``record_usage``
-        after the host observes token/USD spend. ``steps`` defaults to 0 so
-        double-counting with ``check(increment_steps=True)`` is avoided.
+        after the host observes token/USD spend. ``check()`` and the budget
+        decorators auto-meter one step by default. Passing ``steps`` here is
+        supported for fully manual integrations, but warns because combining
+        it with the default check/decorator behavior double-counts steps.
         """
         global _SCOPE_MISSING_WARNED
 
@@ -900,6 +918,15 @@ class BudgetGuard:
         add_steps = int(steps)
         if add_in < 0 or add_out < 0 or add_usd < 0 or add_steps < 0:
             raise ValueError("usage deltas must be non-negative")
+        if add_steps:
+            warnings.warn(
+                "BudgetGuard.record_usage(steps=...) adds host-reported steps, "
+                "but check() and @budget_guard auto-meter one step by default. "
+                "Use steps=0, or use check(increment_steps=False) in a fully "
+                "manual integration, to avoid double metering.",
+                UserWarning,
+                stacklevel=2,
+            )
 
         outcome: dict[str, Any] = {"exc": None, "state": None}
 

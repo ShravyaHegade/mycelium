@@ -147,6 +147,39 @@ def test_llm_check_and_record_usage_usd() -> None:
             guard.check(KIND_LLM)
 
 
+def test_record_usage_steps_warns_about_double_metering() -> None:
+    guard = BudgetGuard(InMemoryBudgetGuardStorage(), max_steps=10, warn_at=1.0)
+    with execution_scope(_scope("double-meter")):
+        guard.check(KIND_TOOL)
+        with pytest.warns(UserWarning, match="auto-meter one step"):
+            state = guard.record_usage(steps=1)
+    assert state.steps == 2
+
+
+def test_state_queries_resolve_scope_and_preserve_blocked_runway() -> None:
+    guard = BudgetGuard(InMemoryBudgetGuardStorage(), max_steps=1, warn_at=1.0)
+    with execution_scope(_scope("query-blocked")):
+        guard.check(KIND_TOOL)
+        with pytest.raises(LedgerHardBlockError):
+            guard.check(KIND_TOOL)
+
+        state = guard.get_state()
+        remaining = guard.remaining_budget()
+        assert state is not None
+        assert state.hard_blocked
+        assert remaining is not None
+        assert remaining.steps == 0
+
+    assert guard.get_state() is None
+    assert guard.remaining_budget() is None
+    explicit_state = guard.get_state("query-blocked")
+    assert explicit_state is not None
+    assert explicit_state.to_dict() == state.to_dict()
+    explicit_remaining = guard.remaining_budget("query-blocked")
+    assert explicit_remaining is not None
+    assert explicit_remaining.steps == 0
+
+
 def test_missing_meter_fail_closed() -> None:
     guard = BudgetGuard(
         InMemoryBudgetGuardStorage(),
