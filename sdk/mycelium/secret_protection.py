@@ -669,6 +669,15 @@ def sanitize_for_evidence(value: Any) -> Any:
     )
 
 
+def sanitize_for_decision_evidence(value: Any) -> Any:
+    return sanitize_secrets(
+        value,
+        hmac_key=_hmac_key,
+        entropy_detection=True,
+        allow_fields=frozenset(),
+    )
+
+
 def sanitize_exception(exc: BaseException) -> BaseException:
     """Preserve exception type; expose only a sanitized message."""
     original = str(exc)
@@ -973,6 +982,7 @@ __all__ = [
     "resolve_declared_secret_fields",
     "resolve_secret_reference",
     "sanitize_exception",
+    "sanitize_for_decision_evidence",
     "sanitize_for_evidence",
     "sanitize_secrets",
     "sanitize_text",

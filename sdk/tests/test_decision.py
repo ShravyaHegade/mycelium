@@ -321,6 +321,7 @@ action_ledger:
 secret_args:
   enabled: true
   policy: warn
+  allow_fields: [api_key]
 tools:
   send:
     side_effect_class: non_idempotent_mutate
@@ -331,13 +332,154 @@ tools:
         body_values.append(api_key)
 
     wrapped = config.apply_tool("send", send)
-    with pytest.warns(UserWarning, match="raw secret material"):
-        wrapped(api_key=secret, request_id="plugin-secret-warn")
+    wrapped(api_key=secret, request_id="plugin-secret-warn")
 
     assert body_values == [secret]
     assert len(seen) == 1
     assert secret not in repr(seen[0])
     assert seen[0].kwargs["api_key"] == "[REDACTED]"
+
+
+def test_allowed_reason_field_cannot_bypass_decision_sanitization() -> None:
+    from mycelium import get_ledger, load_config_from_string
+
+    secret = "ghp_abcdefghijklmnopqrstuvwxyz123456"
+    register_decision_predicate(
+        "unsafe_plugin",
+        lambda intent, snapshot: PredicateVerdict(
+            "unsafe_plugin", False, f"credential={secret}"
+        ),
+    )
+    config = load_config_from_string(
+        """
+action_ledger:
+  storage: memory
+  tools: [charge]
+secret_args:
+  enabled: true
+  policy: warn
+  allow_fields: [reason]
+tools:
+  charge:
+    side_effect_class: non_idempotent_mutate
+"""
+    )
+
+    def charge() -> None:
+        raise AssertionError("body must not run")
+
+    wrapped = config.apply_tool("charge", charge)
+    with pytest.raises(LedgerHardBlockError):
+        wrapped(request_id="allowed-reason-secret")
+
+    ledger_instance = get_ledger(wrapped)
+    assert ledger_instance is not None
+    stored = ledger_instance.get("allowed-reason-secret")
+    assert stored is not None
+    assert secret not in str(stored.to_dict())
+    assert "[REDACTED]" in str(stored.decision)
+
+
+def test_atomic_policy_events_emit_only_after_successful_decision_cas(
+    ledger: ActionLedger,
+) -> None:
+    from mycelium import DecisionPolicyBundle, apply_decision_policy, get_ledger
+    from mycelium.action_ledger import ledger_sync
+    from mycelium.destructive_confirm import DestructiveConfirmPolicy
+    from mycelium.use_time_currency import (
+        UseTimeCurrencyPolicy,
+        UseTimeFactSpec,
+        UseTimeToolPolicy,
+        ValidatorResult,
+        register_use_time_validator,
+    )
+
+    calls: list[dict[str, Any]] = []
+    wrapped_ledger: ActionLedger | None = None
+
+    class Emitter:
+        def emit_event(self, **kwargs: Any) -> None:
+            assert wrapped_ledger is not None
+            stored = wrapped_ledger.get(kwargs["request_id"])
+            assert stored is not None and stored.decision is not None
+            calls.append(kwargs)
+
+    register_use_time_validator(
+        "current", lambda **kwargs: ValidatorResult(current=True, value=True)
+    )
+    currency = UseTimeCurrencyPolicy(
+        policy_version="test",
+        tools={
+            "refund": UseTimeToolPolicy(
+                facts=(
+                    UseTimeFactSpec(
+                        name="payment.refundable",
+                        subject_type="payment",
+                        id_from="payment_id",
+                        validator="current",
+                        require={"value": True},
+                    ),
+                )
+            )
+        },
+    )
+
+    @ledger_sync(storage=ledger._storage, transition_binding=_BINDING)
+    def refund(payment_id: str) -> str:
+        return payment_id
+
+    wrapped_ledger = get_ledger(refund)
+    wrapped = apply_decision_policy(
+        refund,
+        DecisionPolicyBundle(
+            destructive_policy=DestructiveConfirmPolicy(policy_version="test"),
+            use_time_policy=currency,
+            outcome_emitter=Emitter(),
+        ),
+        tool_name="refund",
+    )
+    with _scope():
+        assert wrapped(payment_id="pay_1", request_id="policy-events") == "pay_1"
+
+    assert [(item["event"], item["gate"]) for item in calls] == [
+        ("destructive_confirm", "allowed"),
+        ("use_time_currency", "allowed"),
+    ]
+
+
+def test_stale_decision_cas_emits_no_atomic_policy_event() -> None:
+    from mycelium import DecisionPolicyBundle, apply_decision_policy
+    from mycelium.action_ledger import ledger_sync
+    from mycelium.destructive_confirm import DestructiveConfirmPolicy
+
+    calls: list[dict[str, Any]] = []
+
+    class RejectDecisionStorage(InMemoryLedgerStorage):
+        def try_transition(self, entry: LedgerEntry, **kwargs: Any) -> bool:
+            if kwargs.get("expected_effect_phase") == "INTENDED":
+                return False
+            return super().try_transition(entry, **kwargs)
+
+    class Emitter:
+        def emit_event(self, **kwargs: Any) -> None:
+            calls.append(kwargs)
+
+    @ledger_sync(storage=RejectDecisionStorage(), transition_binding=_BINDING)
+    def refund() -> None:
+        raise AssertionError("body must not run")
+
+    wrapped = apply_decision_policy(
+        refund,
+        DecisionPolicyBundle(
+            destructive_policy=DestructiveConfirmPolicy(policy_version="test"),
+            outcome_emitter=Emitter(),
+        ),
+        tool_name="refund",
+    )
+    with _scope(), pytest.raises(LedgerOutcomeAlreadySetError):
+        wrapped(request_id="stale-policy-event")
+
+    assert calls == []
 
 
 def test_plugin_reason_is_sanitized_before_decision_persistence(

@@ -927,6 +927,8 @@ class MyceliumConfig:
                 )
 
         if atomic_policy_kwargs:
+            if applies_destructive or applies_use_time:
+                atomic_policy_kwargs["outcome_emitter"] = self.build_outcome_emitter()
             func = apply_decision_policy(
                 func,
                 DecisionPolicyBundle(**atomic_policy_kwargs),

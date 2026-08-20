@@ -3597,9 +3597,9 @@ class ActionLedger:
             parsed = Decision.from_dict(decision)
         except (KeyError, TypeError, ValueError) as exc:
             raise LedgerError(f"Invalid decision for request {request_id!r}: {exc}") from exc
-        from mycelium.secret_protection import sanitize_for_evidence
+        from mycelium.secret_protection import sanitize_for_decision_evidence
 
-        parsed = Decision.from_dict(sanitize_for_evidence(parsed.to_dict()))
+        parsed = Decision.from_dict(sanitize_for_decision_evidence(parsed.to_dict()))
         entry = replace(
             existing,
             decision=parsed.to_dict(),
@@ -4122,10 +4122,11 @@ def _record_boundary_decision(
         Decision,
         DecisionIntent,
         build_snapshot,
+        emit_policy_outcomes_after_decision,
         get_decision_evidence,
         get_decision_engine,
     )
-    from mycelium.secret_protection import sanitize_for_evidence
+    from mycelium.secret_protection import sanitize_for_decision_evidence
 
     evidence_args, evidence_kwargs = get_decision_evidence(tuple(args), kwargs)
     intent = DecisionIntent(
@@ -4141,7 +4142,7 @@ def _record_boundary_decision(
         currency_decision=currency_decision,
     )
     decision = get_decision_engine().evaluate(intent, snapshot)
-    decision = Decision.from_dict(sanitize_for_evidence(decision.to_dict()))
+    decision = Decision.from_dict(sanitize_for_decision_evidence(decision.to_dict()))
     try:
         ledger.record_decision(
             request_id,
@@ -4156,6 +4157,7 @@ def _record_boundary_decision(
             request_id,
         )
         raise
+    emit_policy_outcomes_after_decision(tool, request_id)
     return decision
 
 
