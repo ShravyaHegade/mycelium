@@ -4123,8 +4123,8 @@ def _record_boundary_decision(
         DecisionIntent,
         build_snapshot,
         emit_policy_outcomes_after_decision,
-        get_decision_evidence,
         get_decision_engine,
+        get_decision_evidence,
     )
     from mycelium.secret_protection import sanitize_for_decision_evidence
 
@@ -4317,12 +4317,14 @@ def _run_ledgered(
             AuthorityExpiredError,
             get_authority_decisions,
         )
+        from mycelium.decision import finalize_policy_facts_at_boundary
         from mycelium.use_time_currency import (
             UseTimeCurrencyError,
             enforce_use_boundary,
             get_use_time_decisions,
         )
 
+        finalize_policy_facts_at_boundary()
         blocked: AuthorityExpiredError | UseTimeCurrencyError | None = None
         authority_offset = len(get_authority_decisions())
         currency_offset = len(get_use_time_decisions())
@@ -4681,12 +4683,14 @@ async def _run_ledgered_async(
             AuthorityExpiredError,
             get_authority_decisions,
         )
+        from mycelium.decision import finalize_policy_facts_at_boundary
         from mycelium.use_time_currency import (
             UseTimeCurrencyError,
             enforce_use_boundary_async,
             get_use_time_decisions,
         )
 
+        finalize_policy_facts_at_boundary()
         blocked: AuthorityExpiredError | UseTimeCurrencyError | None = None
         authority_offset = len(get_authority_decisions())
         currency_offset = len(get_use_time_decisions())

@@ -46,6 +46,7 @@ __all__ = [
     "build_snapshot",
     "apply_decision_policy",
     "emit_policy_outcomes_after_decision",
+    "finalize_policy_facts_at_boundary",
     "get_decision_evidence",
     "get_policy_blocked_error",
     "get_decision_engine",
@@ -360,44 +361,10 @@ def build_snapshot(
     from mycelium.authority_window import _pending_var as _authority_pending
     from mycelium.use_time_currency import _pending_var as _use_time_pending
 
-    policy_facts = list(_policy_facts_var.get())
-    pending_destructive = _pending_destructive_var.get()
-    if pending_destructive is not None:
-        from mycelium.destructive_confirm import (
-            DestructiveGrantError,
-            enforce_destructive_confirm,
-        )
-
-        try:
-            _, _, destructive_decision = enforce_destructive_confirm(
-                pending_destructive.tool,
-                pending_destructive.args,
-                dict(pending_destructive.kwargs),
-                policy=pending_destructive.policy,
-                func=pending_destructive.func,
-                store=pending_destructive.store,
-            )
-            policy_facts.append(
-                _fact(
-                    PREDICATE_DESTRUCTIVE_CONFIRM,
-                    allowed=destructive_decision.decision in {"allow", "allowed"},
-                    reason=destructive_decision.reason,
-                )
-            )
-        except DestructiveGrantError as exc:
-            _policy_blocked_var.set(exc)
-            policy_facts.append(
-                _fact(
-                    PREDICATE_DESTRUCTIVE_CONFIRM,
-                    allowed=False,
-                    reason=exc.reason,
-                )
-            )
-
     return DecisionSnapshot(
         authority_facts=tuple(_authority_pending.get()),
         use_time_facts=tuple(_use_time_pending.get()),
-        policy_facts=tuple(policy_facts),
+        policy_facts=tuple(_policy_facts_var.get()),
         extra={
             "authority_decision": authority_decision,
             "currency_decision": currency_decision,
@@ -485,6 +452,57 @@ def get_policy_blocked_error() -> Exception | None:
     return _policy_blocked_var.get()
 
 
+def finalize_policy_facts_at_boundary() -> None:
+    """Finalize mutable observations before authority/currency use checks.
+
+    Destructive confirmation can consume a grant and register an authority
+    window. It therefore runs after the ledger claim/fence is established but
+    before authority/currency validation. Snapshot construction and every
+    predicate remain pure after this preparation step.
+    """
+    pending = _pending_destructive_var.get()
+    if pending is None:
+        return
+    _pending_destructive_var.set(None)
+
+    from mycelium.destructive_confirm import (
+        DestructiveGrantError,
+        enforce_destructive_confirm,
+    )
+
+    facts = [
+        item
+        for item in _policy_facts_var.get()
+        if item.name != PREDICATE_DESTRUCTIVE_CONFIRM
+    ]
+    try:
+        _, _, decision = enforce_destructive_confirm(
+            pending.tool,
+            pending.args,
+            dict(pending.kwargs),
+            policy=pending.policy,
+            func=pending.func,
+            store=pending.store,
+        )
+        facts.append(
+            _fact(
+                PREDICATE_DESTRUCTIVE_CONFIRM,
+                allowed=decision.decision in {"allow", "allowed"},
+                reason=decision.reason,
+            )
+        )
+    except DestructiveGrantError as exc:
+        _policy_blocked_var.set(exc)
+        facts.append(
+            _fact(
+                PREDICATE_DESTRUCTIVE_CONFIRM,
+                allowed=False,
+                reason=exc.reason,
+            )
+        )
+    _policy_facts_var.set(tuple(facts))
+
+
 def get_decision_evidence(
     args: tuple[Any, ...], kwargs: Mapping[str, Any]
 ) -> tuple[tuple[Any, ...], dict[str, Any]]:
@@ -505,41 +523,44 @@ def emit_policy_outcomes_after_decision(tool: str, request_id: str) -> None:
     from mycelium.destructive_confirm import get_active_destructive_decision
     from mycelium.use_time_currency import get_use_time_decisions
 
+    def emit(**kwargs: Any) -> None:
+        try:
+            emitter.emit_event(**kwargs)
+        except Exception:
+            return
+
     destructive = get_active_destructive_decision()
-    try:
-        if destructive is not None:
-            emitter.emit_event(
-                tool=destructive.tool,
-                request_id=destructive.request_id or request_id,
-                event=PREDICATE_DESTRUCTIVE_CONFIRM,
-                gate=destructive.decision,
-                resolution_reason=destructive.reason,
-                run_id=destructive.run_id,
-                policy_version=destructive.policy_version,
-                tool_body_executed=False,
-            )
-        authorize = [
-            item
-            for item in get_use_time_decisions()
-            if getattr(item, "phase", None) == "authorize"
-        ]
-        denied = [item for item in authorize if item.decision == "denied"]
-        selected = denied[-1:] if denied else [
-            item for item in authorize if item.decision == "allowed"
-        ]
-        for item in selected:
-            emitter.emit_event(
-                tool=item.tool or tool,
-                request_id=item.request_id or request_id,
-                event=PREDICATE_USE_TIME_CURRENCY,
-                gate=item.decision,
-                resolution_reason=item.reason,
-                run_id=item.run_id,
-                policy_version=item.policy_version,
-                tool_body_executed=False,
-            )
-    except Exception:
-        return
+    if destructive is not None:
+        emit(
+            tool=destructive.tool,
+            request_id=destructive.request_id or request_id,
+            event=PREDICATE_DESTRUCTIVE_CONFIRM,
+            gate=destructive.decision,
+            resolution_reason=destructive.reason,
+            run_id=destructive.run_id,
+            policy_version=destructive.policy_version,
+            tool_body_executed=False,
+        )
+    authorize = [
+        item
+        for item in get_use_time_decisions()
+        if getattr(item, "phase", None) == "authorize"
+    ]
+    denied = [item for item in authorize if item.decision == "denied"]
+    selected = denied[-1:] if denied else [
+        item for item in authorize if item.decision == "allowed"
+    ]
+    for item in selected:
+        emit(
+            tool=item.tool or tool,
+            request_id=item.request_id or request_id,
+            event=PREDICATE_USE_TIME_CURRENCY,
+            gate=item.decision,
+            resolution_reason=item.reason,
+            run_id=item.run_id,
+            policy_version=item.policy_version,
+            tool_body_executed=False,
+        )
 
 
 def _fact(name: str, *, allowed: bool, reason: str | None = None) -> PolicyFact:
@@ -560,15 +581,18 @@ def _prepare_policy_call(
     list[tuple[Any, Token[Any]]],
 ]:
     """Capture policy facts without making an execution decision."""
+    from mycelium.authority_window import (
+        _decision_var as authority_decision,
+    )
     from mycelium.authority_window import _pending_var as authority_pending
+    from mycelium.destructive_confirm import (
+        _decision_var as destructive_decision,
+    )
     from mycelium.destructive_confirm import (
         reset_active_destructive_policy,
         reset_destructive_grant_store,
         set_active_destructive_policy,
         set_destructive_grant_store,
-    )
-    from mycelium.destructive_confirm import (
-        _decision_var as destructive_decision,
     )
     from mycelium.entity_guard import (
         EntityDecision,
@@ -594,12 +618,17 @@ def _prepare_policy_call(
         set_use_time_currency_policy,
     )
     from mycelium.use_time_currency import (
+        _decision_var as currency_decision,
+    )
+    from mycelium.use_time_currency import (
         _pending_var as currency_pending,
     )
 
     cleanup: list[tuple[Any, Token[Any]]] = []
     cleanup.append((authority_pending, authority_pending.set(())))
     cleanup.append((currency_pending, currency_pending.set(())))
+    cleanup.append((authority_decision, authority_decision.set(())))
+    cleanup.append((currency_decision, currency_decision.set(())))
     cleanup.append((entity_decision, entity_decision.set(None)))
     cleanup.append((destructive_decision, destructive_decision.set(None)))
     cleanup.append((_pending_destructive_var, _pending_destructive_var.set(None)))

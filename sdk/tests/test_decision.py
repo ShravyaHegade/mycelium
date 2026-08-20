@@ -587,6 +587,82 @@ def test_destructive_grant_expiry_is_decided_at_final_boundary(
     assert decision.predicate_results["destructive_confirm"] is False
 
 
+def test_destructive_authority_adapter_runs_before_atomic_decision(
+    ledger: ActionLedger,
+) -> None:
+    from mycelium import DecisionPolicyBundle, apply_decision_policy
+    from mycelium.action_ledger import ledger_sync
+    from mycelium.authority_window import (
+        AuthorityValidation,
+        register_authority_use_adapter,
+    )
+    from mycelium.destructive_confirm import (
+        DestructiveConfirmPolicy,
+        DestructiveGrantSpec,
+        DestructiveObjectSpec,
+        DestructiveToolPolicy,
+        InMemoryDestructiveGrantStore,
+        issue_destructive_grant,
+    )
+    from mycelium.transition import execution_scope
+
+    store = InMemoryDestructiveGrantStore()
+    policy = DestructiveConfirmPolicy(
+        policy_version="test",
+        tools={
+            "refund": DestructiveToolPolicy(
+                operation="refund",
+                object=DestructiveObjectSpec(object_type="payment", id_from="payment_id"),
+                grant=DestructiveGrantSpec(bind_request_id=True),
+            )
+        },
+    )
+    grant = issue_destructive_grant(
+        operation="refund",
+        object_type="payment",
+        object_id="pay_1",
+        request_id="authority-adapter-order",
+        expires_in=300,
+        policy_version="test",
+        store=store,
+        bind_request_id=True,
+    )
+    seen: list[str] = []
+
+    def adapter(authority: Any, **kwargs: Any) -> AuthorityValidation:
+        seen.append(kwargs["phase"].value)
+        return AuthorityValidation(
+            decision="allowed",
+            reason="valid",
+            phase=kwargs["phase"].value,
+            authority_kind=authority.authority_kind,
+            tool=authority.tool,
+            policy_version=authority.policy_version,
+        )
+
+    register_authority_use_adapter("destructive_grant", adapter)
+
+    @ledger_sync(storage=ledger._storage, transition_binding=_BINDING)
+    def refund(payment_id: str) -> str:
+        return payment_id
+
+    wrapped = apply_decision_policy(
+        refund,
+        DecisionPolicyBundle(destructive_policy=policy, destructive_store=store),
+        tool_name="refund",
+    )
+    scope = TransitionScope(thread_id="t", run_id="r", destructive_grants=(grant,))
+    with execution_scope(scope):
+        assert wrapped(
+            payment_id="pay_1", request_id="authority-adapter-order"
+        ) == "pay_1"
+
+    assert seen == ["use"]
+    stored = ledger.get("authority-adapter-order")
+    assert stored is not None
+    assert Decision.from_dict(stored.decision).predicate_results["authority_window"]
+
+
 def test_plugin_predicate_evaluated_and_recorded_end_to_end(
     ledger: ActionLedger,
 ) -> None:
