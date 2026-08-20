@@ -4122,14 +4122,16 @@ def _record_boundary_decision(
         Decision,
         DecisionIntent,
         build_snapshot,
+        get_decision_evidence,
         get_decision_engine,
     )
     from mycelium.secret_protection import sanitize_for_evidence
 
+    evidence_args, evidence_kwargs = get_decision_evidence(tuple(args), kwargs)
     intent = DecisionIntent(
         tool=tool,
-        args=tuple(args),
-        kwargs=dict(kwargs),
+        args=evidence_args,
+        kwargs=evidence_kwargs,
         request_id=request_id,
         transition_key=transition_key,
     )

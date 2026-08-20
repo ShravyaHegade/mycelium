@@ -306,6 +306,40 @@ tools:
     assert seen[0].kwargs["api_key"] == "[REDACTED]"
 
 
+def test_warn_secret_is_redacted_for_plugins_but_original_reaches_body() -> None:
+    from mycelium import load_config_from_string
+
+    secret = "ghp_abcdefghijklmnopqrstuvwxyz123456"
+    seen: list[DecisionIntent] = []
+    body_values: list[str] = []
+    register_decision_predicate("observe", lambda intent, snapshot: seen.append(intent) or True)
+    config = load_config_from_string(
+        """
+action_ledger:
+  storage: memory
+  tools: [send]
+secret_args:
+  enabled: true
+  policy: warn
+tools:
+  send:
+    side_effect_class: non_idempotent_mutate
+"""
+    )
+
+    def send(api_key: str) -> None:
+        body_values.append(api_key)
+
+    wrapped = config.apply_tool("send", send)
+    with pytest.warns(UserWarning, match="raw secret material"):
+        wrapped(api_key=secret, request_id="plugin-secret-warn")
+
+    assert body_values == [secret]
+    assert len(seen) == 1
+    assert secret not in repr(seen[0])
+    assert seen[0].kwargs["api_key"] == "[REDACTED]"
+
+
 def test_plugin_reason_is_sanitized_before_decision_persistence(
     ledger: ActionLedger,
 ) -> None:

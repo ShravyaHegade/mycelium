@@ -45,6 +45,7 @@ __all__ = [
     "Decision",
     "build_snapshot",
     "apply_decision_policy",
+    "get_decision_evidence",
     "get_policy_blocked_error",
     "get_decision_engine",
     "register_decision_predicate",
@@ -107,6 +108,9 @@ _policy_blocked_var: ContextVar[Exception | None] = ContextVar(
 )
 _pending_destructive_var: ContextVar[_PendingDestructiveCheck | None] = ContextVar(
     "mycelium_atomic_pending_destructive", default=None
+)
+_sanitize_intent_var: ContextVar[bool] = ContextVar(
+    "mycelium_atomic_sanitize_intent", default=False
 )
 
 
@@ -476,6 +480,22 @@ def get_policy_blocked_error() -> Exception | None:
     return _policy_blocked_var.get()
 
 
+def get_decision_evidence(
+    args: tuple[Any, ...], kwargs: Mapping[str, Any]
+) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    if not _sanitize_intent_var.get():
+        return tuple(args), dict(kwargs)
+    from mycelium.secret_protection import get_active_secret_policy, sanitize_secrets
+
+    policy = get_active_secret_policy()
+    safe_args, safe_kwargs = sanitize_secrets(
+        (tuple(args), dict(kwargs)),
+        entropy_detection=policy.entropy_detection if policy is not None else True,
+        allow_fields=policy.allow_fields if policy is not None else frozenset(),
+    )
+    return tuple(safe_args), dict(safe_kwargs)
+
+
 def _fact(name: str, *, allowed: bool, reason: str | None = None) -> PolicyFact:
     return PolicyFact(name=name, allowed=allowed, reason=reason)
 
@@ -519,6 +539,7 @@ def _prepare_policy_call(
         enforce_secret_args,
         reset_active_secret_policy,
         sanitize_secrets,
+        scan_secrets,
         set_active_secret_policy,
     )
     from mycelium.use_time_currency import (
@@ -537,6 +558,7 @@ def _prepare_policy_call(
     cleanup.append((entity_decision, entity_decision.set(None)))
     cleanup.append((destructive_decision, destructive_decision.set(None)))
     cleanup.append((_pending_destructive_var, _pending_destructive_var.set(None)))
+    cleanup.append((_sanitize_intent_var, _sanitize_intent_var.set(False)))
     if bundle.secret_policy is not None:
         cleanup.append(
             (reset_active_secret_policy, set_active_secret_policy(bundle.secret_policy))
@@ -572,6 +594,13 @@ def _prepare_policy_call(
     blocked: Exception | None = None
 
     if bundle.secret_policy is not None:
+        findings = scan_secrets(
+            {"args": call_args, "kwargs": call_kwargs},
+            entropy_detection=bundle.secret_policy.entropy_detection,
+            allow_fields=bundle.secret_policy.allow_fields,
+        )
+        if any(finding.kind != "reference" for finding in findings):
+            _sanitize_intent_var.set(True)
         try:
             call_args, call_kwargs = enforce_secret_args(
                 name,
