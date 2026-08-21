@@ -154,7 +154,7 @@ class PostgresEntryStorage:
         expected_owner: str | None = None,
         require_lease_held_at: float | None = None,
         expected_fence: int | None = None,
-        expected_effect_phase: str | None = None,
+        expected_effect_state: str | None = None,
     ) -> bool:
         self._ensure_schema()
         table = self._table_id()
@@ -176,11 +176,11 @@ class PostgresEntryStorage:
                 "{} AND COALESCE((payload->>'fence')::bigint, 0) = %s"
             ).format(extra_clauses)
             params.append(expected_fence)
-        if expected_effect_phase is not None:
+        if expected_effect_state is not None:
             extra_clauses = self._sql.SQL(
                 "{} AND COALESCE(payload->>'effect_phase', 'INTENDED') = %s"
             ).format(extra_clauses)
-            params.append(expected_effect_phase)
+            params.append(expected_effect_state)
         if require_lease_held_at is not None:
             # NULL lease_until = unbounded; else must still be in the future.
             extra_clauses = self._sql.SQL(
@@ -249,7 +249,7 @@ class PostgresLedgerStorage:
         expected_owner: str | None = None,
         require_lease_held_at: float | None = None,
         expected_fence: int | None = None,
-        expected_effect_phase: str | None = None,
+        expected_effect_state: str | None = None,
     ) -> bool:
         return self._inner.try_transition(
             entry,
@@ -257,7 +257,7 @@ class PostgresLedgerStorage:
             expected_owner=expected_owner,
             require_lease_held_at=require_lease_held_at,
             expected_fence=expected_fence,
-            expected_effect_phase=expected_effect_phase,
+            expected_effect_state=expected_effect_state,
         )
 
 

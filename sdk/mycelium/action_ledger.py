@@ -38,6 +38,7 @@ from mycelium.transition import (
     REQUEST_IDENTITY_POLICIES,
     REQUEST_IDENTITY_POLICY_DERIVED,
     REQUEST_IDENTITY_POLICY_REQUIRE_EXPLICIT,
+    EffectState,
     LeaseValidity,
     MissingRequestIdentityError,
     SideEffectBoundary,
@@ -47,6 +48,7 @@ from mycelium.transition import (
     ToolTransitionBinding,
     args_fingerprint,
     derive_dispatch_id,
+    derive_effect_id_for_call,
     derive_transition_key_for_call,
     extract_provider_idempotency_key,
     get_active_dispatch_id,
@@ -56,6 +58,7 @@ from mycelium.transition import (
     legacy_status_from_terminal,
     parse_explicit_request_id,
     request_id_from_argument,
+    resolve_effect_state,
     resolve_lease_validity,
     resolve_scope,
     resolve_terminal_outcome,
@@ -207,7 +210,21 @@ _UNKNOWN_SAME_KEY_RETRY_OUTCOMES: frozenset[str] = frozenset(
 # Policies for tools ledgered without a transition_binding (unclassified).
 # "warn": legacy behavior + a one-time warning when a failed entry is
 # reclaimed. "strict": route the claim through claim_side_effecting with a
-# conservative synthesized binding so failed retries hard-block.
+# conservative synthesized binding so failed retries hard-block — this is
+# the write-ahead-ordering-complete path (INTENDED -> ATTEMPTING/ABORTED CAS
+# before any body execution), the same protocol every classified
+# consequential tool goes through.
+#
+# ActionLedger.__init__ keeps "warn" as the constructor default for backward
+# compatibility: every existing unclassified `claim()` caller (tests and
+# hosts) that has not opted in would otherwise silently start hard-blocking
+# failed retries. YAML tool templates already default to "strict" for new
+# deployments (see mycelium/templates/); `mycelium doctor` accepts "warn" as
+# a valid, non-erroring choice. Hosts that want every claim() — classified or
+# not — to go through the full effect-commit protocol should pass
+# `unclassified_policy="strict"` explicitly. `MyceliumConfig.apply_tool`
+# additionally defaults this to "strict" when `profile: production` and
+# `action_ledger.unclassified_policy` is omitted.
 UNCLASSIFIED_POLICY_WARN = "warn"
 UNCLASSIFIED_POLICY_STRICT = "strict"
 
@@ -538,6 +555,14 @@ def _lease_auto_renew(
         thread.join(timeout=max(interval, MIN_LEASE_RENEW_INTERVAL) + 1.0)
 
 
+# LedgerEntry.schema_version. Bumped for the effect-commit protocol
+# completion: rows now carry a durable `effect_id` (schema 2). Legacy rows
+# missing the field load as schema 1 and infer `effect_id` from `request_id`
+# (see LedgerEntry.from_dict) — this is a read-time inference, not a storage
+# migration, so old rows keep working unchanged.
+LEDGER_ENTRY_SCHEMA_VERSION = 2
+
+
 @contextmanager
 def side_effect() -> Iterator[None]:
     """Wrap the external operation of a side-effecting tool.
@@ -629,8 +654,38 @@ class LedgerEntry:
     # transition under the same fenced CAS. ``None`` when no decision was
     # recorded (timeless paths, older rows).
     decision: dict[str, Any] | None = None
-    effect_phase: str = "INTENDED"
+    # Storage field for the unified WAL intent (mycelium.transition.EffectState).
+    # Kept as ``effect_phase`` (not renamed to ``effect_state``) for
+    # serialization compatibility with every existing stored row and every
+    # existing raw-string comparison in this module; every value this field
+    # holds is a member of EffectState. ``terminal_outcome`` remains the
+    # legacy read alias (also carries UNKNOWN/BLOCKED/FAILED_* detail).
+    # New protocol-gating code must not compare this field directly — call
+    # resolved_effect_state() / resolve_effect_state(entry), which correctly
+    # folds in UNKNOWN and legacy rows that predate this field.
+    effect_phase: str = EffectState.INTENDED.value
     effect_protocol_required: bool = False
+
+    # Stable effect identity (mycelium.transition.derive_effect_id_for_call):
+    # a hash of (scope, tool, canonicalized args/kwargs, destination) that is
+    # deterministic and destination-aware, independent of which request_id a
+    # host happened to supply. ``request_id`` remains the storage key (every
+    # existing backend and test keys rows by it) — effect_id is an additional
+    # durable field for redispatch-collision auditing. When request_id is
+    # *derived* (the default — no explicit request_id/request_id_from kwarg),
+    # request_id already equals effect_id today (derive_request_id falls back
+    # to the same transition-key derivation), so the two collide naturally.
+    # When a host supplies an *explicit* request_id (its own business/audit
+    # id), effect_id is the independent dedup identity computed from the call
+    # shape alone; two different explicit request_ids for what is otherwise
+    # the same (tool, params, destination) are NOT unified into one storage
+    # row by this change (that would require a cross-backend secondary index
+    # keyed by effect_id, which is out of scope here) — hosts that redispatch
+    # the same logical effect must reuse the same request_id, as documented
+    # elsewhere. ``None`` for unclassified claims (no binding to derive from).
+    effect_id: str | None = None
+    # Schema version for this row's shape. See LEDGER_ENTRY_SCHEMA_VERSION.
+    schema_version: int = LEDGER_ENTRY_SCHEMA_VERSION
 
     # Thin handoff / causation audit (optional). Set via ``handoff_scope`` or
     # kwargs; does not grant capabilities or change claim gates.
@@ -641,6 +696,12 @@ class LedgerEntry:
         # Match from_dict / claim: durable key defaults to request_id.
         if self.idempotency_key is None:
             object.__setattr__(self, "idempotency_key", self.request_id)
+        # effect_id must always be present on a stored row (see field
+        # docstring above); tools with no binding to derive it from (the
+        # unclassified claim() path) fall back to request_id, same as
+        # idempotency_key.
+        if self.effect_id is None:
+            object.__setattr__(self, "effect_id", self.request_id)
 
     def resolved_terminal_outcome(self, *, now: float | None = None) -> TerminalOutcome:
         return resolve_terminal_outcome(
@@ -648,6 +709,16 @@ class LedgerEntry:
             lease_until=self.lease_until,
             now=now,
         )
+
+    def resolved_effect_state(self) -> EffectState:
+        """Unified WAL intent (mycelium.transition.EffectState) for this row.
+
+        The legacy-safe read path: works for rows written before this field
+        existed as well as current rows. Prefer this (or
+        :func:`mycelium.transition.resolve_effect_state`) over comparing
+        ``effect_phase`` / ``terminal_outcome`` directly.
+        """
+        return resolve_effect_state(self)
 
     def lease_validity(self, *, now: float | None = None) -> LeaseValidity:
         """Return whether this entry's execution lease is still held."""
@@ -698,6 +769,8 @@ class LedgerEntry:
             "decision": self.decision,
             "effect_phase": self.effect_phase,
             "effect_protocol_required": self.effect_protocol_required,
+            "effect_id": self.effect_id,
+            "schema_version": self.schema_version,
             "parent_request_id": self.parent_request_id,
             "handoff_id": self.handoff_id,
         }
@@ -748,8 +821,13 @@ class LedgerEntry:
             decision_id=(str(data["decision_id"]) if data.get("decision_id") is not None else None),
             state_ref=(str(data["state_ref"]) if data.get("state_ref") is not None else None),
             decision=(dict(data["decision"]) if data.get("decision") is not None else None),
-            effect_phase=str(data.get("effect_phase") or "INTENDED"),
+            effect_phase=str(data.get("effect_phase") or EffectState.INTENDED.value),
             effect_protocol_required=bool(data.get("effect_protocol_required", False)),
+            # Legacy rows (schema 1) have no effect_id: infer it from
+            # request_id, which is exactly what it would equal for the
+            # (default) derived-request_id path anyway.
+            effect_id=str(data.get("effect_id") or request_id),
+            schema_version=int(data.get("schema_version") or 1),
             parent_request_id=(
                 str(data["parent_request_id"])
                 if data.get("parent_request_id") is not None
@@ -760,7 +838,16 @@ class LedgerEntry:
 
 
 def _has_allowed_attempting_decision(entry: LedgerEntry) -> bool:
-    if entry.effect_phase != "ATTEMPTING" or entry.decision is None:
+    """True when an allowed decision was durably recorded at ATTEMPTING.
+
+    Gates on the durable ``decision`` field alone, not on the current
+    ``resolve_effect_state``: a row that crashed or was marked UNKNOWN while
+    ATTEMPTING keeps its recorded allowed decision and must remain completable
+    by the reconciler / operator. ``record_decision`` only stamps a decision
+    during the ``INTENDED -> ATTEMPTING | ABORTED`` CAS, so a present, allowed
+    decision provably means the row passed the single decision point.
+    """
+    if entry.decision is None:
         return False
     from mycelium.decision import Decision
 
@@ -807,7 +894,7 @@ class LedgerStorage:
         expected_owner: str | None = None,
         require_lease_held_at: float | None = None,
         expected_fence: int | None = None,
-        expected_effect_phase: str | None = None,
+        expected_effect_state: str | None = None,
     ) -> bool:
         """Atomically write *entry* only if the stored entry's terminal outcome
         is one of *expected_terminal_outcomes* (and *expected_owner* matches,
@@ -824,6 +911,9 @@ class LedgerStorage:
         Returns ``True`` when the write succeeds, ``False`` when the pre-condition
         is not met (caller raises ``LedgerOutcomeAlreadySetError``).
 
+        When ``expected_effect_state`` is set, compare the stored
+        ``effect_phase`` against that unified ``EffectState`` member string.
+
         The default implementation performs a get+set (single-process only).
         Override with an atomic compare-and-swap for multi-process backends.
         """
@@ -836,7 +926,7 @@ class LedgerStorage:
             return False
         if expected_fence is not None and existing.fence != expected_fence:
             return False
-        if expected_effect_phase is not None and existing.effect_phase != expected_effect_phase:
+        if expected_effect_state is not None and existing.effect_phase != expected_effect_state:
             return False
         if require_lease_held_at is not None and not lease_allows_renew(
             existing.lease_until, now=require_lease_held_at
@@ -887,7 +977,7 @@ class InMemoryLedgerStorage(LedgerStorage):
         expected_owner: str | None = None,
         require_lease_held_at: float | None = None,
         expected_fence: int | None = None,
-        expected_effect_phase: str | None = None,
+        expected_effect_state: str | None = None,
     ) -> bool:
         with self._lock:
             existing = self._entries.get(entry.request_id)
@@ -899,7 +989,7 @@ class InMemoryLedgerStorage(LedgerStorage):
                 return False
             if expected_fence is not None and existing.fence != expected_fence:
                 return False
-            if expected_effect_phase is not None and existing.effect_phase != expected_effect_phase:
+            if expected_effect_state is not None and existing.effect_phase != expected_effect_state:
                 return False
             if require_lease_held_at is not None and not lease_allows_renew(
                 existing.lease_until, now=require_lease_held_at
@@ -980,7 +1070,7 @@ class FileLedgerStorage(LedgerStorage):
         expected_owner: str | None = None,
         require_lease_held_at: float | None = None,
         expected_fence: int | None = None,
-        expected_effect_phase: str | None = None,
+        expected_effect_state: str | None = None,
     ) -> bool:
         result: list[bool] = []
 
@@ -999,7 +1089,7 @@ class FileLedgerStorage(LedgerStorage):
             if expected_fence is not None and existing.fence != expected_fence:
                 result.append(False)
                 return
-            if expected_effect_phase is not None and existing.effect_phase != expected_effect_phase:
+            if expected_effect_state is not None and existing.effect_phase != expected_effect_state:
                 result.append(False)
                 return
             if require_lease_held_at is not None and not lease_allows_renew(
@@ -1124,7 +1214,7 @@ class ActionLedger:
         expected_owner: str | None = None,
         require_lease_held_at: float | None = None,
         expected_fence: int | None = None,
-        expected_effect_phase: str | None = None,
+        expected_effect_state: str | None = None,
     ) -> bool:
         """Atomically write *entry* subject to outcome/owner/fence pre-conditions.
 
@@ -1141,7 +1231,7 @@ class ActionLedger:
                 expected_owner=expected_owner,
                 require_lease_held_at=require_lease_held_at,
                 expected_fence=fence,
-                expected_effect_phase=expected_effect_phase,
+                expected_effect_state=expected_effect_state,
             )
 
     def _list_all_entries(self) -> list[LedgerEntry]:
@@ -1609,7 +1699,7 @@ class ActionLedger:
                 finished_at=now,
                 lease_until=None,
                 side_effect_boundary=SideEffectBoundary.CROSSED.value,
-                effect_phase="COMMITTED",
+                effect_phase=EffectState.COMMITTED.value,
                 operator_resolution=OPERATOR_RESOLUTION_COMPLETED,
                 resolved_by=by,
                 resolution_reason=reason,
@@ -1692,6 +1782,14 @@ class ActionLedger:
         if handoff_raw is None and active_handoff is not None:
             handoff_raw = active_handoff.handoff_id
         stored_args, stored_kwargs = _evidence_args(bound["args"], bound["kwargs"])
+        # Stable effect identity, present whenever a binding is available to
+        # derive it from (classified tools only — unclassified claim() has no
+        # side-effect class and stays effect_id=None). Same derivation as
+        # derive_request_id's fallback, so request_id == effect_id whenever
+        # request_id itself was derived (the default) rather than explicit.
+        effect_id = (
+            derive_effect_id_for_call(tool, args, kwargs, binding) if binding is not None else None
+        )
         return LedgerEntry(
             request_id=request_id,
             tool=tool,
@@ -1709,6 +1807,7 @@ class ActionLedger:
             parent_request_id=str(parent_raw) if parent_raw is not None else None,
             handoff_id=str(handoff_raw) if handoff_raw is not None else None,
             effect_protocol_required=binding is not None,
+            effect_id=effect_id,
         )
 
     def claim(
@@ -2998,15 +3097,15 @@ class ActionLedger:
             finished_at=time.time(),
             lease_until=None,
             side_effect_boundary=SideEffectBoundary.CROSSED.value,
-            effect_phase="COMMITTED",
+            effect_phase=EffectState.COMMITTED.value,
         )
         if not self._try_transition(
             entry,
             expected_from=_expected_from,
             expected_owner=_expected_owner,
             expected_fence=fence,
-            expected_effect_phase=(
-                "ATTEMPTING"
+            expected_effect_state=(
+                EffectState.ATTEMPTING.value
                 if existing.effect_protocol_required
                 else None
             ),
@@ -3067,9 +3166,9 @@ class ActionLedger:
                 existing.effect_phase
                 if failed_after_effect
                 and existing.effect_protocol_required
-                and existing.effect_phase == "ATTEMPTING"
+                and existing.effect_phase == EffectState.ATTEMPTING.value
                 and existing.decision is not None
-                else "ABORTED"
+                else EffectState.ABORTED.value
             ),
         )
         if not self._try_transition(
@@ -3150,8 +3249,8 @@ class ActionLedger:
             expected_from=frozenset({existing.terminal_outcome}),
             expected_owner=expected_owner,
             expected_fence=expected_fence,
-            expected_effect_phase=(
-                "ATTEMPTING" if existing.effect_protocol_required else None
+            expected_effect_state=(
+                EffectState.ATTEMPTING.value if existing.effect_protocol_required else None
             ),
         ):
             raise LedgerOutcomeAlreadySetError(
@@ -3314,9 +3413,9 @@ class ActionLedger:
             effect_phase=(
                 existing.effect_phase
                 if existing.effect_protocol_required
-                and existing.effect_phase == "ATTEMPTING"
+                and existing.effect_phase == EffectState.ATTEMPTING.value
                 and existing.decision is not None
-                else "ABORTED"
+                else EffectState.ABORTED.value
             ),
         )
         if not self._try_transition(
@@ -3362,9 +3461,9 @@ class ActionLedger:
             effect_phase=(
                 existing.effect_phase
                 if existing.effect_protocol_required
-                and existing.effect_phase == "ATTEMPTING"
+                and existing.effect_phase == EffectState.ATTEMPTING.value
                 and existing.decision is not None
-                else "ABORTED"
+                else EffectState.ABORTED.value
             ),
         )
         if not self._try_transition(
@@ -3561,8 +3660,8 @@ class ActionLedger:
             expected_from=frozenset({existing.terminal_outcome}),
             expected_owner=expected_owner,
             expected_fence=expected_fence,
-            expected_effect_phase=(
-                "ATTEMPTING" if existing.effect_protocol_required else None
+            expected_effect_state=(
+                EffectState.ATTEMPTING.value if existing.effect_protocol_required else None
             ),
         ):
             raise LedgerOutcomeAlreadySetError(
@@ -3603,14 +3702,16 @@ class ActionLedger:
         entry = replace(
             existing,
             decision=parsed.to_dict(),
-            effect_phase="ATTEMPTING" if parsed.allowed else "ABORTED",
+            effect_phase=(
+                EffectState.ATTEMPTING.value if parsed.allowed else EffectState.ABORTED.value
+            ),
         )
         if not self._try_transition(
             entry,
             expected_from=_IN_FLIGHT_OUTCOMES,
             expected_owner=expected_owner,
             expected_fence=expected_fence,
-            expected_effect_phase="INTENDED",
+            expected_effect_state=EffectState.INTENDED.value,
         ):
             raise LedgerOutcomeAlreadySetError(
                 f"Cannot record decision for {request_id!r}: "
