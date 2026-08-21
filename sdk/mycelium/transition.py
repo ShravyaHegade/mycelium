@@ -169,6 +169,46 @@ class TerminalOutcome(StrEnum):
     UNKNOWN = "UNKNOWN"
 
 
+class EffectState(StrEnum):
+    """Unified durable WAL intent for a side-effecting transition.
+
+    The single authoritative state machine for a ledger row's *intent*,
+    replacing the historical split across ``effect_phase`` (INTENDED /
+    ATTEMPTING / COMMITTED / ABORTED) and ``terminal_outcome`` (which also
+    carries ``UNKNOWN``, ``BLOCKED``, and the ``FAILED_*`` split). A
+    third-party reimplementer needs to track only this one enum plus the
+    fenced CAS that guards every transition between its members::
+
+        INTENDED -> ATTEMPTING -> COMMITTED | ABORTED | UNKNOWN
+
+    - ``INTENDED``: durable row exists; no provider side effect yet; safe to
+      retry.
+    - ``ATTEMPTING``: decision allowed + recorded; the provider boundary may
+      (or may not yet) be crossed.
+    - ``COMMITTED``: exactly-once effect recorded (maps to legacy
+      ``TerminalOutcome.COMPLETED``).
+    - ``ABORTED``: decision denied, or failed before any effect; nothing
+      happened; safe to retry.
+    - ``UNKNOWN``: terminal-until-resolved; fail-closed for redispatch,
+      especially for ``BLIND`` tools — no task redispatch while any attached
+      effect remains ``UNKNOWN``.
+
+    ``LedgerEntry`` keeps the historical ``effect_phase`` string field as the
+    storage field for on-disk/serialization compatibility (old rows load
+    unchanged, and every value it holds today is a member of this enum). New
+    protocol-gating code must branch on :func:`resolve_effect_state` (or
+    ``LedgerEntry.resolved_effect_state()``) rather than on the raw
+    ``effect_phase`` / ``terminal_outcome`` fields — only the resolver
+    correctly folds in ``UNKNOWN`` and legacy rows.
+    """
+
+    INTENDED = "INTENDED"
+    ATTEMPTING = "ATTEMPTING"
+    COMMITTED = "COMMITTED"
+    ABORTED = "ABORTED"
+    UNKNOWN = "UNKNOWN"
+
+
 class LeaseValidity(StrEnum):
     """Whether an in-flight execution lease is still held.
 
@@ -596,6 +636,89 @@ def resolve_terminal_outcome(
         if resolve_lease_validity(lease_until, now=now) == LeaseValidity.EXPIRED:
             return TerminalOutcome.EXPIRED
     return outcome
+
+
+def resolve_effect_state(entry: Any) -> EffectState:
+    """Derive the unified :class:`EffectState` for a ledger row.
+
+    Pure and duck-typed over ``terminal_outcome`` / ``side_effect_boundary`` /
+    ``effect_phase`` / ``decision`` attributes, so it works on ``LedgerEntry``
+    *and* on any legacy row shape loaded through it — every existing row, old
+    or new, maps onto the one durable WAL intent without a storage migration.
+    Liveness (lease validity, worker death evidence) is a separate axis and is
+    deliberately not consulted here: ``EffectState`` answers "where is this
+    effect in the protocol", not "is the worker still alive".
+
+    Precedence:
+
+    1. ``terminal_outcome == COMPLETED`` -> ``COMMITTED``, unconditionally
+       (even if a stale ``effect_phase`` says otherwise).
+    2. Ambiguous rows — ``terminal_outcome`` is ``UNKNOWN`` /
+       ``FAILED_AFTER_EFFECT`` (the outcome itself is unresolved, or the
+       effect definitely fired), or *any* terminal whose
+       ``side_effect_boundary`` is ``maybe_crossed`` / ``crossed`` (the
+       provider call may have fired, e.g. a hard-blocked stale-lease
+       ``BLOCKED`` row) -> ``UNKNOWN``. This deliberately widens the literal
+       "``BLOCKED`` -> ``ABORTED``" legacy mapping: a ``BLOCKED`` row with a
+       ``not_crossed`` boundary provably never reached the provider (safe,
+       ``ABORTED``), but a ``BLOCKED`` row with ``maybe_crossed`` /
+       ``crossed`` is exactly the "might have happened" case ``UNKNOWN``
+       exists to express — collapsing it into ``ABORTED`` would silently
+       relabel an ambiguous effect as safe-to-retry.
+    3. Unambiguous ``FAILED_BEFORE_EFFECT`` / ``BLOCKED`` / legacy-stored
+       ``EXPIRED`` (boundary ``not_crossed``) -> ``ABORTED``.
+    4. Still ``IN_FLIGHT`` (active, or crashed before any terminal write
+       landed): ``effect_phase == "ATTEMPTING"`` with a decision recorded ->
+       ``ATTEMPTING`` (the boundary may already be ``maybe_crossed`` /
+       ``crossed`` — that is within the definition of ``ATTEMPTING``, not a
+       separate branch); ``effect_phase == "ABORTED"`` with a decision
+       recorded (the brief window between a denying ``record_decision`` and
+       the follow-up ``fail()``) -> ``ABORTED``; otherwise -> ``INTENDED``.
+    """
+    terminal_raw = getattr(entry, "terminal_outcome", None)
+    try:
+        terminal = (
+            parse_terminal_outcome(terminal_raw) if terminal_raw else TerminalOutcome.IN_FLIGHT
+        )
+    except ValueError:
+        terminal = TerminalOutcome.IN_FLIGHT
+
+    if terminal == TerminalOutcome.COMPLETED:
+        return EffectState.COMMITTED
+
+    boundary_raw = getattr(entry, "side_effect_boundary", None)
+    try:
+        boundary = (
+            parse_side_effect_boundary(boundary_raw)
+            if boundary_raw
+            else SideEffectBoundary.NOT_CROSSED
+        )
+    except ValueError:
+        boundary = SideEffectBoundary.NOT_CROSSED
+
+    ambiguous = terminal in (
+        TerminalOutcome.UNKNOWN,
+        TerminalOutcome.FAILED_AFTER_EFFECT,
+    ) or boundary in (SideEffectBoundary.MAYBE_CROSSED, SideEffectBoundary.CROSSED)
+
+    if terminal in (
+        TerminalOutcome.FAILED_BEFORE_EFFECT,
+        TerminalOutcome.BLOCKED,
+        TerminalOutcome.EXPIRED,
+        TerminalOutcome.UNKNOWN,
+        TerminalOutcome.FAILED_AFTER_EFFECT,
+    ):
+        return EffectState.UNKNOWN if ambiguous else EffectState.ABORTED
+
+    # terminal is IN_FLIGHT: either actively being worked, or crashed before
+    # any terminal write landed. Resolve from effect_phase + decision.
+    phase = str(getattr(entry, "effect_phase", "") or "")
+    decision = getattr(entry, "decision", None)
+    if decision is not None and phase == EffectState.ATTEMPTING.value:
+        return EffectState.ATTEMPTING
+    if decision is not None and phase == EffectState.ABORTED.value:
+        return EffectState.ABORTED
+    return EffectState.INTENDED
 
 
 @dataclass(frozen=True)
@@ -1087,6 +1210,8 @@ __all__ = [
     "DEFAULT_SPENDABILITY",
     "STRICT_SIDE_EFFECT_CLASSES",
     "TerminalOutcome",
+    "EffectState",
+    "resolve_effect_state",
     "LeaseValidity",
     "ProviderKeyValidity",
     "ToolTransitionBinding",

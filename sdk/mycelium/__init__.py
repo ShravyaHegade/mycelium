@@ -307,6 +307,7 @@ from mycelium.tool_boundary import (
 from mycelium.tool_registry import ToolRegistry
 from mycelium.tool_runner import ToolRunner
 from mycelium.transition import (
+    EffectState,
     HandoffLink,
     LeaseValidity,
     MissingRequestIdentityError,
@@ -332,6 +333,7 @@ from mycelium.transition import (
     provider_key_validity,
     request_id_from_argument,
     resolve_capability,
+    resolve_effect_state,
     resolve_lease_validity,
 )
 from mycelium.transition_resolution import (
@@ -536,6 +538,8 @@ __all__ = [
     "resolve_capability",
     "RetryPermission",
     "TerminalOutcome",
+    "EffectState",
+    "resolve_effect_state",
     "LeaseValidity",
     "ProviderKeyValidity",
     "TransitionGate",
