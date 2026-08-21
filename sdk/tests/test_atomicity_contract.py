@@ -981,6 +981,9 @@ def test_stale_fence_rejected_even_when_lease_valid(ledger: ActionLedger) -> Non
     assert stored is not None
     assert stored.terminal_outcome == TerminalOutcome.IN_FLIGHT.value
     assert stored.fence == 2
+    # The stale-fence write never landed, so the unified EffectState is
+    # unchanged too: no decision was ever recorded, so it stays INTENDED.
+    assert stored.resolved_effect_state().value == "INTENDED"
 
 
 def test_legacy_claim_mutations_require_and_reject_stale_fences(

@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import threading
+import time
+
 import pytest
 
 from mycelium import (
+    ActionLedger,
     InMemoryLedgerStorage,
+    LedgerEntry,
     SideEffectClass,
     ToolTransitionBinding,
     TransitionScope,
@@ -13,6 +18,7 @@ from mycelium import (
     derive_transition_key_for_call,
     enforce_entity_guard,
     execution_scope,
+    get_ledger,
     ledger_sync,
 )
 from mycelium.entity_guard import (
@@ -30,6 +36,7 @@ from mycelium.transition import (
     derive_effect_id,
     derive_effect_id_for_call,
 )
+from mycelium.verify.invariants import check_at_most_one_committed_effect_state
 
 
 @pytest.fixture(autouse=True)
@@ -189,6 +196,108 @@ def test_effect_id_for_call_matches_transition_key_for_call() -> None:
         assert derive_effect_id_for_call("send_payment", (), kwargs, binding) == (
             derive_transition_key_for_call("send_payment", (), kwargs, binding)
         )
+
+
+def test_claimed_entry_stores_effect_id_field() -> None:
+    """LedgerEntry.effect_id is populated on claim and, for the default
+    derived-request_id path, equals request_id (derive_request_id's fallback
+    is the same derivation as derive_effect_id_for_call)."""
+    binding = _binding()
+
+    @ledger_sync(storage=InMemoryLedgerStorage(), transition_binding=binding)
+    def send_payment(amount: float) -> dict[str, str]:
+        return {"status": "sent"}
+
+    with execution_scope(TransitionScope(thread_id="thread-1", run_id="run-1")):
+        send_payment(amount=10.0, tool_call_id="call_effect_id_1")
+
+    ledger_inst = get_ledger(send_payment)
+    assert ledger_inst is not None
+    with execution_scope(TransitionScope(thread_id="thread-1", run_id="run-1")):
+        expected_request_id = ledger_inst.derive_request_id(
+            "send_payment", (), {"amount": 10.0, "tool_call_id": "call_effect_id_1"},
+            transition_binding=binding,
+        )
+    stored = ledger_inst.get(expected_request_id)
+    assert stored is not None
+    assert stored.effect_id is not None
+    assert stored.effect_id == stored.request_id
+
+
+def test_unclassified_claim_effect_id_falls_back_to_request_id() -> None:
+    """No binding to derive from (legacy claim()) still gets a non-null
+    effect_id — it falls back to request_id, same as idempotency_key."""
+    ledger_inst = ActionLedger(storage=InMemoryLedgerStorage())
+    entry = ledger_inst.claim("legacy-req-1", "legacy_tool", (), {})
+    assert entry.effect_id == "legacy-req-1"
+
+
+def test_legacy_row_without_effect_id_field_infers_from_request_id() -> None:
+    """from_dict on a pre-schema-2 row (no effect_id key at all) infers it."""
+    raw = {
+        "request_id": "legacy-row-1",
+        "tool": "legacy_tool",
+        "args": [],
+        "kwargs": {},
+        "status": "completed",
+        "terminal_outcome": "COMPLETED",
+    }
+    assert "effect_id" not in raw
+    assert "schema_version" not in raw
+    entry = LedgerEntry.from_dict(raw)
+    assert entry.effect_id == "legacy-row-1"
+    assert entry.schema_version == 1
+
+
+def test_concurrent_workers_same_call_collide_on_one_row() -> None:
+    """Two concurrent workers deriving the same identity from the same
+    (tool, params, destination) — no explicit request_id — collide on the
+    same durable row: the provider body runs exactly once, and the unified
+    EffectState at-most-one-COMMITTED invariant holds across both workers'
+    observed entries."""
+    storage = InMemoryLedgerStorage()
+    binding = _binding()
+    executions: list[str] = []
+
+    @ledger_sync(storage=storage, transition_binding=binding)
+    def send_email(recipient: str, amount: float) -> dict[str, str]:
+        executions.append(recipient)
+        time.sleep(0.05)
+        return {"recipient": recipient, "status": "sent"}
+
+    wrapped = apply_entity_guard(send_email, _email_policy(), tool_name="send_email")
+    kwargs = {
+        "recipient": "billing@customer.com",
+        "amount": 10.0,
+        "tool_call_id": "call_concurrent_1",
+    }
+
+    results: list[dict[str, str]] = []
+    errors: list[BaseException] = []
+
+    def _worker() -> None:
+        with execution_scope(TransitionScope(thread_id="thread-1", run_id="run-1")):
+            try:
+                results.append(wrapped(**kwargs))
+            except BaseException as exc:  # noqa: BLE001 — surfaced via assertion below
+                errors.append(exc)
+
+    t1 = threading.Thread(target=_worker, daemon=True)
+    t2 = threading.Thread(target=_worker, daemon=True)
+    t1.start()
+    t2.start()
+    t1.join(timeout=10)
+    t2.join(timeout=10)
+
+    assert not errors, f"unexpected worker errors: {errors}"
+    assert len(executions) == 1, "the provider body must run exactly once"
+    assert len(results) == 2
+    assert results[0] == results[1]
+
+    entries = storage.list_all()
+    assert len(entries) == 1
+    assert check_at_most_one_committed_effect_state(entries) == []
+    assert entries[0].resolved_effect_state().value == "COMMITTED"
 
 
 def test_explicit_destination_in_preimage() -> None:

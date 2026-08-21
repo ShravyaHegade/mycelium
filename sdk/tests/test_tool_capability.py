@@ -269,6 +269,38 @@ def test_blind_unknown_parks_and_never_retries() -> None:
 
     assert attempts["n"] == 1  # body never re-executed
 
+    # The unified EffectState (not just terminal_outcome) reports the row as
+    # UNKNOWN, and a fresh claim attempt on the raw storage layer refuses to
+    # overwrite it — the same fail-closed guarantee the hard-block above
+    # already proved end-to-end, checked directly at the storage boundary.
+    ledger_inst = get_ledger(send_payment)
+    assert ledger_inst is not None
+    with execution_scope(_scope()):
+        request_id = ledger_inst.derive_request_id(
+            "send_payment",
+            (),
+            {"amount": 10.0, "idempotency_key": "k1", "tool_call_id": "c1"},
+            transition_binding=binding,
+        )
+    stored = ledger_inst.get(request_id)
+    assert stored is not None
+    assert stored.resolved_effect_state().value == "UNKNOWN"
+
+    from dataclasses import replace as _replace
+
+    fresh_claim = _replace(
+        stored,
+        terminal_outcome=TerminalOutcome.IN_FLIGHT.value,
+        effect_phase="INTENDED",
+        decision=None,
+        fence=stored.fence + 1,
+        owner="a-new-worker",
+    )
+    outcome, existing = storage.try_claim_inflight(fresh_claim)
+    assert outcome == "in_flight"
+    assert existing is not None
+    assert existing.resolved_effect_state().value == "UNKNOWN"
+
 
 def test_blind_park_still_releasable_by_operator() -> None:
     """Operator release still resolves a parked BLIND entry (NOT_EXECUTED)."""
