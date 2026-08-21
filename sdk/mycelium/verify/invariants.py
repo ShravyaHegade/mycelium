@@ -15,13 +15,16 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from mycelium.transition import TerminalOutcome
+from mycelium.transition import EffectState, TerminalOutcome, resolve_effect_state
 
 __all__ = [
     "InvariantViolation",
     "check_at_most_one_committed",
+    "check_at_most_one_committed_effect_state",
+    "check_effect_state_consistency",
     "check_provider_mapping",
     "committed_effect_ids",
+    "committed_effect_ids_by_state",
 ]
 
 
@@ -33,6 +36,25 @@ class InvariantViolation:
     message: str
 
 
+def _effect_ref(entry: Any) -> str | None:
+    """The dedup identity to bucket a committed row under.
+
+    Uses the same keying as :func:`check_provider_mapping` (which maps provider
+    effects onto rows by ``request_id``): ``transition_key``, then
+    ``idempotency_key`` (the historical dedup ref, and what legacy rows with an
+    explicit idempotency key rely on), then ``request_id``. ``effect_id`` is
+    not consulted directly because for SDK-created rows it is either equal to
+    ``request_id`` (derived default) or, for rows with an explicit
+    ``request_id``, the derived transition hash — bucketing by it would diverge
+    from the provider-mapping key and break the at-most-once check.
+    """
+    return (
+        getattr(entry, "transition_key", None)
+        or getattr(entry, "idempotency_key", None)
+        or getattr(entry, "request_id", None)
+    )
+
+
 def committed_effect_ids(entries: Iterable[Any]) -> dict[str, list[str]]:
     """Map effect_id -> [request_ids] for every COMPLETED ledger entry.
 
@@ -42,11 +64,7 @@ def committed_effect_ids(entries: Iterable[Any]) -> dict[str, list[str]]:
     """
     committed: dict[str, list[str]] = defaultdict(list)
     for entry in entries:
-        effect_id = (
-            getattr(entry, "transition_key", None)
-            or getattr(entry, "idempotency_key", None)
-            or getattr(entry, "request_id", None)
-        )
+        effect_id = _effect_ref(entry)
         if not effect_id:
             continue
         try:
@@ -54,6 +72,27 @@ def committed_effect_ids(entries: Iterable[Any]) -> dict[str, list[str]]:
         except Exception:
             outcome = TerminalOutcome(entry.terminal_outcome)
         if outcome == TerminalOutcome.COMPLETED:
+            committed[str(effect_id)].append(entry.request_id)
+    return dict(committed)
+
+
+def committed_effect_ids_by_state(entries: Iterable[Any]) -> dict[str, list[str]]:
+    """Same as :func:`committed_effect_ids`, but on the unified ``EffectState``.
+
+    Groups by ``resolve_effect_state(entry) == EffectState.COMMITTED`` instead
+    of ``resolved_terminal_outcome() == TerminalOutcome.COMPLETED``. The two
+    should always agree (``COMMITTED`` is defined as the unconditional image
+    of legacy ``COMPLETED``) — :func:`check_effect_state_consistency` asserts
+    that. Kept as a separate function (rather than folding into
+    :func:`committed_effect_ids`) so a divergence between the two views is
+    itself a detectable, reportable invariant violation.
+    """
+    committed: dict[str, list[str]] = defaultdict(list)
+    for entry in entries:
+        effect_id = _effect_ref(entry)
+        if not effect_id:
+            continue
+        if resolve_effect_state(entry) == EffectState.COMMITTED:
             committed[str(effect_id)].append(entry.request_id)
     return dict(committed)
 
@@ -74,6 +113,62 @@ def check_at_most_one_committed(
                 InvariantViolation(
                     ref,
                     f"effect {ref!r} committed {len(rids)} times: {sorted(rids)}",
+                )
+            )
+    return violations
+
+
+def check_at_most_one_committed_effect_state(
+    entries: Iterable[Any],
+) -> list[InvariantViolation]:
+    """Same invariant as :func:`check_at_most_one_committed`, on ``EffectState``.
+
+    Asserts the at-most-one-COMMITTED invariant holds under the unified WAL
+    intent, not just the legacy ``terminal_outcome`` read path — a
+    reimplementer following only ``EffectState`` must get the same guarantee.
+    """
+    violations: list[InvariantViolation] = []
+    for ref, rids in committed_effect_ids_by_state(entries).items():
+        if len(rids) > 1:
+            violations.append(
+                InvariantViolation(
+                    ref,
+                    f"effect {ref!r} EffectState.COMMITTED {len(rids)} times: {sorted(rids)}",
+                )
+            )
+    return violations
+
+
+def check_effect_state_consistency(entries: Iterable[Any]) -> list[InvariantViolation]:
+    """Assert ``resolve_effect_state`` and ``resolved_terminal_outcome`` agree.
+
+    ``EffectState.COMMITTED`` is defined as the unconditional image of legacy
+    ``TerminalOutcome.COMPLETED`` (see :func:`mycelium.transition.
+    resolve_effect_state`); this check catches any future edit that breaks
+    that equivalence for a live row before it silently causes a divergent
+    at-most-one-COMMITTED verdict between the two invariant families above.
+    """
+    violations: list[InvariantViolation] = []
+    for entry in entries:
+        try:
+            terminal = entry.resolved_terminal_outcome()
+        except Exception:
+            terminal = TerminalOutcome(entry.terminal_outcome)
+        state = resolve_effect_state(entry)
+        is_completed = terminal == TerminalOutcome.COMPLETED
+        is_committed = state == EffectState.COMMITTED
+        if is_completed != is_committed:
+            effect_id = str(
+                getattr(entry, "effect_id", None)
+                or getattr(entry, "request_id", None)
+                or "?"
+            )
+            violations.append(
+                InvariantViolation(
+                    effect_id,
+                    f"request {entry.request_id!r}: terminal_outcome={terminal.value!r} "
+                    f"(completed={is_completed}) disagrees with "
+                    f"EffectState={state.value!r} (committed={is_committed})",
                 )
             )
     return violations
