@@ -85,7 +85,7 @@ class IsolationGateStorage:
         expected_owner: str | None = None,
         require_lease_held_at: float | None = None,
         expected_fence: int | None = None,
-        expected_effect_phase: str | None = None,
+        expected_effect_state: str | None = None,
     ) -> bool:
         self._guard(entry.request_id)
         return self._inner.try_transition(
@@ -94,7 +94,7 @@ class IsolationGateStorage:
             expected_owner=expected_owner,
             require_lease_held_at=require_lease_held_at,
             expected_fence=expected_fence,
-            expected_effect_phase=expected_effect_phase,
+            expected_effect_state=expected_effect_state,
         )
 
     def list_all(self) -> list[LedgerEntry]:
@@ -160,7 +160,7 @@ class FaultInjectingStorage:
         expected_owner: str | None = None,
         require_lease_held_at: float | None = None,
         expected_fence: int | None = None,
-        expected_effect_phase: str | None = None,
+        expected_effect_state: str | None = None,
     ) -> bool:
         self._transition_count += 1
         nth = self.fail_nth_transition
@@ -175,7 +175,7 @@ class FaultInjectingStorage:
             expected_owner=expected_owner,
             require_lease_held_at=require_lease_held_at,
             expected_fence=expected_fence,
-            expected_effect_phase=expected_effect_phase,
+            expected_effect_state=expected_effect_state,
         )
 
     def list_all(self) -> list[LedgerEntry]:
@@ -456,7 +456,7 @@ class _PostgresPrefixedStorage:
         expected_owner: str | None = None,
         require_lease_held_at: float | None = None,
         expected_fence: int | None = None,
-        expected_effect_phase: str | None = None,
+        expected_effect_state: str | None = None,
     ) -> bool:
         return self._inner.try_transition(
             entry,
@@ -464,7 +464,7 @@ class _PostgresPrefixedStorage:
             expected_owner=expected_owner,
             require_lease_held_at=require_lease_held_at,
             expected_fence=expected_fence,
-            expected_effect_phase=expected_effect_phase,
+            expected_effect_state=expected_effect_state,
         )
 
     def list_all(self) -> list[LedgerEntry]:

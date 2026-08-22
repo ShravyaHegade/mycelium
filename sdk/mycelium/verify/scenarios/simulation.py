@@ -7,6 +7,8 @@ provider effect log into the invariant checks in
 :mod:`mycelium.verify.invariants` and requires:
 
 * at most one COMPLETED ledger entry per effect_id, ever;
+* at most one EffectState.COMMITTED ledger entry per effect_id (asserted on
+  the unified EffectState view, and checked consistent with terminal_outcome);
 * every provider-side effect maps to at most one COMPLETED entry.
 
 Fence acquisition/loss is proven deterministically in-process over a shared
@@ -32,6 +34,8 @@ from mycelium.transition import (
 )
 from mycelium.verify.invariants import (
     check_at_most_one_committed,
+    check_at_most_one_committed_effect_state,
+    check_effect_state_consistency,
     check_provider_mapping,
 )
 from mycelium.verify.registry import ScenarioContext, verify_scenario
@@ -153,6 +157,10 @@ def _run_crash_sweep(
         violations = check_at_most_one_committed(entries)
         for item in violations:
             failures.append(f"{phase}: {item.message}")
+        for item in check_at_most_one_committed_effect_state(entries):
+            failures.append(f"{phase}: {item.message}")
+        for item in check_effect_state_consistency(entries):
+            failures.append(f"{phase}: {item.message}")
         provider_effects = read_lines(effect_file)
         if provider_effects:
             mapped, warnings = check_provider_mapping(
@@ -272,6 +280,10 @@ def _run_fence_takeover(
     if final.result != {"charged": True}:
         failures.append("fence takeover: stale A write leaked into final entry")
     for violation in check_at_most_one_committed([final]):
+        failures.append(f"fence takeover: {violation.message}")
+    for violation in check_at_most_one_committed_effect_state([final]):
+        failures.append(f"fence takeover: {violation.message}")
+    for violation in check_effect_state_consistency([final]):
         failures.append(f"fence takeover: {violation.message}")
     mapped, warnings = check_provider_mapping([final], provider_effects)
     for violation in mapped:

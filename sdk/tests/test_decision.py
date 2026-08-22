@@ -274,6 +274,64 @@ tools:
     assert "ghp_abcdefghijklmnopqrstuvwxyz123456" not in str(stored.to_dict())
 
 
+def test_destination_denial_alone_aborts_at_decision_point_no_body_run() -> None:
+    """Predicate collapse, isolated: deny ONLY destination_policy (no secret
+    involved) and confirm the single decision CAS is what aborts the row —
+    not a separate pre-claim wrapper. There is no outer entity-guard wrapper
+    for a ledgered consequential tool to begin with (``_mycelium_entity_guard``
+    stays unset), so this is exactly the "even if an outer wrapper were
+    removed/disabled" case the spec asks for: there is nothing to disable.
+    """
+    from mycelium import EntityGuardError, get_ledger, load_config_from_string
+
+    config = load_config_from_string(
+        """
+action_ledger:
+  storage: memory
+  tools: [send_email]
+entity_guard:
+  enabled: true
+  missing_policy: error
+  tools:
+    send_email:
+      destinations:
+        - path: recipient
+          type: email
+          allow:
+            domains: [customer.com]
+tools:
+  send_email:
+    side_effect_class: non_idempotent_mutate
+"""
+    )
+    body_ran: list[bool] = []
+
+    def send_email(recipient: str) -> None:
+        del recipient
+        body_ran.append(True)
+
+    wrapped = config.apply_tool("send_email", send_email)
+    assert getattr(wrapped, "_mycelium_atomic_decision_policy", False) is True
+    assert getattr(wrapped, "_mycelium_entity_guard", False) is False
+
+    with pytest.raises(EntityGuardError):
+        wrapped(recipient="attacker@example.net", request_id="destination-only-denial")
+
+    ledger_instance = get_ledger(wrapped)
+    assert ledger_instance is not None
+    stored = ledger_instance.get("destination-only-denial")
+    assert stored is not None
+    assert stored.effect_phase == "ABORTED"
+    assert stored.resolved_effect_state().value == "ABORTED"
+    assert body_ran == []
+    decision = Decision.from_dict(stored.decision)
+    assert decision.allowed is False
+    assert decision.predicate_results["destination_policy"] is False
+    # Nothing else was denied — proves destination_policy alone caused the abort.
+    assert decision.predicate_results["secret_protection"] is True
+    assert decision.predicate_results["destructive_confirm"] is True
+
+
 def test_rejected_secret_is_redacted_before_plugin_evaluation() -> None:
     from mycelium import SecretInArgsError, load_config_from_string
 
@@ -456,7 +514,7 @@ def test_stale_decision_cas_emits_no_atomic_policy_event() -> None:
 
     class RejectDecisionStorage(InMemoryLedgerStorage):
         def try_transition(self, entry: LedgerEntry, **kwargs: Any) -> bool:
-            if kwargs.get("expected_effect_phase") == "INTENDED":
+            if kwargs.get("expected_effect_state") == "INTENDED":
                 return False
             return super().try_transition(entry, **kwargs)
 

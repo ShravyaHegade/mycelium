@@ -163,7 +163,7 @@ class SqliteEntryStorage:
         expected_owner: str | None = None,
         require_lease_held_at: float | None = None,
         expected_fence: int | None = None,
-        expected_effect_phase: str | None = None,
+        expected_effect_state: str | None = None,
     ) -> bool:
         if not expected_terminal_outcomes:
             return False
@@ -183,9 +183,9 @@ class SqliteEntryStorage:
             # COALESCE so old rows (payload without a fence) read as 0.
             sql += " AND COALESCE(json_extract(payload, '$.fence'), 0) = ?"
             params.append(expected_fence)
-        if expected_effect_phase is not None:
+        if expected_effect_state is not None:
             sql += " AND COALESCE(json_extract(payload, '$.effect_phase'), 'INTENDED') = ?"
-            params.append(expected_effect_phase)
+            params.append(expected_effect_state)
         if require_lease_held_at is not None:
             sql += (
                 " AND (json_extract(payload, '$.lease_until') IS NULL "
@@ -250,7 +250,7 @@ class SqliteLedgerStorage:
         expected_owner: str | None = None,
         require_lease_held_at: float | None = None,
         expected_fence: int | None = None,
-        expected_effect_phase: str | None = None,
+        expected_effect_state: str | None = None,
     ) -> bool:
         return self._inner.try_transition(
             entry,
@@ -258,7 +258,7 @@ class SqliteLedgerStorage:
             expected_owner=expected_owner,
             require_lease_held_at=require_lease_held_at,
             expected_fence=expected_fence,
-            expected_effect_phase=expected_effect_phase,
+            expected_effect_state=expected_effect_state,
         )
 
 

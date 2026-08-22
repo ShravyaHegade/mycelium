@@ -281,7 +281,7 @@ class RedisEntryStorage:
         expected_owner: str | None = None,
         require_lease_held_at: float | None = None,
         expected_fence: int | None = None,
-        expected_effect_phase: str | None = None,
+        expected_effect_state: str | None = None,
     ) -> bool:
         from redis.exceptions import WatchError
 
@@ -311,8 +311,8 @@ class RedisEntryStorage:
                     ):
                         return False
                     if (
-                        expected_effect_phase is not None
-                        and (existing.get("effect_phase") or "INTENDED") != expected_effect_phase
+                        expected_effect_state is not None
+                        and (existing.get("effect_phase") or "INTENDED") != expected_effect_state
                     ):
                         return False
                     if require_lease_held_at is not None and not lease_allows_renew(
@@ -383,7 +383,7 @@ class RedisLedgerStorage:
         expected_owner: str | None = None,
         require_lease_held_at: float | None = None,
         expected_fence: int | None = None,
-        expected_effect_phase: str | None = None,
+        expected_effect_state: str | None = None,
     ) -> bool:
         return self._inner.try_transition(
             entry,
@@ -391,7 +391,7 @@ class RedisLedgerStorage:
             expected_owner=expected_owner,
             require_lease_held_at=require_lease_held_at,
             expected_fence=expected_fence,
-            expected_effect_phase=expected_effect_phase,
+            expected_effect_state=expected_effect_state,
         )
 
 
@@ -436,7 +436,7 @@ class RedisTaskLedgerStorage:
         expected_owner: str | None = None,
         require_lease_held_at: float | None = None,
         expected_fence: int | None = None,
-        expected_effect_phase: str | None = None,
+        expected_effect_state: str | None = None,
     ) -> bool:
         return self._inner.try_transition(
             entry,
@@ -444,7 +444,7 @@ class RedisTaskLedgerStorage:
             expected_owner=expected_owner,
             require_lease_held_at=require_lease_held_at,
             expected_fence=expected_fence,
-            expected_effect_phase=expected_effect_phase,
+            expected_effect_state=expected_effect_state,
         )
 
     def list_all(self) -> list[Any]:

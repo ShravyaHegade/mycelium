@@ -52,6 +52,42 @@ def test_omitted_profile_is_development() -> None:
     assert cfg.profile == PROFILE_DEVELOPMENT
 
 
+def test_unclassified_policy_default_depends_on_profile(tmp_path) -> None:
+    prod_cfg = load_config_from_string(_prod_sqlite(tmp_path))
+
+    def charge_prod() -> str:
+        return "ok"
+
+    prod_wrapped = prod_cfg.apply_tool("charge", charge_prod)
+    prod_ledger = get_ledger(prod_wrapped)
+    assert prod_ledger is not None
+    assert prod_ledger._unclassified_policy == "strict"
+
+    dev_cfg = load_config_from_string(
+        f"""
+profile: development
+transition:
+  agent_id: dev-agent
+  policy_version: "2026.08.1"
+action_ledger:
+  storage: sqlite
+  path: {tmp_path / "dev-ledger.db"}
+  tools: [charge]
+tools:
+  charge:
+    side_effect_class: non_idempotent_mutate
+"""
+    )
+
+    def charge_dev() -> str:
+        return "ok"
+
+    dev_wrapped = dev_cfg.apply_tool("charge", charge_dev)
+    dev_ledger = get_ledger(dev_wrapped)
+    assert dev_ledger is not None
+    assert dev_ledger._unclassified_policy == "warn"
+
+
 def test_explicit_development_profile_loads() -> None:
     cfg = load_config_from_string("profile: development\ntools: {}")
     assert cfg.profile == PROFILE_DEVELOPMENT

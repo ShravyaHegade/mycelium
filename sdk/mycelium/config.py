@@ -18,6 +18,7 @@ import yaml
 from mycelium.action_ledger import (
     ARGS_DRIFT_POLICIES,
     ARGS_DRIFT_SOFT,
+    UNCLASSIFIED_POLICY_STRICT,
     UNCLASSIFIED_POLICY_WARN,
     FileLedgerStorage,
     InMemoryLedgerStorage,
@@ -747,9 +748,12 @@ class MyceliumConfig:
             transition_binding = self.tool_transition_binding(tool_config)
             ledger_kwargs = self._ledger_timing_kwargs()
             action_ledger_cfg = self.action_ledger or {}
-            unclassified_policy = action_ledger_cfg.get(
-                "unclassified_policy", UNCLASSIFIED_POLICY_WARN
-            )
+            if "unclassified_policy" in action_ledger_cfg:
+                unclassified_policy = action_ledger_cfg["unclassified_policy"]
+            elif self.profile == PROFILE_PRODUCTION:
+                unclassified_policy = UNCLASSIFIED_POLICY_STRICT
+            else:
+                unclassified_policy = UNCLASSIFIED_POLICY_WARN
             ledger_kwargs["unclassified_policy"] = unclassified_policy
             on_args_drift = action_ledger_cfg.get("on_args_drift", ARGS_DRIFT_SOFT)
             if on_args_drift not in ARGS_DRIFT_POLICIES:

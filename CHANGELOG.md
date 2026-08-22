@@ -5,6 +5,29 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
 
 ## Unreleased
 
+- Unified durable WAL intent (`EffectState`) completes the effect-commit
+  protocol. New `mycelium.transition.EffectState` (INTENDED / ATTEMPTING /
+  COMMITTED / ABORTED / UNKNOWN) plus `resolve_effect_state(entry)` collapses
+  the legacy `terminal_outcome` + `effect_phase` + `decision` columns into a
+  single state for a ledger row; `LedgerEntry` now persists `effect_id` and
+  `schema_version`, and `EffectState` / `resolve_effect_state` are exported
+  from the package root. A row parked UNKNOWN (decision present, protocol
+  required) stays reconcilable by the durable `decision` gate, which no longer
+  consults `resolve_effect_state` for the attempting check. `mycelium.verify`
+  gains three new invariant checks asserting the same at-most-one-COMMITTED
+  guarantee on the unified EffectState view — `committed_effect_ids_by_state`,
+  `check_at_most_one_committed_effect_state`, `check_effect_state_consistency`
+  — and the `simulation` verify scenario now asserts the EffectState invariant
+  alongside the terminal_outcome one on every crash phase and the two-worker
+  fence takeover. Storage CAS kwarg naming now uses
+  `expected_effect_state` (renamed from `expected_effect_phase`, same
+  EffectState-string semantics), and `profile: production` now defaults
+  `action_ledger.unclassified_policy` to `strict` when omitted
+  (explicit `warn` remains honored).
+
+- TODO(Change 5): exhaustive interleaving simulation and a formal
+  TLA+/PlusCal spec of the intent state machine.
+
 - Budget accounting now warns when `record_usage(steps=...)` is combined with
   the step meter that `check()` and `@budget_guard` enable by default, preventing
   silent double metering. `get_state()` now matches `remaining_budget()` by
