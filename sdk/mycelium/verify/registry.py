@@ -24,6 +24,7 @@ SCENARIO_ORDER = (
     "use-time-currency",
     "simulation",
     "state-machine-exhaustive",
+    "effect-protocol-proof",
 )
 
 ScenarioFn = Callable[["ScenarioContext"], "VerificationEvidence"]
@@ -90,6 +91,7 @@ def ensure_builtin_scenarios_registered() -> None:
         secret_in_args,
         simulation,
         state_machine_exhaustive,
+        effect_protocol_proof,
         storage_outage,
         use_time_currency,
         worker_crash,
