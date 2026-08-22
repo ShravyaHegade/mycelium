@@ -50,8 +50,25 @@ Mycelium wraps tool calls after the LLM returns `tool_calls` and returns a verdi
 
 - Durable **execution ledger** around mutating tools: claim before the side effect, record terminal state, **do not redispatch unless the previous attempt is proven safe**.
   - **Flagship (AF-002):** any tool, any provider — record a handle, ask the provider what happened, enforce **at-most-once**. Shipped adapters (e.g. Gmail sent-log) are demos of that contract, not the product story.
+  - **Effect identity and state for classified transitions:** deterministic,
+    destination-aware `effect_id`; unified durable `EffectState`
+    (`INTENDED → ATTEMPTING → COMMITTED | ABORTED | UNKNOWN`) with legacy-row
+    resolution.
+  - **Fenced effect commit:** every claim increments a durable fence; decision,
+    boundary, heartbeat, provider-reference, completion, failure,
+    reconciliation, and operator-resolution writes reject stale fences.
+    Registered pure decision predicates are evaluated once and recorded
+    atomically with `INTENDED → ATTEMPTING`.
+  - **Recovery capability:** `ToolCapability` distinguishes `idempotent`,
+    `queryable`, and `blind`. Ambiguous blind effects park; queryable effects
+    require a class-appropriate probe (`keyed_mutate` provider key or a
+    `Reconciler`; non-idempotent mutation requires a reconciler). Dishonest
+    declarations fail closed.
   - **Reads:** poll in-flight, reclaim expired leases, soft-block ambiguous `UNKNOWN`
   - **Mutations:** hard-block ambiguity; **provider reconcile** when a lookup can prove ran-or-not; **operator release** when a human must verify (`mycelium transitions release`)
+  - `mycelium verify --scenario simulation` sweeps crash boundaries and proves
+    the at-most-one-COMMITTED invariant plus stale-fence rejection on durable
+    backends.
   - Crash windows, worker death, lease auto-renew, CAS/atomicity, and fail-closed storage — see [sdk/README.md](sdk/README.md#resolution-gates)
   - LangGraph Cloud redispatches long tools around **~180s**; the ledger guards that window ([langgraph#7417](https://github.com/langchain-ai/langgraph/issues/7417))
 
@@ -71,6 +88,11 @@ Mycelium wraps tool calls after the LLM returns `tool_calls` and returns a verdi
 - **AF-002 Args drift** — default `on_args_drift: soft` (same call id, different args refused; `hard` / `off` opt-in)
 - **State authority** — refuse decisions from superseded checkpoints before claim
 - **DTTR telemetry** — opt-in `OutcomeEmitter` so the no-double-execute guarantee is observable
+
+Budget step accounting is automatic in `check()` and `@budget_guard`.
+Use `record_usage()` for observed token/USD usage without `steps`; combining
+`record_usage(steps=...)` with the default step meter warns because it counts
+the step twice.
 
 Implementation detail (envelope field stack, gate matrix, payment identity): [sdk/README.md](sdk/README.md#transition-envelope-fields). Failure & threat model: [sdk/docs/FAILURE_AND_THREAT_MODEL.md](sdk/docs/FAILURE_AND_THREAT_MODEL.md).
 
@@ -129,6 +151,12 @@ mycelium run --config mycelium.yaml -- python -m my_app
 application starts. It preserves the child process's arguments, working
 directory, signals, and exit code. The command accepts the current Python
 interpreter only.
+
+The direct/decorator library default for an unclassified tool is still
+`unclassified_policy: warn`. Under `profile: production`, an omitted
+`action_ledger.unclassified_policy` now defaults to `strict`, so failed
+unclassified retries hard-block; an explicit `warn` remains a compatibility
+choice. Consequential production tools should declare `side_effect_class`.
 
 Explicit instrumentation remains supported when you prefer code-level control:
 

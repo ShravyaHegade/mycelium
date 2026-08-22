@@ -5,6 +5,16 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
 
 ## Unreleased
 
+## 1.34.0 (2026-08-22)
+
+MINOR: one coherent effect-commit and side-effect-safety batch. PyPI 1.32.0
+was the last published package: this release therefore includes the complete
+v1.33.0 guardrail batch (secret-in-args, destination policy, destructive
+confirm, authority-window expiry, and use-time currency) plus all post-v1.33.0
+effect-commit work described below.
+
+### Added
+
 - Unified durable WAL intent (`EffectState`) completes the effect-commit
   protocol. New `mycelium.transition.EffectState` (INTENDED / ATTEMPTING /
   COMMITTED / ABORTED / UNKNOWN) plus `resolve_effect_state(entry)` collapses
@@ -24,15 +34,6 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
   EffectState-string semantics), and `profile: production` now defaults
   `action_ledger.unclassified_policy` to `strict` when omitted
   (explicit `warn` remains honored).
-
-- TODO(Change 5): exhaustive interleaving simulation and a formal
-  TLA+/PlusCal spec of the intent state machine.
-
-- Budget accounting now warns when `record_usage(steps=...)` is combined with
-  the step meter that `check()` and `@budget_guard` enable by default, preventing
-  silent double metering. `get_state()` now matches `remaining_budget()` by
-  resolving the active execution scope when no key is passed, and the runway
-  contract explicitly distinguishes a missing scope from a hard-blocked run.
 
 - Deterministic simulation proof (effect-commit Change 4). New
   `mycelium.verify.invariants` module (`InvariantViolation`,
@@ -99,6 +100,14 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
   a worker whose lease was taken over cannot mutate the winning entry even if
   it resumes with its old owner metadata. Legacy rows without a fence load as
   fence zero and receive a current token when claimed.
+
+### Changed
+
+- Budget accounting now warns when `record_usage(steps=...)` is combined with
+  the step meter that `check()` and `@budget_guard` enable by default, preventing
+  silent double metering. `get_state()` now matches `remaining_budget()` by
+  resolving the active execution scope when no key is passed, and the runway
+  contract explicitly distinguishes a missing scope from a hard-blocked run.
 
 ## 1.33.0 (2026-08-15)
 

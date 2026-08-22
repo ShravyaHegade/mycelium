@@ -6,13 +6,17 @@
 **The reliability layer for AI agents** — installable as `mycelium-runtime`
 (current version on [PyPI](https://pypi.org/project/mycelium-runtime/)).
 
-The public story is the [failure-mode catalog](docs/FAILURE_MODE_CATALOG.md) (**AF-001…AF-010**): each ID is a real runtime failure class; each shipped surface is a deterministic guard. The taxonomy is the product promise; envelope fields and gates are how AF-002 is implemented underneath.
+The public story is the [failure-mode catalog](docs/FAILURE_MODE_CATALOG.md) (**AF-001…AF-012**): each ID is a real runtime failure class; each shipped surface is a deterministic guard. The taxonomy is the product promise; envelope fields and gates are how AF-002 is implemented underneath.
 
 **Releases:** batch; calm over velocity — [release policy & pre-release checklist](docs/RELEASE.md).
 
 **AF-002 flagship:** any tool, any provider — prove run-or-not and enforce at-most-once (ledger · lease · `Reconciler` · operator release). Provider adapters (Gmail sent-log, Stripe-shaped examples) are demos of that contract, not the headline.
 
-Also shipping: AF-003 loop guard · AF-004 `@bounded` · AF-006 context guards · AF-007 completion · AF-008 scope guard · SQLite + Redis/Postgres · DTTR · atomicity / CAS / owner fencing · worker-death · lease auto-renew.
+Also shipping: destination-aware effect identity + unified `EffectState`; fenced CAS
+and atomic decision predicates/records; and `ToolCapability`-aware recovery. The wider
+surface includes AF-003/004/006/007/008; the AF-010–AF-012 side-effect guardrail batch
+(secret and destination checks, destructive grants, authority expiry, and use-time
+currency); SQLite + Redis/Postgres; DTTR; worker-death detection; and lease auto-renew.
 
 ## One painful bug → a few lines of config
 
@@ -429,8 +433,9 @@ def send_payment(amount: float, recipient: str, *, tool_call_id: str) -> dict:
         try:
             result = gateway.charge(amount, recipient)
         except Exception as exc:
+            # The provider may have accepted before raising: park ambiguity.
             ledger.fail(
-                request_id, exc, failed_after_effect=False,
+                request_id, exc, failed_after_effect=True,
                 expected_fence=entry.fence,
             )
             raise
@@ -444,7 +449,7 @@ def send_payment(amount: float, recipient: str, *, tool_call_id: str) -> dict:
 | `COMPLETED` → return `entry.result` | Partner-facing **SKIP** — already done. |
 | `record_decision(...)` | Atomically records the final allow/deny result and advances `INTENDED → ATTEMPTING`. |
 | Else run body + `complete(..., expected_fence=entry.fence)` | Partner-facing **PROCEED** then settle. |
-| `fail(..., expected_fence=entry.fence)` | Settle a failure; use `failed_after_effect=True` if the provider may have accepted. |
+| `fail(..., expected_fence=entry.fence)` | Settle a failure; use `failed_after_effect=True` when the effect may have happened. Use `False` only when failure is proven pre-effect. |
 
 The decorators evaluate registered decision predicates at this single boundary
 and record their verdicts automatically. A manual integration must record its
@@ -516,8 +521,9 @@ def handle_event(tool: str, event_id: str, do_work) -> int:
     try:
         result = do_work()                  # the side effect, once
     except Exception as exc:
+        # Handler effects may precede the exception: park ambiguity.
         ledger.fail(
-            request_id, exc, failed_after_effect=False,
+            request_id, exc, failed_after_effect=True,
             expected_fence=entry.fence,
         )
         return 500
@@ -548,7 +554,73 @@ See [examples/failure_cases/](examples/failure_cases/)
 - Resolve redispatches through **gates** (see [Resolution gates](#resolution-gates)) instead of re-running blindly
 - Persist failed attempts with **terminal outcomes** (`FAILED_BEFORE_EFFECT`, `FAILED_AFTER_EFFECT`, `UNKNOWN`, `EXPIRED`, etc.) for audit and reconciliation
 
-**Failure-mode catalog.** Stable AF-001…AF-010 definitions (shipped vs roadmap)
+### Effect-commit protocol
+
+Ledger rows for tools with a `ToolTransitionBinding` enable the effect-commit
+protocol: they store a deterministic, destination-aware `effect_id`,
+`schema_version`, claim `fence`, atomic `decision`, and unified effect state.
+Unclassified `claim()` rows keep the protocol disabled; because no binding
+exists, their compatibility `effect_id` falls back to `request_id` rather than
+the destination-aware derivation. The public API is exported from `mycelium`:
+
+```python
+from mycelium import (
+    Decision,
+    DecisionIntent,
+    DecisionSnapshot,
+    EffectState,
+    PredicateVerdict,
+    ToolCapability,
+    derive_effect_id_for_call,
+    register_decision_predicate,
+    resolve_effect_state,
+)
+```
+
+`EffectState` is the durable write-ahead intent:
+
+| State | Meaning |
+|---|---|
+| `INTENDED` | Row exists; no allow decision has been recorded |
+| `ATTEMPTING` | The atomic decision allowed; the provider boundary may be crossed |
+| `COMMITTED` | The ledger records the effect as completed |
+| `ABORTED` | Denied or failed before the effect |
+| `UNKNOWN` | The effect may have happened; redispatch stays fail-closed until resolved |
+
+Use `resolve_effect_state(entry)` or `entry.resolved_effect_state()`. It folds
+legacy `terminal_outcome`, boundary, decision, and `effect_phase` rows into the
+unified view without a storage migration. `terminal_outcome` remains available
+for compatibility and detailed failure labels.
+
+`derive_effect_id_for_call()` uses the same canonical SHA-256 preimage as the
+derived transition key: execution scope, dispatch identity, tool,
+canonicalized meaningful arguments, canonical destination, side-effect class,
+agent, and policy. Canonically equivalent destinations produce the same id;
+different destinations do not. With derived identity, `request_id` and
+`effect_id` coincide. With an explicit business `request_id`, the row stores
+the independently derived `effect_id` for audit, but storage still keys and
+deduplicates by `request_id`; callers must reuse the same explicit
+`request_id` for the same logical effect.
+
+Every successful claim increments `LedgerEntry.fence`. Every later mutation
+for that claim—decision, boundary, heartbeat/lease, provider reference,
+receipt, completion, failure, reconciliation, and operator resolution—uses a
+storage CAS that requires the same fence. A worker resumed after takeover
+cannot mutate the winner's row even if stale owner or lease metadata still
+looks plausible.
+
+Policy checks compose as pure `(DecisionIntent, DecisionSnapshot)` predicates.
+`register_decision_predicate(name, predicate)` adds a host predicate at the
+single enforcement point. The combined `Decision` and every predicate verdict
+are sanitized and persisted atomically with the fenced
+`INTENDED → ATTEMPTING` transition. A denial records `ABORTED`; the
+`@ledger` / `@ledger_sync` and YAML/config wrapper paths do not invoke the body
+unless the allowed decision write succeeded. A stale-fence worker cannot
+record a decision. A manual integration must call `record_decision(...)` with
+the claim fence and wait for success before invoking the body or provider;
+Mycelium cannot stop a manual host from calling a provider outside its APIs.
+
+**Failure-mode catalog.** Stable AF-001…AF-012 definitions (shipped vs roadmap)
 live in [`docs/FAILURE_MODE_CATALOG.md`](docs/FAILURE_MODE_CATALOG.md).
 
 **Failure & threat model.** What this core can and cannot protect you from is
@@ -736,7 +808,9 @@ see [examples/langgraph_redis_crash/](examples/langgraph_redis_crash/).
 
 ### Transition envelope fields
 
-Seven fields decide whether an unresolved prior execution is merely **wasteful** (safe to retry/poll) or **unsafe** (must not re-run). Priority order:
+Seven recovery axes decide whether an unresolved prior execution is merely
+**wasteful** (safe to retry/poll) or **unsafe** (must not re-run). Priority
+order:
 
 | # | Field | Role |
 |---|-------|------|
@@ -750,7 +824,11 @@ Seven fields decide whether an unresolved prior execution is merely **wasteful**
 
 **Invariant:** for a given tool class, the fields that class **requires** must already be **supported and recorded** on the transition before a redispatch is treated as a safe retry. Reads need a lighter set (class + terminal + lease). Payment / write / email / subagent need spendability, boundary, terminal outcome, and usually an external receipt/ref — without them, a second dispatch is an **unsupported second transition**, not a retry.
 
-Also on the durable record: `transition_key`, `idempotency_key`, `owner`, `lease_until`, `receipt_ref`.
+For a classified, bound transition, the effect-commit record additionally
+carries `effect_id`, `EffectState` (resolved from the compatibility
+`effect_phase` storage field), `schema_version`, atomic `decision`, `fence`,
+`transition_key`, `idempotency_key`, `owner`, `lease_until`, and
+`receipt_ref`.
 
 ### Side-effect classes
 
@@ -1397,9 +1475,10 @@ Authorization is checked again immediately before use. Expiry at or before
 the use instant (`now >= expires_at`) blocks execution; completed-result
 reads remain available. Mycelium cannot guarantee authority remains valid
 throughout an external network call. Clock synchronization is an
-operational assumption unless storage/server time is authoritative. This
-item alone does not complete use-time currency — do not release until that
-lands.
+operational assumption unless storage/server time is authoritative.
+Authority expiry and use-time currency are separate checks and ship together:
+the former validates time-bounded authority, while the latter revalidates the
+facts behind the decision.
 
 ```python
 from mycelium import (
@@ -1564,8 +1643,9 @@ with execution_scope(TransitionScope(run_id="r1", thread_id="t")):
     fetch_customer(customer_id="c1")  # ok; tools outside the freeze soft-block
 ```
 
-Wrapper order: `@secret_args` → `@entity_guard` → `@destructive_confirm` → `@scope_guard` → `@loop_guard` → `@ledger` →
-`@bounded` → `@protect`. CLI: `mycelium scope status|bind`. Demo:
+Wrapper order: `@secret_args` → `@entity_guard` → `@destructive_confirm` →
+`@state_authority` → `@scope_guard` → `@budget_guard` → `@loop_guard` →
+`@ledger` → `@bounded` → `@protect`. CLI: `mycelium scope status|bind`. Demo:
 `python examples/scope_guard_allowlist.py` (from `sdk/`).
 
 ### Completion contract (AF-007): refuse terminal while required subtasks pending
@@ -1739,8 +1819,8 @@ Tools without a `transition_binding` (unclassified) have unknown side-effect sem
 
 | Policy | Default | Behavior |
 |--------|---------|----------|
-| `warn` | yes | One-time `UserWarning` per tool when a failed entry is reclaimed; legacy behavior (re-execute) |
-| `strict` | no | Routes through `claim_side_effecting` with a conservative binding (`non_idempotent_mutate`); failed retries **hard-block** instead of re-executing |
+| `warn` | library / development | One-time `UserWarning` per tool when a failed entry is reclaimed; legacy behavior (re-execute) |
+| `strict` | omitted YAML value under `profile: production` | Routes through `claim_side_effecting` with a conservative binding (`non_idempotent_mutate`); failed retries **hard-block** instead of re-executing |
 
 ```python
 # Decorator
@@ -1823,9 +1903,9 @@ r2 = process_invoice(invoice_id="inv-42", task_id="invoice-42-attempt-2")  # fre
 Separate YAML sections per guard type. Global ledger settings inherit into tools/tasks
 so you do not repeat storage paths on every function.
 
-**Deployments:** set `profile: production`. That does not change library defaults
-for omitted configs (still `warn` / `derived`). It applies fail-closed
-policies:
+**Deployments:** set `profile: production`. Direct constructors and development
+keep their compatibility defaults; the production profile applies these
+fail-closed YAML defaults and requirements:
 
 - `action_ledger.memory_storage_policy: error` — side-effecting tools cannot
   use memory storage
@@ -1834,6 +1914,10 @@ policies:
   `irreversible` tools need a host-owned `request_id` (or
   `request_id_from`) before claim or execution. Reads may keep derived
   identity. `tool_call_id` / `run_id` / `thread_id` are not business IDs.
+- omitted `action_ledger.unclassified_policy` defaults to `strict`, so a
+  failed retry without a transition binding hard-blocks instead of silently
+  reclaiming. An explicit `warn` remains accepted for compatibility; declare
+  `side_effect_class` for consequential tools.
 - `loop_guard` / `scope_guard` `missing_run_id_policy: error` when those
   guards are enabled — missing `run_id` raises `MissingRunIdentityError`
 - `outcome_emit:` is required with durable storage (not memory). Prefer
@@ -1852,12 +1936,15 @@ policies:
   must be declared. Omitted `destructive_confirm:` stays backward
   compatible.
 
-Explicit weaker settings (`warn`, `derived`, memory outcomes) under
-production are rejected (`ConfigError`), not silently weakened. Omit
-`profile` or set `profile: development` for tests.
+Explicit weaker settings for memory storage, request identity, run identity,
+outcome storage, and enabled production guards are rejected (`ConfigError`),
+not silently weakened. `action_ledger.unclassified_policy: warn` is the stated
+compatibility exception. Omit `profile` or set `profile: development` for
+tests.
 
-`unclassified_policy: warn` remains an accepted product choice. Important
-tools should still declare `side_effect_class`.
+The direct/decorator and development default remains
+`unclassified_policy: warn`. Production changes only the omitted YAML value to
+`strict`; explicit `warn` remains an accepted compatibility choice.
 
 ```yaml
 profile: production
@@ -1877,7 +1964,7 @@ transition:
 action_ledger:
   storage: postgres
   dsn_env: MYCELIUM_POSTGRES_DSN
-  unclassified_policy: warn
+  unclassified_policy: strict
   memory_storage_policy: error
   request_identity_policy: require_explicit
 
@@ -2082,7 +2169,10 @@ Legacy per-tool style still works. Start with `mycelium init`; use `mycelium ini
 
 **Problem:** Two workers claim the same transition. Worker A completes. Worker B's stale `IN_FLIGHT` entry resolves later and silently overwrites A's `COMPLETED` result with a `FAILED_*` outcome. The operation's terminal state is lost.
 
-**Solution:** Every terminal-outcome write goes through a CAS (`try_transition`) that checks the entry's current `terminal_outcome` and `owner` against expected values. Already-resolved entries refuse overwrites.
+**Solution:** Every claim receives a monotonically increasing fence. Every
+subsequent mutation goes through `try_transition`, which checks the stored
+terminal outcome plus the expected fence (and owner/effect state where
+applicable). Already-resolved or superseded entries refuse overwrites.
 
 ### Transition matrix (rejected transitions)
 
@@ -2097,9 +2187,14 @@ Legacy per-tool style still works. Start with `mycelium init`; use `mycelium ini
 
 Resolution paths (`release()` / reconcile) can complete from `BLOCKED`, `UNKNOWN`, or `FAILED_AFTER_EFFECT` — they pass a broader `_expected_from` set.
 
-### Owner fencing
+### Fenced mutations
 
-The `@ledger` / `@ledger_sync` wrapper captures the current worker's identity (`_ledger_owner()`) and passes it to `complete()` and `_record_failure`. If a different worker tries to resolve the same entry, the CAS rejects it with `LedgerOutcomeAlreadySetError`. In `_record_failure`, the CAS error is caught and the original tool exception is re-raised — never masked.
+The `@ledger` / `@ledger_sync` wrapper captures the current worker identity and
+claim fence. A takeover increments the stored fence; stale decision, boundary,
+heartbeat, provider-reference, receipt, completion, failure, reconciliation,
+and operator-resolution writes are rejected with
+`LedgerOutcomeAlreadySetError`. Owner checks remain additional protection. In
+`_record_failure`, a CAS rejection never masks the original tool exception.
 
 ### Backend implementation
 
@@ -2107,8 +2202,9 @@ The `@ledger` / `@ledger_sync` wrapper captures the current worker's identity (`
 |---------|--------------|
 | Memory | `InMemoryLedgerStorage` delegates to `set()` when CAS matches |
 | File | Within `LockedJsonDictFile.read_modify_write` |
+| SQLite | Conditional `UPDATE` over JSON outcome / owner / fence / effect state |
 | Redis | `pipe.watch()` on the key; `WatchError` retry loop on conflict |
-| Postgres | `UPDATE ... WHERE payload->>'terminal_outcome' = ANY(...) RETURNING` |
+| Postgres | Conditional `UPDATE ... RETURNING` over outcome / owner / fence / effect state |
 
 ### NOT_EXECUTED reset CAS (v1.18+)
 
