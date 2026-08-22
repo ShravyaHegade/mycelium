@@ -6,6 +6,7 @@ import json
 import re
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Any, TypeVar
 
 from mycelium.storage._helpers import ClaimOutcome, claim_inflight_outcome, with_lease
@@ -62,14 +63,26 @@ class PostgresEntryStorage:
     def _table_id(self) -> Any:
         return self._sql.Identifier(self._table)
 
+    def _effect_index_id(self) -> Any:
+        return self._sql.Identifier(f"{self._table}_effect_id_unique")
+
+    @staticmethod
+    def _effect_id_for_entry(entry: Any) -> str:
+        return str(getattr(entry, "effect_id", None) or entry.request_id)
+
     def _ensure_schema(self) -> None:
         if self._schema_ready:
             return
         query = self._sql.SQL(
             "CREATE TABLE IF NOT EXISTS {} (request_id TEXT PRIMARY KEY, payload JSONB NOT NULL)"
         ).format(self._table_id())
+        effect_index = self._sql.SQL(
+            "CREATE UNIQUE INDEX IF NOT EXISTS {} ON {} "
+            "((COALESCE(payload->>'effect_id', request_id)))"
+        ).format(self._effect_index_id(), self._table_id())
         with self._psycopg.connect(self._dsn) as conn:
             conn.execute(query)
+            conn.execute(effect_index)
             conn.commit()
         self._schema_ready = True
 
@@ -87,11 +100,21 @@ class PostgresEntryStorage:
     def set(self, entry: E) -> None:
         self._ensure_schema()
         payload = json.loads(json.dumps(entry.to_dict(), default=str))
+        effect_id = self._effect_id_for_entry(entry)
+        lookup_query = self._sql.SQL(
+            "SELECT request_id FROM {} "
+            "WHERE COALESCE(payload->>'effect_id', request_id) = %s "
+            "LIMIT 1"
+        ).format(self._table_id())
         query = self._sql.SQL(
             "INSERT INTO {} (request_id, payload) VALUES (%s, %s::jsonb) "
             "ON CONFLICT (request_id) DO UPDATE SET payload = EXCLUDED.payload"
         ).format(self._table_id())
         with self._psycopg.connect(self._dsn) as conn:
+            existing = conn.execute(lookup_query, (effect_id,)).fetchone()
+            if existing is not None and str(existing[0]) != entry.request_id:
+                conn.commit()
+                return
             conn.execute(query, (entry.request_id, json.dumps(payload)))
             conn.commit()
 
@@ -103,14 +126,22 @@ class PostgresEntryStorage:
     ) -> tuple[ClaimOutcome, E | None]:
         self._ensure_schema()
         now = time.time()
+        effect_id = self._effect_id_for_entry(entry)
         fresh = with_lease(entry, now=now, lease_ttl=lease_ttl)
         payload = json.loads(json.dumps(fresh.to_dict(), default=str))
         insert_query = self._sql.SQL(
             "INSERT INTO {} (request_id, payload) VALUES (%s, %s::jsonb) "
-            "ON CONFLICT (request_id) DO NOTHING RETURNING request_id"
+            "ON CONFLICT DO NOTHING RETURNING request_id"
         ).format(self._table_id())
         select_for_update = self._sql.SQL(
-            "SELECT payload FROM {} WHERE request_id = %s FOR UPDATE"
+            "SELECT request_id, payload FROM {} WHERE request_id = %s FOR UPDATE"
+        ).format(self._table_id())
+        select_by_effect = self._sql.SQL(
+            "SELECT request_id, payload FROM {} "
+            "WHERE COALESCE(payload->>'effect_id', request_id) = %s "
+            "ORDER BY request_id "
+            "LIMIT 1 "
+            "FOR UPDATE"
         ).format(self._table_id())
         update_reclaim = self._sql.SQL(
             "UPDATE {} SET payload = %s::jsonb WHERE request_id = %s RETURNING request_id"
@@ -127,20 +158,41 @@ class PostgresEntryStorage:
 
                 row = conn.execute(select_for_update, (entry.request_id,)).fetchone()
                 if row is None:
-                    return "claimed", None
+                    row = conn.execute(select_by_effect, (effect_id,)).fetchone()
+                if row is None:
+                    inserted = conn.execute(
+                        insert_query,
+                        (entry.request_id, json.dumps(payload)),
+                    ).fetchone()
+                    if inserted is not None:
+                        return "claimed", None
+                    row = conn.execute(select_by_effect, (effect_id,)).fetchone()
+                    if row is None:
+                        return "in_flight", None
 
-                existing = self._from_dict(_payload_dict(row[0]))
+                active_request_id = str(row[0])
+                existing = self._from_dict(_payload_dict(row[1]))
                 outcome = claim_inflight_outcome(existing, now=now)
                 if outcome == "completed":
                     return "completed", existing
                 if outcome == "in_flight":
                     return "in_flight", existing
 
-                reclaim_entry = with_lease(entry, now=now, lease_ttl=lease_ttl, prior=existing)
+                claim_entry = (
+                    entry
+                    if active_request_id == entry.request_id
+                    else replace(entry, request_id=active_request_id)
+                )
+                reclaim_entry = with_lease(
+                    claim_entry,
+                    now=now,
+                    lease_ttl=lease_ttl,
+                    prior=existing,
+                )
                 reclaim_payload = json.loads(json.dumps(reclaim_entry.to_dict(), default=str))
                 reclaimed = conn.execute(
                     update_reclaim,
-                    (json.dumps(reclaim_payload), entry.request_id),
+                    (json.dumps(reclaim_payload), active_request_id),
                 ).fetchone()
                 if reclaimed is not None:
                     return "claimed", None
@@ -206,6 +258,25 @@ class PostgresEntryStorage:
             rows = conn.execute(query).fetchall()
         return [self._from_dict(_payload_dict(row[0])) for row in rows]
 
+    def resolve_request_id(self, effect_id: str) -> str | None:
+        self._ensure_schema()
+        query = self._sql.SQL(
+            "SELECT request_id FROM {} "
+            "WHERE COALESCE(payload->>'effect_id', request_id) = %s "
+            "ORDER BY request_id LIMIT 1"
+        ).format(self._table_id())
+        with self._psycopg.connect(self._dsn) as conn:
+            row = conn.execute(query, (effect_id,)).fetchone()
+        if row is None:
+            return None
+        return str(row[0])
+
+    def get_by_effect_id(self, effect_id: str) -> E | None:
+        request_id = self.resolve_request_id(effect_id)
+        if request_id is None:
+            return None
+        return self.get(request_id)
+
 
 class PostgresLedgerStorage:
     """Postgres storage for :class:`~mycelium.action_ledger.LedgerEntry`."""
@@ -240,6 +311,12 @@ class PostgresLedgerStorage:
 
     def list_all(self) -> list[Any]:
         return self._inner.list_all()
+
+    def resolve_request_id(self, effect_id: str) -> str | None:
+        return self._inner.resolve_request_id(effect_id)
+
+    def get_by_effect_id(self, effect_id: str) -> Any | None:
+        return self._inner.get_by_effect_id(effect_id)
 
     def try_transition(
         self,
@@ -294,3 +371,9 @@ class PostgresTaskLedgerStorage:
 
     def list_all(self) -> list[Any]:
         return self._inner.list_all()
+
+    def resolve_request_id(self, effect_id: str) -> str | None:
+        return self._inner.resolve_request_id(effect_id)
+
+    def get_by_effect_id(self, effect_id: str) -> Any | None:
+        return self._inner.get_by_effect_id(effect_id)

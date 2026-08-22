@@ -24,6 +24,7 @@ def _entry(
     ref: str | None = None,
     effect_id: str | None = None,
 ) -> LedgerEntry:
+    resolved_effect_id = effect_id or request_id
     return LedgerEntry(
         request_id=request_id,
         tool="charge",
@@ -32,7 +33,8 @@ def _entry(
         status="completed" if terminal == "COMPLETED" else "failed",
         terminal_outcome=terminal,
         external_operation_ref=ref,
-        idempotency_key=effect_id or request_id,
+        idempotency_key=resolved_effect_id,
+        effect_id=resolved_effect_id,
     )
 
 
@@ -157,3 +159,25 @@ def test_simulation_scenario_known() -> None:
     from mycelium.verify.registry import known_scenarios
 
     assert "simulation" in known_scenarios()
+    assert "state-machine-exhaustive" in known_scenarios()
+
+
+def test_state_machine_exhaustive_scenario_passes(tmp_path: Path) -> None:
+    mod = types.ModuleType("verify_probe_tools")
+    mod.charge = lambda order_id: {"charged": True}  # type: ignore[attr-defined]
+    sys.modules["verify_probe_tools"] = mod
+    try:
+        report = run_verify(
+            _sqlite_dev(tmp_path),
+            scenarios=["state-machine-exhaustive"],
+            connectivity=False,
+            timeout_seconds=25,
+        )
+        evidence = report.scenarios[0]
+        assert evidence.status == VerificationStatus.PASS, evidence.observed_behavior
+        decisions = " ".join(evidence.ledger_decisions)
+        assert "stale-fence" in decisions
+        assert "reconcile" in decisions
+        assert "concurrent-claim" in decisions
+    finally:
+        del sys.modules["verify_probe_tools"]

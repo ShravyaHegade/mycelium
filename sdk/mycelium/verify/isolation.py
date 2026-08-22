@@ -106,6 +106,19 @@ class IsolationGateStorage:
             owned.append(row)
         return owned
 
+    def resolve_request_id(self, effect_id: str) -> str | None:
+        canonical = self._inner.resolve_request_id(effect_id)
+        if canonical is None:
+            return None
+        return self._guard(canonical)
+
+    def get_by_effect_id(self, effect_id: str) -> LedgerEntry | None:
+        entry = self._inner.get_by_effect_id(effect_id)
+        if entry is None:
+            return None
+        self._guard(entry.request_id)
+        return entry
+
 
 class FaultInjectingStorage:
     """Deterministic outage wrapper. Does not swap the inner backend type."""
@@ -181,6 +194,12 @@ class FaultInjectingStorage:
     def list_all(self) -> list[LedgerEntry]:
         self._maybe_fail(self.fail_list_all, "list_all")
         return self._inner.list_all()
+
+    def resolve_request_id(self, effect_id: str) -> str | None:
+        return self._inner.resolve_request_id(effect_id)
+
+    def get_by_effect_id(self, effect_id: str) -> LedgerEntry | None:
+        return self._inner.get_by_effect_id(effect_id)
 
 
 class VerificationAdapter(Protocol):
@@ -494,6 +513,12 @@ class _PostgresPrefixedStorage:
             if entry is not None:
                 entries.append(entry)
         return entries
+
+    def resolve_request_id(self, effect_id: str) -> str | None:
+        return self._inner.resolve_request_id(effect_id)
+
+    def get_by_effect_id(self, effect_id: str) -> LedgerEntry | None:
+        return self._inner.get_by_effect_id(effect_id)
 
 
 def _redis_session(

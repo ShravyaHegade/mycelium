@@ -8,6 +8,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -65,12 +66,24 @@ class SqliteEntryStorage:
         conn.row_factory = sqlite3.Row
         return conn
 
+    @staticmethod
+    def _effect_id_for_entry(entry: Any) -> str:
+        return str(getattr(entry, "effect_id", None) or entry.request_id)
+
+    @staticmethod
+    def _effect_id_from_row(request_id: str, payload: dict[str, Any]) -> str:
+        return str(payload.get("effect_id") or request_id)
+
     def _ensure_schema(self, conn: sqlite3.Connection) -> None:
         if self._schema_ready:
             return
         conn.execute(
             f"CREATE TABLE IF NOT EXISTS {self._table} ("
             "request_id TEXT PRIMARY KEY, payload TEXT NOT NULL)"
+        )
+        conn.execute(
+            f"CREATE UNIQUE INDEX IF NOT EXISTS {self._table}_effect_id_unique "
+            f"ON {self._table} (COALESCE(json_extract(payload, '$.effect_id'), request_id))"
         )
         conn.commit()
         self._schema_ready = True
@@ -89,9 +102,19 @@ class SqliteEntryStorage:
 
     def set(self, entry: E) -> None:
         payload = json.dumps(entry.to_dict(), default=str)
+        effect_id = self._effect_id_for_entry(entry)
         with self._lock:
             with self._connect() as conn:
                 self._ensure_schema(conn)
+                existing = conn.execute(
+                    f"SELECT request_id FROM {self._table} "
+                    "WHERE COALESCE(json_extract(payload, '$.effect_id'), request_id) = ? "
+                    "LIMIT 1",
+                    (effect_id,),
+                ).fetchone()
+                if existing is not None and str(existing["request_id"]) != entry.request_id:
+                    conn.commit()
+                    return
                 conn.execute(
                     f"INSERT INTO {self._table} (request_id, payload) VALUES (?, ?) "
                     "ON CONFLICT(request_id) DO UPDATE SET payload = excluded.payload",
@@ -106,8 +129,10 @@ class SqliteEntryStorage:
         lease_ttl: float = 3600.0,
     ) -> tuple[ClaimOutcome, E | None]:
         now = time.time()
-        fresh = with_lease(entry, now=now, lease_ttl=lease_ttl)
-        fresh_payload = json.dumps(fresh.to_dict(), default=str)
+        effect_id = self._effect_id_for_entry(entry)
+        fresh_payload = json.dumps(
+            with_lease(entry, now=now, lease_ttl=lease_ttl).to_dict(), default=str
+        )
 
         with self._lock:
             with self._connect() as conn:
@@ -123,18 +148,37 @@ class SqliteEntryStorage:
                         return "claimed", None
 
                     row = conn.execute(
-                        f"SELECT payload FROM {self._table} WHERE request_id = ?",
+                        f"SELECT request_id, payload FROM {self._table} WHERE request_id = ?",
                         (entry.request_id,),
                     ).fetchone()
                     if row is None:
-                        # Rare race: deleted between IGNORE miss and SELECT.
-                        conn.execute(
-                            f"INSERT INTO {self._table} (request_id, payload) VALUES (?, ?)",
+                        row = conn.execute(
+                            f"SELECT request_id, payload FROM {self._table} "
+                            "WHERE COALESCE(json_extract(payload, '$.effect_id'), request_id) = ? "
+                            "ORDER BY request_id LIMIT 1",
+                            (effect_id,),
+                        ).fetchone()
+                    if row is None:
+                        # Rare race: row vanished between IGNORE miss and lookup.
+                        inserted = conn.execute(
+                            f"INSERT OR IGNORE INTO {self._table} "
+                            "(request_id, payload) VALUES (?, ?)",
                             (entry.request_id, fresh_payload),
                         )
-                        conn.commit()
-                        return "claimed", None
+                        if inserted.rowcount == 1:
+                            conn.commit()
+                            return "claimed", None
+                        row = conn.execute(
+                            f"SELECT request_id, payload FROM {self._table} "
+                            "WHERE COALESCE(json_extract(payload, '$.effect_id'), request_id) = ? "
+                            "ORDER BY request_id LIMIT 1",
+                            (effect_id,),
+                        ).fetchone()
+                        if row is None:
+                            conn.commit()
+                            return "in_flight", None
 
+                    active_request_id = str(row["request_id"])
                     existing = self._from_dict(_payload_dict(row["payload"]))
                     outcome = claim_inflight_outcome(existing, now=now)
                     if outcome == "completed":
@@ -144,10 +188,17 @@ class SqliteEntryStorage:
                         conn.commit()
                         return "in_flight", existing
 
-                    reclaimed = with_lease(entry, now=now, lease_ttl=lease_ttl, prior=existing)
+                    claim_entry = (
+                        entry
+                        if active_request_id == entry.request_id
+                        else replace(entry, request_id=active_request_id)
+                    )
+                    reclaimed = with_lease(
+                        claim_entry, now=now, lease_ttl=lease_ttl, prior=existing
+                    )
                     conn.execute(
                         f"UPDATE {self._table} SET payload = ? WHERE request_id = ?",
-                        (json.dumps(reclaimed.to_dict(), default=str), entry.request_id),
+                        (json.dumps(reclaimed.to_dict(), default=str), active_request_id),
                     )
                     conn.commit()
                     return "claimed", None
@@ -207,6 +258,41 @@ class SqliteEntryStorage:
                 rows = conn.execute(f"SELECT payload FROM {self._table}").fetchall()
         return [self._from_dict(_payload_dict(row["payload"])) for row in rows]
 
+    def resolve_request_id(self, effect_id: str) -> str | None:
+        with self._lock:
+            with self._connect() as conn:
+                self._ensure_schema(conn)
+                row = conn.execute(
+                    f"SELECT request_id FROM {self._table} "
+                    "WHERE COALESCE(json_extract(payload, '$.effect_id'), request_id) = ? "
+                    "ORDER BY request_id LIMIT 1",
+                    (effect_id,),
+                ).fetchone()
+                if row is not None:
+                    return str(row["request_id"])
+                rows = conn.execute(f"SELECT request_id, payload FROM {self._table}").fetchall()
+        candidates: list[tuple[float, str]] = []
+        for row in rows:
+            request_id = str(row["request_id"])
+            payload = _payload_dict(row["payload"])
+            if self._effect_id_from_row(request_id, payload) == effect_id:
+                started = payload.get("started_at")
+                try:
+                    started_at = float(started) if started is not None else 0.0
+                except (TypeError, ValueError):
+                    started_at = 0.0
+                candidates.append((started_at, request_id))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: (item[0], item[1]))
+        return candidates[0][1]
+
+    def get_by_effect_id(self, effect_id: str) -> E | None:
+        request_id = self.resolve_request_id(effect_id)
+        if request_id is None:
+            return None
+        return self.get(request_id)
+
 
 class SqliteLedgerStorage:
     """SQLite storage for :class:`~mycelium.action_ledger.LedgerEntry`."""
@@ -241,6 +327,12 @@ class SqliteLedgerStorage:
 
     def list_all(self) -> list[Any]:
         return self._inner.list_all()
+
+    def resolve_request_id(self, effect_id: str) -> str | None:
+        return self._inner.resolve_request_id(effect_id)
+
+    def get_by_effect_id(self, effect_id: str) -> Any | None:
+        return self._inner.get_by_effect_id(effect_id)
 
     def try_transition(
         self,
@@ -295,3 +387,9 @@ class SqliteTaskLedgerStorage:
 
     def list_all(self) -> list[Any]:
         return self._inner.list_all()
+
+    def resolve_request_id(self, effect_id: str) -> str | None:
+        return self._inner.resolve_request_id(effect_id)
+
+    def get_by_effect_id(self, effect_id: str) -> Any | None:
+        return self._inner.get_by_effect_id(effect_id)

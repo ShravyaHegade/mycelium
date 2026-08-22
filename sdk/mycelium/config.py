@@ -359,6 +359,7 @@ class ToolConfig:
     capability: ToolCapability | None = None
     provider_idempotency_key_param: str | None = None
     provider_idempotency_key_ttl: float | None = None
+    propagate_effect_id_as_provider_key: bool = False
     request_id_from: str | None = None
     callable_path: str | None = None
     # Per-tool loop_guard: None=inherit global, False=disable, dict=overrides
@@ -1750,6 +1751,9 @@ class MyceliumConfig:
             provider_idempotency_key_ttl=(
                 tool_config.provider_idempotency_key_ttl
             ),
+            propagate_effect_id_as_provider_key=(
+                tool_config.propagate_effect_id_as_provider_key
+            ),
             request_id_from=tool_config.request_id_from,
         )
 
@@ -2238,6 +2242,20 @@ def _parse_tool_config(
             )
         provider_idempotency_key_ttl = float(value)
 
+    propagate_effect_id_as_provider_key = False
+    if "propagate_effect_id_as_provider_key" in raw:
+        value = raw["propagate_effect_id_as_provider_key"]
+        if not isinstance(value, bool):
+            raise ConfigError(
+                f"tool '{name}': propagate_effect_id_as_provider_key must be a bool"
+            )
+        propagate_effect_id_as_provider_key = value
+    if propagate_effect_id_as_provider_key and provider_idempotency_key_param is None:
+        raise ConfigError(
+            f"tool '{name}': propagate_effect_id_as_provider_key requires "
+            "provider_idempotency_key_param"
+        )
+
     request_id_from: str | None = None
     if "request_id_from" in raw:
         value = raw["request_id_from"]
@@ -2368,6 +2386,7 @@ def _parse_tool_config(
         capability=capability,
         provider_idempotency_key_param=provider_idempotency_key_param,
         provider_idempotency_key_ttl=provider_idempotency_key_ttl,
+        propagate_effect_id_as_provider_key=propagate_effect_id_as_provider_key,
         request_id_from=request_id_from,
         callable_path=callable_path,
         loop_guard=loop_guard_cfg,
@@ -2477,6 +2496,7 @@ def _apply_action_ledger_tools(
             spendability=existing.spendability,
             provider_idempotency_key_param=existing.provider_idempotency_key_param,
             provider_idempotency_key_ttl=existing.provider_idempotency_key_ttl,
+            propagate_effect_id_as_provider_key=existing.propagate_effect_id_as_provider_key,
             request_id_from=existing.request_id_from,
             callable_path=existing.callable_path,
             loop_guard=existing.loop_guard,

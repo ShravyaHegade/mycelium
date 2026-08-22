@@ -42,9 +42,15 @@
 # provider_idempotency_key_param (optional, per tool): names the kwarg that
 #   carries the provider idempotency key. When set, a
 #   retry_only_with_same_provider_idempotency_key retry is ALLOWED only if it
-#   reuses the same key, else HARD_BLOCK. Omit to keep the cooperative default.
+#   reuses the same key, else HARD_BLOCK. For keyed_mutate tools, when this
+#   param is declared and a call omits the kwarg, Mycelium auto-injects
+#   effect_id as the provider key (after ATTEMPTING decision CAS, before body).
+#   Omit the param to keep the cooperative default.
 #   e.g.  your_keyed_mutate_tool: {side_effect_class: keyed_mutate,
 #                                  provider_idempotency_key_param: idempotency_key}
+# propagate_effect_id_as_provider_key (optional bool): for non-keyed classes,
+#   opt-in to the same "inject effect_id when missing" behavior. Requires
+#   provider_idempotency_key_param.
 # provider_idempotency_key_ttl (optional, per tool; seconds): validity window
 #   for the provider idempotency key. On a same-key retry, if the elapsed time
 #   since the first attempt exceeds this TTL, the gate HARD_BLOCKs (provider

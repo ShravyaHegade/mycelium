@@ -37,14 +37,17 @@ from mycelium.verify.invariants import (
     check_at_most_one_committed_effect_state,
     check_effect_state_consistency,
     check_provider_mapping,
+    check_unique_effect_id_index,
 )
 from mycelium.verify.registry import ScenarioContext, verify_scenario
 from mycelium.verify.types import VerificationEvidence, VerificationStatus
 from mycelium.verify.workers import (
     SYNTHETIC_TOOL,
+    count_executions,
     crash_worker,
     join_workers,
     make_ledger,
+    make_tool,
     read_lines,
     reconcile_worker,
     spawn_workers,
@@ -160,6 +163,8 @@ def _run_crash_sweep(
         for item in check_at_most_one_committed_effect_state(entries):
             failures.append(f"{phase}: {item.message}")
         for item in check_effect_state_consistency(entries):
+            failures.append(f"{phase}: {item.message}")
+        for item in check_unique_effect_id_index(entries):
             failures.append(f"{phase}: {item.message}")
         provider_effects = read_lines(effect_file)
         if provider_effects:
@@ -285,6 +290,8 @@ def _run_fence_takeover(
         failures.append(f"fence takeover: {violation.message}")
     for violation in check_effect_state_consistency([final]):
         failures.append(f"fence takeover: {violation.message}")
+    for violation in check_unique_effect_id_index([final]):
+        failures.append(f"fence takeover: {violation.message}")
     mapped, warnings = check_provider_mapping([final], provider_effects)
     for violation in mapped:
         failures.append(f"fence takeover: {violation.message}")
@@ -295,6 +302,68 @@ def _run_fence_takeover(
             "fence takeover: B sole COMMITTED row and provider attempt; A stale write refused"
         )
     return failures, decisions
+
+
+def _run_explicit_request_alias_dedupe(
+    iso: Any,
+    work: Path,
+) -> tuple[list[str], list[str], int]:
+    failures: list[str] = []
+    decisions: list[str] = []
+    artifact = str(work / "effect-id-alias-exec.txt")
+    storage = iso.open_storage()
+    first_request = iso.track(iso.namespace.request_id("sim", "effect-alias-a"))
+    second_request = iso.track(iso.namespace.request_id("sim", "effect-alias-b"))
+    alias_call_id = "effect-alias-call"
+    with execution_scope(TransitionScope(thread_id="verify", run_id="verify")):
+        tool = make_tool(storage, artifact, lease_ttl=10.0, poll_timeout=5.0)
+        first = tool(
+            1,
+            op_id="effect-alias-op",
+            tool_call_id=alias_call_id,
+            request_id=first_request,
+        )
+        second = tool(
+            1,
+            op_id="effect-alias-op",
+            tool_call_id=alias_call_id,
+            request_id=second_request,
+        )
+    if first != second:
+        failures.append(
+            "effect-id alias dedupe: mismatched results for equivalent explicit request_ids"
+        )
+    exec_count = count_executions(artifact)
+    if exec_count != 1:
+        failures.append(
+            f"effect-id alias dedupe: body executed {exec_count} times (expected 1)"
+        )
+    entries = [
+        entry
+        for entry in iso.open_fresh_client().list_all()
+        if entry.request_id in {first_request, second_request}
+    ]
+    if len(entries) != 1:
+        failures.append(
+            "effect-id alias dedupe: expected one canonical ledger row for colliding effect_id"
+        )
+    elif second_request not in entries[0].request_id_aliases:
+        failures.append(
+            "effect-id alias dedupe: canonical row did not retain supplied request_id alias"
+        )
+    for violation in check_at_most_one_committed(entries):
+        failures.append(f"effect-id alias dedupe: {violation.message}")
+    for violation in check_at_most_one_committed_effect_state(entries):
+        failures.append(f"effect-id alias dedupe: {violation.message}")
+    for violation in check_effect_state_consistency(entries):
+        failures.append(f"effect-id alias dedupe: {violation.message}")
+    for violation in check_unique_effect_id_index(entries):
+        failures.append(f"effect-id alias dedupe: {violation.message}")
+    if not failures:
+        decisions.append(
+            "effect-id alias dedupe: explicit request_id mismatch resolved to one canonical row"
+        )
+    return failures, decisions, exec_count
 
 
 @verify_scenario("simulation")
@@ -343,6 +412,11 @@ def run_simulation(ctx: ScenarioContext) -> VerificationEvidence:
         fence_failures, fence_decisions = _run_fence_takeover(iso, work)
         failures.extend(fence_failures)
         decisions.extend(fence_decisions)
+
+        alias_failures, alias_decisions, alias_exec = _run_explicit_request_alias_dedupe(iso, work)
+        failures.extend(alias_failures)
+        decisions.extend(alias_decisions)
+        total_exec += alias_exec
     finally:
         terminate_owned(ctx.owned_procs)
 
@@ -353,7 +427,7 @@ def run_simulation(ctx: ScenarioContext) -> VerificationEvidence:
         scenario="simulation",
         backend=iso.backend,
         namespace=iso.namespace.prefix,
-        attempts=len(_PHASES) + 1,
+        attempts=len(_PHASES) + 2,
         body_executions=total_exec,
         ledger_decisions=decisions,
         terminal_outcome="COMMITTED",
@@ -361,7 +435,8 @@ def run_simulation(ctx: ScenarioContext) -> VerificationEvidence:
         expected_behavior=(
             "for every effect_id at most one COMPLETED ledger entry, and every "
             "provider effect maps to at most one COMMITTED row; a superseded "
-            "worker's stale-fence write is rejected"
+            "worker's stale-fence write is rejected; mismatched explicit request_ids "
+            "for the same effect_id collapse to one canonical row"
         ),
         observed_behavior="; ".join(failures or decisions),
         artifacts=[str(work)],

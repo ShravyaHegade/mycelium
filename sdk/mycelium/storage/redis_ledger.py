@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Any, TypeVar
 
 from mycelium.storage._helpers import ClaimOutcome
@@ -53,6 +54,18 @@ class RedisEntryStorage:
         # Sibling namespace so list_all(prefix*) never treats tombs as entries.
         base = self._prefix.rstrip(":")
         return f"{base}-tomb:{request_id}"
+
+    def _effect_key(self, effect_id: str) -> str:
+        base = self._prefix.rstrip(":")
+        return f"{base}-effect:{effect_id}"
+
+    @staticmethod
+    def _effect_id_for_entry(entry: Any) -> str:
+        return str(getattr(entry, "effect_id", None) or entry.request_id)
+
+    @staticmethod
+    def _effect_id_from_payload(payload: dict[str, Any], request_id: str) -> str:
+        return str(payload.get("effect_id") or request_id)
 
     @staticmethod
     def _fence_from_payload(raw: str | None) -> int:
@@ -116,15 +129,73 @@ class RedisEntryStorage:
                         return None
                     tomb = self._from_dict(json.loads(tomb_raw))
                     ghost = self._ghost_from_tombstone(tomb, now=now)
+                    effect_id = self._effect_id_for_entry(ghost)
+                    effect_key = self._effect_key(effect_id)
+                    pipe.watch(effect_key)
+                    canonical = pipe.get(effect_key)
+                    if canonical is not None and str(canonical) != request_id:
+                        canonical_request_id = str(canonical)
+                        canonical_raw = pipe.get(self._key(canonical_request_id))
+                        if canonical_raw is not None:
+                            return self._from_dict(json.loads(canonical_raw))
+                        canonical_tomb = pipe.get(self._tombstone_key(canonical_request_id))
+                        if canonical_tomb is not None:
+                            return self._from_dict(json.loads(canonical_tomb))
+                        return None
                     payload = json.dumps(ghost.to_dict(), default=str)
                     pipe.multi()
                     pipe.set(key, payload)
                     pipe.set(tomb_key, payload)
+                    if canonical is None:
+                        pipe.set(effect_key, request_id)
                     pipe.execute()
                     return ghost
             except WatchError:
                 continue
         raise RuntimeError("Redis tombstone restoration exhausted WATCH retries")
+
+    def _scan_request_id_for_effect(self, effect_id: str) -> str | None:
+        pattern = f"{self._prefix}*"
+        candidates: list[tuple[float, str]] = []
+        for key in self._client.scan_iter(match=pattern):
+            raw = self._client.get(key)
+            if raw is None:
+                continue
+            payload = json.loads(raw)
+            request_id = str(payload.get("request_id") or "").strip()
+            if not request_id:
+                continue
+            if self._effect_id_from_payload(payload, request_id) != effect_id:
+                continue
+            started = payload.get("started_at")
+            try:
+                started_at = float(started) if started is not None else 0.0
+            except (TypeError, ValueError):
+                started_at = 0.0
+            candidates.append((started_at, request_id))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: (item[0], item[1]))
+        return candidates[0][1]
+
+    def resolve_request_id(self, effect_id: str) -> str | None:
+        effect_key = self._effect_key(effect_id)
+        mapped = self._client.get(effect_key)
+        if mapped:
+            canonical = str(mapped)
+            if self.get(canonical) is not None:
+                return canonical
+        canonical = self._scan_request_id_for_effect(effect_id)
+        if canonical is None:
+            return None
+        self._client.setnx(effect_key, canonical)
+        return canonical
+
+    def get_by_effect_id(self, effect_id: str) -> E | None:
+        request_id = self.resolve_request_id(effect_id)
+        if request_id is None:
+            return None
+        return self.get(request_id)
 
     def get(self, request_id: str) -> E | None:
         raw = self._client.get(self._key(request_id))
@@ -138,11 +209,21 @@ class RedisEntryStorage:
         payload = json.dumps(entry.to_dict(), default=str)
         key = self._key(entry.request_id)
         tomb_key = self._tombstone_key(entry.request_id)
+        effect_id = self._effect_id_for_entry(entry)
+        effect_key = self._effect_key(effect_id)
         incoming_fence = int(getattr(entry, "fence", 0) or 0)
         for _ in range(32):
             try:
                 with self._client.pipeline(transaction=True) as pipe:
-                    pipe.watch(key, tomb_key)
+                    pipe.watch(key, tomb_key, effect_key)
+                    canonical = pipe.get(effect_key)
+                    if (
+                        canonical is not None
+                        and str(canonical) != entry.request_id
+                        and pipe.get(key) is None
+                        and pipe.get(tomb_key) is None
+                    ):
+                        return
                     stored_fence = max(
                         self._fence_from_payload(pipe.get(key)),
                         self._fence_from_payload(pipe.get(tomb_key)),
@@ -155,6 +236,8 @@ class RedisEntryStorage:
                     else:
                         pipe.set(key, payload)
                     pipe.set(tomb_key, payload)
+                    if canonical is None:
+                        pipe.set(effect_key, entry.request_id)
                     pipe.execute()
                     return
             except WatchError:
@@ -169,13 +252,21 @@ class RedisEntryStorage:
     ) -> tuple[ClaimOutcome, E | None]:
         from mycelium.storage._helpers import claim_inflight_outcome, with_lease
 
-        key = self._key(entry.request_id)
+        effect_id = self._effect_id_for_entry(entry)
         ttl = int(max(self._in_flight_ttl or lease_ttl or 0, lease_ttl * 4))
 
         for _ in range(32):
+            canonical_request_id = self.resolve_request_id(effect_id)
+            active_request_id = canonical_request_id or entry.request_id
+            key = self._key(active_request_id)
+            claim_entry = (
+                entry
+                if active_request_id == entry.request_id
+                else replace(entry, request_id=active_request_id)
+            )
             existing_raw = self._client.get(key)
             if existing_raw is None:
-                restored = self._restore_from_tombstone(entry.request_id)
+                restored = self._restore_from_tombstone(active_request_id)
                 if restored is not None:
                     existing = restored
                     now = time.time()
@@ -185,13 +276,19 @@ class RedisEntryStorage:
                     if outcome == "in_flight":
                         return "in_flight", existing
                     # EXPIRED / retryable → CAS reclaim path below
-                    reclaimed = self._try_reclaim(key, entry, ttl, lease_ttl)
+                    reclaimed = self._try_reclaim(
+                        key,
+                        claim_entry,
+                        ttl,
+                        lease_ttl,
+                        effect_id=effect_id,
+                    )
                     if reclaimed is not None:
                         return reclaimed
                     continue
 
-                leased = with_lease(entry, now=time.time(), lease_ttl=lease_ttl)
-                if self._try_initial_claim(key, leased, ttl):
+                leased = with_lease(claim_entry, now=time.time(), lease_ttl=lease_ttl)
+                if self._try_initial_claim(key, leased, ttl, effect_id=effect_id):
                     return "claimed", None
                 continue
 
@@ -203,20 +300,30 @@ class RedisEntryStorage:
             if outcome == "in_flight":
                 return "in_flight", existing
 
-            reclaimed = self._try_reclaim(key, entry, ttl, lease_ttl)
+            reclaimed = self._try_reclaim(
+                key,
+                claim_entry,
+                ttl,
+                lease_ttl,
+                effect_id=effect_id,
+            )
             if reclaimed is not None:
                 return reclaimed
 
         raise RuntimeError("Redis claim exhausted WATCH retries")
 
-    def _try_initial_claim(self, key: str, entry: E, ttl: int) -> bool:
+    def _try_initial_claim(self, key: str, entry: E, ttl: int, *, effect_id: str) -> bool:
         from redis.exceptions import WatchError
 
         tomb_key = self._tombstone_key(entry.request_id)
+        effect_key = self._effect_key(effect_id)
         payload = json.dumps(entry.to_dict(), default=str)
         try:
             with self._client.pipeline(transaction=True) as pipe:
-                pipe.watch(key, tomb_key)
+                pipe.watch(key, tomb_key, effect_key)
+                canonical = pipe.get(effect_key)
+                if canonical is not None and str(canonical) != entry.request_id:
+                    return False
                 if pipe.get(key) is not None or pipe.get(tomb_key) is not None:
                     return False
                 pipe.multi()
@@ -225,6 +332,8 @@ class RedisEntryStorage:
                 else:
                     pipe.set(key, payload)
                 pipe.set(tomb_key, payload)
+                if canonical is None:
+                    pipe.set(effect_key, entry.request_id)
                 pipe.execute()
                 return True
         except WatchError:
@@ -236,6 +345,8 @@ class RedisEntryStorage:
         entry: E,
         ttl: int,
         lease_ttl: float,
+        *,
+        effect_id: str,
     ) -> tuple[ClaimOutcome, E | None] | None:
         """CAS reclaim: only overwrite if the stored entry is still
         reclaimable per :func:`claim_inflight_outcome`. Returns ``None``
@@ -245,9 +356,10 @@ class RedisEntryStorage:
         from mycelium.storage._helpers import claim_inflight_outcome, with_lease
 
         now = time.time()
+        effect_key = self._effect_key(effect_id)
         try:
             with self._client.pipeline(transaction=True) as pipe:
-                pipe.watch(key)
+                pipe.watch(key, effect_key)
                 raw = pipe.get(key)
                 if raw is None:
                     # Key evaporated under the watch — tombstone may still exist.
@@ -255,6 +367,10 @@ class RedisEntryStorage:
                     if restored is not None:
                         return "in_flight", restored
                     return None
+                canonical = pipe.get(effect_key)
+                if canonical is not None and str(canonical) != entry.request_id:
+                    current = self._from_dict(json.loads(raw))
+                    return "in_flight", current
                 current = self._from_dict(json.loads(raw))
                 rerun = claim_inflight_outcome(current, now=time.time())
                 if rerun != "claimed":
@@ -268,6 +384,8 @@ class RedisEntryStorage:
                 else:
                     pipe.set(key, payload)
                 pipe.set(self._tombstone_key(entry.request_id), payload)
+                if canonical is None:
+                    pipe.set(effect_key, entry.request_id)
                 pipe.execute()
                 return ("claimed", None)
         except WatchError:
@@ -288,11 +406,13 @@ class RedisEntryStorage:
         from mycelium.storage._helpers import lease_allows_renew
 
         key = self._key(entry.request_id)
+        effect_id = self._effect_id_for_entry(entry)
+        effect_key = self._effect_key(effect_id)
         payload = json.dumps(entry.to_dict(), default=str)
         for _ in range(32):
             try:
                 with self._client.pipeline(transaction=True) as pipe:
-                    pipe.watch(key)
+                    pipe.watch(key, effect_key)
                     raw = pipe.get(key)
                     if raw is None:
                         # TTL eviction mid-transition: restore history, then retry.
@@ -320,9 +440,12 @@ class RedisEntryStorage:
                         now=require_lease_held_at,
                     ):
                         return False
+                    canonical = pipe.get(effect_key)
                     pipe.multi()
                     pipe.set(key, payload)
                     pipe.set(self._tombstone_key(entry.request_id), payload)
+                    if canonical is None:
+                        pipe.set(effect_key, entry.request_id)
                     pipe.execute()
                     return True
             except WatchError:
@@ -374,6 +497,12 @@ class RedisLedgerStorage:
 
     def list_all(self) -> list[Any]:
         return self._inner.list_all()
+
+    def resolve_request_id(self, effect_id: str) -> str | None:
+        return self._inner.resolve_request_id(effect_id)
+
+    def get_by_effect_id(self, effect_id: str) -> Any | None:
+        return self._inner.get_by_effect_id(effect_id)
 
     def try_transition(
         self,
@@ -449,3 +578,9 @@ class RedisTaskLedgerStorage:
 
     def list_all(self) -> list[Any]:
         return self._inner.list_all()
+
+    def resolve_request_id(self, effect_id: str) -> str | None:
+        return self._inner.resolve_request_id(effect_id)
+
+    def get_by_effect_id(self, effect_id: str) -> Any | None:
+        return self._inner.get_by_effect_id(effect_id)

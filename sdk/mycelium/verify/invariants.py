@@ -22,6 +22,7 @@ __all__ = [
     "check_at_most_one_committed",
     "check_at_most_one_committed_effect_state",
     "check_effect_state_consistency",
+    "check_unique_effect_id_index",
     "check_provider_mapping",
     "committed_effect_ids",
     "committed_effect_ids_by_state",
@@ -39,20 +40,10 @@ class InvariantViolation:
 def _effect_ref(entry: Any) -> str | None:
     """The dedup identity to bucket a committed row under.
 
-    Uses the same keying as :func:`check_provider_mapping` (which maps provider
-    effects onto rows by ``request_id``): ``transition_key``, then
-    ``idempotency_key`` (the historical dedup ref, and what legacy rows with an
-    explicit idempotency key rely on), then ``request_id``. ``effect_id`` is
-    not consulted directly because for SDK-created rows it is either equal to
-    ``request_id`` (derived default) or, for rows with an explicit
-    ``request_id``, the derived transition hash — bucketing by it would diverge
-    from the provider-mapping key and break the at-most-once check.
+    ``effect_id`` is the authoritative cross-request dedup identity. Legacy
+    rows missing ``effect_id`` fall back to ``request_id``.
     """
-    return (
-        getattr(entry, "transition_key", None)
-        or getattr(entry, "idempotency_key", None)
-        or getattr(entry, "request_id", None)
-    )
+    return getattr(entry, "effect_id", None) or getattr(entry, "request_id", None)
 
 
 def committed_effect_ids(entries: Iterable[Any]) -> dict[str, list[str]]:
@@ -174,6 +165,28 @@ def check_effect_state_consistency(entries: Iterable[Any]) -> list[InvariantViol
     return violations
 
 
+def check_unique_effect_id_index(entries: Iterable[Any]) -> list[InvariantViolation]:
+    """Assert every ``effect_id`` resolves to exactly one canonical request row."""
+    mapping: dict[str, set[str]] = defaultdict(set)
+    for entry in entries:
+        effect_id = str(getattr(entry, "effect_id", None) or getattr(entry, "request_id", ""))
+        request_id = str(getattr(entry, "request_id", ""))
+        if not effect_id or not request_id:
+            continue
+        mapping[effect_id].add(request_id)
+    violations: list[InvariantViolation] = []
+    for effect_id, request_ids in mapping.items():
+        if len(request_ids) > 1:
+            violations.append(
+                InvariantViolation(
+                    effect_id,
+                    f"effect_id {effect_id!r} points to multiple request_ids: "
+                    f"{sorted(request_ids)}",
+                )
+            )
+    return violations
+
+
 def check_provider_mapping(
     entries: Iterable[Any],
     provider_effect_ids: Sequence[str | tuple[str, str]],
@@ -189,20 +202,24 @@ def check_provider_mapping(
     entry_list = list(entries)
     committed = committed_effect_ids(entry_list)
     ref_to_effect = {
-        str(entry.external_operation_ref): str(
-            getattr(entry, "transition_key", None)
-            or getattr(entry, "idempotency_key", None)
-            or entry.request_id
-        )
+        str(entry.external_operation_ref): str(_effect_ref(entry) or entry.request_id)
         for entry in entry_list
         if getattr(entry, "external_operation_ref", None)
     }
+    ledger_key_to_effect: dict[str, str] = {}
+    for entry in entry_list:
+        effect = str(_effect_ref(entry) or entry.request_id)
+        ledger_key_to_effect[entry.request_id] = effect
+        for alias in getattr(entry, "request_id_aliases", ()) or ():
+            if alias:
+                ledger_key_to_effect[str(alias)] = effect
     violations: list[InvariantViolation] = []
     warnings: list[str] = []
     executions: list[tuple[str, str]] = []
     for raw in provider_effect_ids:
         if isinstance(raw, tuple):
-            effect_id, provider_id = map(str, raw)
+            ledger_key, provider_id = map(str, raw)
+            effect_id = ledger_key_to_effect.get(ledger_key, ledger_key)
         else:
             provider_id = str(raw)
             effect_id = ref_to_effect.get(provider_id, provider_id)
