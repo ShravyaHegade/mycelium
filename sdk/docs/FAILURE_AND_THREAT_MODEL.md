@@ -12,8 +12,8 @@ README is the source of truth for how the pieces are used; this file is the
 honest accounting of what can go wrong and which guarantee is pinned to which
 test.
 
-> Version note: this document tracks the current release (**v1.33.0**).
-> Ledger-core guarantees below hold; since **v1.28.0**, `on_args_drift: soft`
+> This document tracks the shipped ledger core in this repository. Since
+> **v1.28.0**, `on_args_drift: soft`
 > is the default (identity-conflict refuse). Optional `loop_guard:` (AF-003),
 > `completion:` (AF-007), `scope_guard:` (AF-008), and `state_authority:` are
 > documented in the SDK README and are outside this core guarantee set.
@@ -87,7 +87,7 @@ The actors this core defends against (and the ones it assumes are honest):
 | 2 | **Two concurrent workers** | Worker A and Worker B both claim the same transition; both run the tool body. |
 | 3 | **Crash mid-effect** | The process is killed after the provider accepted the charge but before `complete()` — the transition is ambiguous. |
 | 4 | **Storage outage** | Redis / Postgres / the file backend is down at claim, complete, or failure-recording time. |
-| 5 | **Stalled worker wake** | A worker is paused (GC, partition, stopped auto-renew), its lease expires, then it wakes late with a stale snapshot and tries to resolve the entry. |
+| 5 | **Stalled worker wake** | A worker is paused (GC, partition, stopped auto-renew), its lease expires, then it wakes late with a stale fence and tries to mutate the winning entry. |
 | 6 | **Operator with backend access** | Anyone who can write to the ledger backend can release, stamp a resolution, or assert worker death. |
 | 7 | **Provider indexing lag** | A provider (e.g. Gmail sent-log) hasn't made a sent message visible yet — a naive reconciler would say "never sent". |
 | 8 | **Caller tweaking args / keys** | A caller changes a "fluff" argument to re-mint a different transition key and dodge an in-flight lease, starting a second side effect. |
@@ -110,18 +110,24 @@ section; the tests are concrete `file::test_name` entries.
    *Where:* [Resolution gates](../README.md#resolution-gates),
    [Backend implementation](../README.md#backend-implementation).
 
-2. **CAS on every terminal-outcome write.** `complete()` / `fail()` /
-   `mark_blocked()` / `mark_unknown()` are compare-and-swap writes that only
-   succeed from `IN_FLIGHT`. A resolved transition
-   (`COMPLETED` / `BLOCKED` / `UNKNOWN` / `FAILED_*`) refuses all four.
+2. **Fenced CAS on every claim mutation.** Every successful claim increments
+   a durable fence. Decision, boundary, heartbeat/lease, provider-reference,
+   receipt, completion, failure, reconciliation, worker-death, and
+   operator-resolution writes require the claim's current fence. A resolved
+   or superseded transition refuses stale writes.
    *Where:* [Atomicity contract](../README.md#atomicity-contract-v118),
    [Transition matrix](../README.md#transition-matrix-rejected-transitions).
 
-3. **Owner fencing.** The wrapper captures the worker's identity and passes it
-   as `_expected_owner`; a different worker's write to the same entry is
-   refused. A stale worker cannot silently overwrite a real `COMPLETED` (or a
-   real failure).
-   *Where:* [Owner fencing](../README.md#owner-fencing).
+3. **Single atomic decision point.** Registered pure predicates evaluate one
+   `(DecisionIntent, DecisionSnapshot)` and the combined, sanitized `Decision`
+   is persisted in the same fenced CAS that advances
+   `EffectState.INTENDED → ATTEMPTING` (or `ABORTED` on denial). The
+   `@ledger` / `@ledger_sync` and YAML/config wrapper paths invoke the body only
+   after that allowed decision is durably recorded. Ledger APIs for provider
+   references, boundary advancement, and completion require both an allowed
+   decision and the current fence. A stale worker cannot record a decision.
+   *Where:* [Effect-commit protocol](../README.md#effect-commit-protocol),
+   [Fenced mutations](../README.md#fenced-mutations).
 
 4. **Single-winner reclaim.** After a lease expires, at most one worker
    reclaims the transition; the loser polls or hard-blocks — never both run.
@@ -151,7 +157,12 @@ section; the tests are concrete `file::test_name` entries.
    transition (`maybe_crossed`, `crossed`, `FAILED_AFTER_EFFECT`, `EXPIRED`
    past the boundary, or `UNKNOWN` with no reconciler) hard-blocks instead of
    re-executing. The tool body never runs again until a reconciler proves
-   `NOT_EXECUTED` or an operator releases it.
+   `NOT_EXECUTED` or an operator releases it. `ToolCapability` makes the
+   recovery contract explicit: `BLIND` ambiguity never auto-redispatches;
+   `QUERYABLE` requires a class-appropriate mechanism (a provider key for
+   `keyed_mutate`, or a reconciler; non-idempotent mutation requires the
+   reconciler) and otherwise fails closed; `IDEMPOTENT` retains safe retry
+   behavior.
    *Where:* [Resolution gates](../README.md#resolution-gates),
    [Marking the side-effect boundary](../README.md#marking-the-side-effect-boundary-side_effect).
 
@@ -193,12 +204,15 @@ section; the tests are concrete `file::test_name` entries.
     so key-swapping retries are caught, not silently re-keyed.
     *Where:* [Enforcing the same provider idempotency key](../README.md#enforcing-the-same-provider-idempotency-key-provider_idempotency_key_param).
 
-15. **Key derivation is deterministic and sound.** Identical redispatches map
-    to one key. With derived identity, changing a *real* argument produces a
-    new key; `tool_call_id` binds the dispatch identity but is excluded from
-    the args fingerprint. An explicit host-owned `request_id` is itself the
-    key, and reuse with a different tool, scope, or meaningful argument is
-    fail-closed.
+15. **Effect identity and unified state are deterministic and legacy-safe.**
+    Identical derived redispatches map to one destination-aware SHA-256
+    `effect_id` / transition key; changing a meaningful argument or canonical
+    destination changes it. `EffectState` maps current and legacy rows onto
+    `INTENDED`, `ATTEMPTING`, `COMMITTED`, `ABORTED`, or `UNKNOWN`; the
+    COMMITTED view must agree with legacy `COMPLETED`. An explicit host-owned
+    `request_id` remains the storage key: the independently derived
+    `effect_id` is audit evidence, not a cross-row secondary dedupe index, so
+    the host must reuse the same request id for one logical effect.
     *Where:* [Transition identity and host-owned `request_id`](../README.md#transition-identity-and-host-owned-request_id).
 
 16. **Task-level idempotency.** The task ledger returns a stored result for a
@@ -318,10 +332,12 @@ than the code makes.
   Durable storage preserves `maybe_crossed` across restart but cannot alone
   prove whether the provider completed; unresolved ambiguity stays
   fail-closed.
-- **Unclassified tools under the default `warn` policy.** A tool without a
+- **Unclassified tools under the library/development `warn` policy.** A tool without a
   transition binding that fails is re-executed on reclaim (legacy behavior,
   with a one-time warning). `unclassified_policy: strict` routes them through
   a conservative `non_idempotent_mutate` binding that hard-blocks instead.
+  `profile: production` defaults an omitted policy to `strict`; explicit
+  `warn` remains a compatibility choice.
 - **Temporal-style workflows.** Mycelium guards individual tool calls (and
   task ledger entries); it does not re-run a multi-step workflow graph with
   orchestrator recovery semantics.
@@ -349,13 +365,13 @@ are cited once. "Where documented" links the README section.
 | Guarantee | Where documented | Test(s) |
 |---|---|---|
 | Atomic first claim, single winner | README § [Resolution gates](../README.md#resolution-gates) / [Backend implementation](../README.md#backend-implementation) | `test_storage_backends.py::test_file_storage_serializes_concurrent_claims` · `test_storage_backends.py::test_redis_storage_atomic_claim` · `test_storage_backends.py::test_postgres_storage_atomic_claim`<sup>1</sup> · `test_proof_two_worker_redis.py::test_two_worker_redis_cloud_style_redispatch`<sup>2</sup> · `test_multiprocess_concurrency.py::test_two_processes_redis_contested_claim` |
-| CAS on terminal-outcome writes | README § [Transition matrix](../README.md#transition-matrix-rejected-transitions) | `test_atomicity_contract.py::test_transition_matrix` · `test_atomicity_contract.py::test_concurrent_complete_race` · `test_atomicity_contract.py::test_concurrent_complete_and_fail_race` |
-| Owner fencing (no silent overwrite of COMPLETED) | README § [Owner fencing](../README.md#owner-fencing) | `test_atomicity_contract.py::test_owner_mismatch_on_complete` · `test_atomicity_contract.py::test_owner_match_succeeds` · `test_atomicity_contract.py::test_wrapper_owner_fencing_prevents_stale_overwrite` · `test_atomicity_contract.py::test_stalled_worker_cannot_overwrite_completed` · `test_atomicity_contract.py::test_stalled_worker_cannot_overwrite_failed` |
+| Fenced CAS on claim mutations | README § [Fenced mutations](../README.md#fenced-mutations) / [Transition matrix](../README.md#transition-matrix-rejected-transitions) | `test_atomicity_contract.py::test_transition_matrix` · `test_atomicity_contract.py::test_claim_bumps_fence_monotonically` · `test_atomicity_contract.py::test_stale_fence_rejected_even_when_lease_valid` · `test_atomicity_contract.py::test_legacy_claim_mutations_require_and_reject_stale_fences` |
+| Atomic decision + stale-fence refusal | README § [Effect-commit protocol](../README.md#effect-commit-protocol) | `test_decision.py::test_plugin_predicate_evaluated_and_recorded_end_to_end` · `test_decision.py::test_plugin_denial_hard_blocks_with_decision_recorded` · `test_decision.py::test_stale_fence_worker_cannot_record_decision` · `test_decision.py::test_manual_pre_provider_mutations_require_attempting_phase` |
 | Single-winner reclaim after lease expiry | README § Lease validity / auto-renew → [Resolution gates](../README.md#resolution-gates) | `test_atomicity_contract.py::test_concurrent_reclaim_race_inmemory` · `test_atomicity_contract.py::test_concurrent_reclaim_race_redis` · `test_terminal_outcome.py::test_reclaim_after_expired_lease` · `test_side_effect_resolution.py::test_spendability_override_allows_expired_reclaim` · `test_multiprocess_concurrency.py::test_two_processes_reclaim_expired_payment_single_reexec` |
 | Stale-snapshot guard (`mark_blocked` never on a held lease) | README § [NOT_EXECUTED reset CAS](../README.md#not_executed-reset-cas-v118) | `test_atomicity_contract.py::test_raise_hard_block_stale_snapshot_returns_inflight_held_lease` · `test_conformance_tsc007.py::test_case_1_in_flight_valid_lease_polls_without_reexecuting` · `test_lease_validity.py::test_auto_renew_keeps_peer_on_poll_past_original_ttl` |
 | Dual `NOT_EXECUTED` → at most one re-execution | README § [NOT_EXECUTED reset CAS](../README.md#not_executed-reset-cas-v118) | `test_atomicity_contract.py::test_concurrent_reconcile_not_executed_race` · `test_atomicity_contract.py::test_concurrent_reconcile_not_executed_race_expired_seed` · `test_mengchheang_public_repro.py::test_concurrent_reconcile_not_executed` · `test_payment_provider_mock.py::test_redispatch_storm_never_double_charges` |
 | Fail-closed on storage outage | README § [What happens when storage is down](../README.md#what-happens-when-storage-is-down) | `test_fail_closed_storage.py::test_claim_raises_storage_unavailable` · `test_fail_closed_storage.py::test_tool_never_runs_on_storage_down_claim` · `test_fail_closed_storage.py::test_complete_propagates_storage_error` · `test_fail_closed_storage.py::test_storage_failure_does_not_mask_tool_exception` · `test_fail_closed_storage.py::test_tool_exception_propagates_not_storage_exception` · `test_outage_redis_postgres.py::test_claim_during_outage_raises_storage_unavailable` · `test_outage_redis_postgres.py::test_complete_during_outage_keeps_inflight` · `test_outage_redis_postgres.py::test_failure_recording_outage_surfaces_original_exception` · `test_outage_redis_postgres.py::test_real_redis_entry_path_wraps_connection_error` |
-| Hard-block on ambiguous mutation | README § [Resolution gates](../README.md#resolution-gates) | `test_side_effect_resolution.py::test_payment_hard_blocks_expired_lease` · `test_side_effect_resolution.py::test_crash_after_claim_before_complete_hard_blocks_redispatch` · `test_side_effect_resolution.py::test_payment_hard_blocks_failed_after_effect_retry` · `test_reconcile.py::test_hard_block_without_reconciler_still_blocks` · `test_process_kill_crash_window.py::test_kill_before_ref_recorded_hard_blocks_no_provider_lookup` · `test_payment_provider_mock.py::test_no_reconciler_hard_blocks_without_provider_evidence` |
+| Hard-block on ambiguous mutation / capability recovery | README § [Resolution gates](../README.md#resolution-gates) / [Tool capabilities](../README.md#tool-capabilities) | `test_side_effect_resolution.py::test_payment_hard_blocks_expired_lease` · `test_reconcile.py::test_hard_block_without_reconciler_still_blocks` · `test_tool_capability.py::test_blind_unknown_parks_and_never_retries` · `test_tool_capability.py::test_queryable_reconciler_probe_commits` · `test_tool_capability.py::test_queryable_without_reconciler_fails_closed_parks` |
 | Resolution gate matrix (POLL / RETURN / ALLOW / HARD_BLOCK / reconcile) | README § [Resolution gates](../README.md#resolution-gates) | `test_conformance_tsc007.py` (5 cases) · `test_side_effect_resolution.py::test_resolve_side_effect_gate_matrix` · `test_read_only_resolution.py::test_resolve_read_only_gate_matrix` |
 | Reconciliation fail-closed | README § [Reconciling automatically](../README.md#reconciling-automatically-reconciler) | `test_reconcile.py::test_reconcile_failure_is_fail_closed` · `test_reconcile.py::test_reconcile_skipped_without_external_ref` · `test_reconcile.py::test_reconcile_unknown_hard_blocks` · `test_outage_redis_postgres.py::test_mid_reconcile_storage_outage_fail_closed` |
 | Boundary classification + monotonic, durable `maybe_crossed` | README § [Marking the side-effect boundary](../README.md#marking-the-side-effect-boundary-side_effect) | `test_side_effect_boundary.py::test_advance_boundary_is_monotonic` · `test_side_effect_boundary.py::test_side_effect_marks_maybe_crossed_midflight` · `test_side_effect_boundary.py::test_exception_inside_side_effect_marks_unknown_and_hard_blocks` · `test_side_effect_boundary.py::test_exception_before_marker_is_failed_before_effect` · `test_side_effect_boundary.py::test_mark_crossed_then_exception_is_failed_after_effect` · `test_side_effect_boundary.py::test_async_side_effect_marks_unknown_on_error` · `test_storage_backends.py::test_sqlite_maybe_crossed_survives_restart_and_does_not_reexecute` |
@@ -365,7 +381,7 @@ are cited once. "Where documented" links the README section.
 | Release emits signed audit receipts when configured | README § [Operator runbook](../README.md#operator-runbook-your-agent-hard-blocked) | `test_operator_release.py::test_release_emits_audit_receipt_when_emitter_configured` · `test_audit_receipt.py::test_emitter_signs_and_verifies_tool_receipt` · `test_audit_receipt.py::test_tampered_receipt_fails_verification` |
 | Worker-death gate (opt-in) | README § [Assert worker death](../README.md#operator-runbook-your-agent-hard-blocked) | `test_worker_death_signal.py::test_release_expired_refused_without_death_evidence` · `test_worker_death_signal.py::test_release_expired_allowed_with_asserted_death` · `test_worker_death_signal.py::test_mark_worker_dead_refuses_recent_heartbeat_without_override` · `test_worker_death_signal.py::test_read_only_reclaim_blocked_without_death_evidence` · `test_worker_death_signal.py::test_side_effecting_allow_blocked_without_death_evidence` |
 | Provider idempotency-key enforcement (opt-in) | README § [Enforcing the same provider idempotency key](../README.md#enforcing-the-same-provider-idempotency-key-provider_idempotency_key_param) | `test_provider_idempotency_key.py::test_gate_hard_blocks_different_provider_key` · `test_provider_idempotency_key.py::test_gate_hard_blocks_missing_incoming_key` · `test_provider_idempotency_key.py::test_gate_hard_blocks_missing_stored_key` · `test_provider_idempotency_key.py::test_declared_key_is_excluded_from_transition_key` · `test_provider_key_validity.py::test_same_key_expired_ttl_hard_blocks` · `test_provider_key_validity.py::test_unknown_same_key_valid_ttl_allows` · `test_provider_key_validity.py::test_unknown_same_key_expired_ttl_hard_blocks` · `test_provider_key_validity.py::test_unknown_same_key_prefers_reconciler_over_reexec` |
-| Key derivation soundness | README § [Transition identity and host-owned `request_id`](../README.md#transition-identity-and-host-owned-request_id) | `test_transition.py::test_same_inputs_produce_same_transition_key` · `test_transition.py::test_different_tool_call_id_produces_different_key` · `test_transition.py::test_ledger_deduplicates_by_transition_key` · `test_property_transitions.py::test_transition_key_invariants` (property test) · `test_explicit_request_id.py` |
+| Deterministic effect identity + unified EffectState | README § [Effect-commit protocol](../README.md#effect-commit-protocol) / [Transition identity](../README.md#transition-identity-and-host-owned-request_id) | `test_effect_identity.py` · `test_effect_state_machine.py::test_effect_state_transition_matrix_and_illegal_cas_rejections` · `test_effect_state_machine.py::test_legacy_deserialization_resolves_unified_effect_state` · `test_property_transitions.py::test_transition_key_invariants` |
 | Task-level idempotency | README § [Quickstart: task-level idempotency](../README.md#quickstart-task-level-idempotency) | `test_cli_run.py::test_run_instruments_sync_tool_and_task_across_processes` |
 | Secret-in-args (when enabled) | README § [Secret-in-args (AF-010)](../README.md#secret-in-args-af-010) | `test_secret_protection.py` · `test_verify.py::test_cli_smoke_each_scenario` (`secret-in-args`) |
 | Destination policy (when enabled) | README § [Entity / destination guard](../README.md#entity--destination-guard-unnumbered) | `test_entity_guard.py` · `test_verify.py::test_cli_smoke_each_scenario` (`entity-guard`) |
@@ -373,6 +389,7 @@ are cited once. "Where documented" links the README section.
 | Authority-window expiry (when enabled) | README § [Authority-window expiry](../README.md#authority-window-expiry) | `test_authority_window.py` · `test_verify.py::test_cli_smoke_each_scenario` (`authority-window`) |
 | Use-time currency (when enabled) | README § [Use-time currency (AF-012)](../README.md#use-time-currency-af-012) | `test_use_time_currency.py` · `test_verify.py::test_cli_smoke_each_scenario` (`use-time-currency`) |
 | Single-key state machine invariants (executions ≤ 1 + not-executed verdicts; COMPLETED terminal; CAS out of IN_FLIGHT) | this doc, § C / [NOT_EXECUTED reset CAS](../README.md#not_executed-reset-cas-v118) | `test_property_transitions.py::test_transition_key_invariants` (Hypothesis, file + Redis) · `test_payment_provider_mock.py::test_redispatch_storm_never_double_charges` |
+| Deterministic simulation invariant (legacy COMPLETED and unified EffectState.COMMITTED) | README § [`mycelium verify`](../README.md#mycelium-verify-exercise-the-guarantees) | `test_simulation.py::test_simulation_scenario_passes_on_shared_backend` · `test_verify.py::test_all_order_sqlite` |
 
 <sup>1</sup> `test_postgres_storage_atomic_claim` runs when `psycopg` is
 installed and `MYCELIUM_TEST_POSTGRES_DSN` is set; it skips otherwise.
@@ -414,6 +431,15 @@ Still can go wrong — even with everything above configured correctly:
   (server-authoritative, HMAC-derived keys) is the mitigation — the runtime
   enforces *same key on retry*, your application must mint stable, server-side
   keys.
+- **`effect_id` is not a second storage index.** With an explicit business
+  `request_id`, Mycelium records the independently derived `effect_id` for
+  audit and invariant checks but does not merge two differently keyed rows.
+  The host must reuse one stable request id for one logical effect.
+- **Manual hosts can bypass the decision boundary.** The ledger cannot stop
+  application code from calling a provider directly. A manual integration
+  must call `record_decision(...)` with the claim fence and wait for that write
+  to succeed before invoking the tool body or provider. Use the wrappers when
+  possible.
 - **Wall-clock leases.** Leases rely on `time.time()`. Clock skew can renew or
   expire leases early; extreme skew is a deployment concern, not something the
   runtime compensates for.
@@ -445,7 +471,10 @@ Still can go wrong — even with everything above configured correctly:
   fault-injection tests. Use `mycelium verify --config mycelium.yaml
   --scenario all --strict` to empirically exercise synthetic failure
   scenarios (redispatch, contention, crash windows, storage outage,
-  ambiguous effects, reconcile) against an isolated namespace. Verify never
+  ambiguous effects, reconcile, and deterministic simulation) against an
+  isolated namespace. The simulation scenario is skipped for memory storage;
+  on durable multiprocess-capable backends it checks both legacy COMPLETED and
+  unified EffectState.COMMITTED invariants plus stale-fence takeover. Verify never
   runs application tools, never calls an LLM, and never contacts a real
   business provider. Some infrastructure properties (Redis persistence,
   host call-site identity) remain operator assertions or not verifiable
