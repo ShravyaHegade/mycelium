@@ -597,10 +597,11 @@ derived transition key: execution scope, dispatch identity, tool,
 canonicalized meaningful arguments, canonical destination, side-effect class,
 agent, and policy. Canonically equivalent destinations produce the same id;
 different destinations do not. With derived identity, `request_id` and
-`effect_id` coincide. With an explicit business `request_id`, the row stores
-the independently derived `effect_id` for audit, but storage still keys and
-deduplicates by `request_id`; callers must reuse the same explicit
-`request_id` for the same logical effect.
+`effect_id` coincide. With an explicit business `request_id`, consequential
+tools still derive `effect_id` first and treat it as the authoritative dedupe
+identity. If another `request_id` resolves to the same `effect_id`, Mycelium
+routes to the canonical row and records the supplied id in
+`request_id_aliases` for audit instead of creating a second row.
 
 Every successful claim increments `LedgerEntry.fence`. Every later mutation
 for that claim—decision, boundary, heartbeat/lease, provider reference,
@@ -623,6 +624,10 @@ Mycelium cannot stop a manual host from calling a provider outside its APIs.
 **Failure-mode catalog.** Stable AF-001…AF-012 definitions (shipped vs roadmap)
 live in [`docs/FAILURE_MODE_CATALOG.md`](docs/FAILURE_MODE_CATALOG.md).
 
+**Formal state model.** Optional TLA+ notes for the core EffectState protocol
+live in [`docs/spec/README.md`](docs/spec/README.md) and
+[`docs/spec/effect_state.tla`](docs/spec/effect_state.tla).
+
 **Failure & threat model.** What this core can and cannot protect you from is
 documented explicitly in
 [`docs/FAILURE_AND_THREAT_MODEL.md`](docs/FAILURE_AND_THREAT_MODEL.md): the threat
@@ -637,9 +642,10 @@ risk — read it before relying on the runtime to stop a double payment.
 ### Transition identity and host-owned `request_id`
 
 Pass an optional `request_id` when the host already has a stable business
-operation identity. Mycelium uses that string as the transition identity
-across retries — it is not hashed with args, and it is not forwarded into the
-wrapped tool.
+operation identity. Mycelium preserves that string for audit and deterministic
+redispatch routing, but consequential dedupe is anchored on the independently
+derived `effect_id`, not on host string equality. `request_id` is never hashed
+with args and is not forwarded into the wrapped tool.
 
 **The host must derive it from a server-owned record**, never from the model:
 
@@ -648,13 +654,15 @@ request_id = f"charge-order:{order_id}"
 charge(amount=10, recipient=acct, request_id=request_id)
 ```
 
-For `keyed_mutate` tools, use the same string as the provider idempotency key
-when the provider allows it (`Idempotency-Key: charge-order:ORD-123`). That
-keeps ledger identity and provider dedupe aligned.
+For `keyed_mutate` tools, declare `provider_idempotency_key_param`; by default
+Mycelium injects `effect_id` as that provider key when your call omits it, and
+persists/reuses the same value across retries. If you pass a key explicitly,
+that explicit value wins and is enforced on retry.
 
 | Inputs | → | What happens |
 |--------|---|--------------|
 | Same explicit `request_id` + same tool/scope/args | → | Same transition — return stored result or poll |
+| Different explicit `request_id` + same derived `effect_id` | → | Canonical prior row wins; second id is recorded in `request_id_aliases` |
 | Same explicit `request_id` + **different** tool, scope, or meaningful args | → | Fail-closed identity conflict (`ToolBoundaryError` / hard-block) |
 | `request_id` omitted (development / `derived`) | → | Unchanged derived identity (`tool_call_id` + scope + args + policy) |
 | `request_id` omitted (production / `require_explicit`) | → | `MissingRequestIdentityError` for consequential tools |
@@ -676,9 +684,10 @@ tools:
     provider_idempotency_key_param: idempotency_key
 ```
 
-That mints `charge_customer:order_id:ORD-123`. Pass the same stable value
-as the provider idempotency key yourself when the provider supports it —
-Mycelium does not silently assume the provider uses its request ID.
+That mints `charge_customer:order_id:ORD-123`. With
+`provider_idempotency_key_param` declared, keyed-mutate retries now inherit and
+reuse the stored provider key (auto-injected from `effect_id` when omitted), so
+provider dedupe stays aligned even when callers do not pass the key manually.
 
 When `request_id` is omitted, the derived transition key still encodes args
 (same `tool_call_id` + different args → different key). **By default Mycelium
@@ -1036,18 +1045,32 @@ Record `external_operation_ref` early (ideally the idempotency key before the pr
 
 ### Enforcing the same provider idempotency key (`provider_idempotency_key_param`)
 
-`retry_only_with_same_provider_idempotency_key` (the default for `keyed_mutate`) means "a retry is safe *only if* it reuses the same provider idempotency key so the provider dedupes." By default Mycelium trusts you to reuse it. To have Mycelium **enforce** it, declare which kwarg carries the key:
+`retry_only_with_same_provider_idempotency_key` (the default for
+`keyed_mutate`) means "a retry is safe *only if* it reuses the same provider
+idempotency key so the provider dedupes." Declare which kwarg carries that key:
 
 ```yaml
 tools:
   send_payment:
     side_effect_class: keyed_mutate          # retry_only_with_same_provider_idempotency_key
     provider_idempotency_key_param: idempotency_key
+    # optional override (default true for keyed_mutate + declared param):
+    # propagate_effect_id_as_provider_key: false
 ```
 
 or in code: `ToolTransitionBinding.for_tool(..., provider_idempotency_key_param="idempotency_key")`.
 
-With it declared, on a retry of a transition that failed before the effect:
+With it declared:
+
+- If the first attempt omits the kwarg, Mycelium injects `effect_id` as the
+  provider idempotency key after `ATTEMPTING` is recorded and before the tool
+  body runs.
+- The injected/explicit key is persisted on the ledger entry and reused on
+  retries; Mycelium does not derive a fresh key per retry.
+- If the call supplies a key explicitly, that explicit value wins and is then
+  enforced on subsequent retries.
+
+On a retry of a transition that failed before the effect:
 
 | Incoming key vs stored key | Gate |
 |----------------------------|------|
@@ -1070,7 +1093,11 @@ tools:
     provider_idempotency_key_ttl: 86400   # match provider key lifetime
 ```
 
-The declared key is excluded from the transition-key fingerprint, so a retry that swaps the key still resolves to the *same* transition and is caught rather than silently starting a new one. This is **opt-in**: tools that don't declare the param keep the previous cooperative behavior.
+The declared key is excluded from the transition-key fingerprint, so a retry
+that swaps the key still resolves to the *same* transition and is caught rather
+than silently starting a new one. Declaring
+`propagate_effect_id_as_provider_key: true` without
+`provider_idempotency_key_param` is rejected at config/binding construction.
 
 #### Payment-class identity (server-authoritative)
 

@@ -18,13 +18,16 @@ from mycelium import (
     SideEffectBoundary,
     SideEffectClass,
     TerminalOutcome,
+    ToolCapability,
     ToolTransitionBinding,
     TransitionScope,
     derive_transition_key_for_call,
     execution_scope,
+    get_ledger,
     ledger_sync,
     load_config_from_string,
 )
+from mycelium.transition import should_propagate_effect_id_as_provider_key
 from mycelium.transition_resolution import TransitionGate, resolve_side_effect_gate
 
 
@@ -212,6 +215,126 @@ def test_claim_stores_provider_idempotency_key() -> None:
     assert entry.provider_idempotency_key == "k1"
 
 
+def test_keyed_mutate_auto_injects_effect_id_key_when_missing() -> None:
+    binding = _keyed_binding(enforce=True)
+    observed: list[str] = []
+
+    @ledger_sync(storage=InMemoryLedgerStorage(), transition_binding=binding)
+    def send_payment(amount: float, idempotency_key: str) -> dict[str, str]:
+        observed.append(idempotency_key)
+        return {"status": "sent"}
+
+    with execution_scope(_scope()):
+        result = send_payment(amount=10.0, tool_call_id="auto-key")
+    assert result == {"status": "sent"}
+    assert len(observed) == 1
+    assert observed[0]
+
+    ledger_inst = get_ledger(send_payment)
+    assert ledger_inst is not None
+    with execution_scope(_scope()):
+        request_id = ledger_inst.derive_request_id(
+            "send_payment",
+            (),
+            {"amount": 10.0, "tool_call_id": "auto-key"},
+            transition_binding=binding,
+        )
+    stored = ledger_inst.get(request_id)
+    assert stored is not None
+    assert stored.provider_idempotency_key == observed[0]
+    assert stored.provider_idempotency_key == stored.effect_id
+
+
+def test_keyed_mutate_missing_key_retry_reuses_stored_effect_id() -> None:
+    binding = _keyed_binding(enforce=True)
+    attempts = {"n": 0}
+    seen_keys: list[str] = []
+
+    @ledger_sync(storage=InMemoryLedgerStorage(), transition_binding=binding)
+    def send_payment(amount: float, idempotency_key: str) -> dict[str, str]:
+        attempts["n"] += 1
+        seen_keys.append(idempotency_key)
+        if attempts["n"] == 1:
+            raise RuntimeError("network drop before effect")
+        return {"status": "sent"}
+
+    with execution_scope(_scope()):
+        with pytest.raises(RuntimeError):
+            send_payment(amount=10.0, tool_call_id="auto-retry")
+        result = send_payment(amount=10.0, tool_call_id="auto-retry")
+
+    assert result == {"status": "sent"}
+    assert attempts["n"] == 2
+    assert len(set(seen_keys)) == 1
+
+
+def test_missing_retry_reuses_stored_explicit_provider_key() -> None:
+    binding = _keyed_binding(enforce=True)
+    attempts = {"n": 0}
+    seen_keys: list[str] = []
+
+    @ledger_sync(storage=InMemoryLedgerStorage(), transition_binding=binding)
+    def send_payment(amount: float, idempotency_key: str) -> dict[str, str]:
+        attempts["n"] += 1
+        seen_keys.append(idempotency_key)
+        if attempts["n"] == 1:
+            raise RuntimeError("network drop before effect")
+        return {"status": "sent"}
+
+    with execution_scope(_scope()):
+        with pytest.raises(RuntimeError):
+            send_payment(amount=10.0, idempotency_key="explicit-key", tool_call_id="explicit-retry")
+        result = send_payment(amount=10.0, tool_call_id="explicit-retry")
+
+    assert result == {"status": "sent"}
+    assert attempts["n"] == 2
+    assert seen_keys == ["explicit-key", "explicit-key"]
+
+
+def test_explicit_provider_key_overrides_effect_id_injection() -> None:
+    binding = _keyed_binding(enforce=True)
+    seen: list[str] = []
+
+    @ledger_sync(storage=InMemoryLedgerStorage(), transition_binding=binding)
+    def send_payment(amount: float, idempotency_key: str) -> dict[str, str]:
+        seen.append(idempotency_key)
+        return {"status": "sent"}
+
+    with execution_scope(_scope()):
+        send_payment(amount=10.0, idempotency_key="explicit-key", tool_call_id="explicit")
+
+    assert seen == ["explicit-key"]
+
+
+def test_for_tool_rejects_propagation_without_provider_param() -> None:
+    with pytest.raises(ValueError, match="provider_idempotency_key_param"):
+        ToolTransitionBinding.for_tool(
+            agent_id="demo",
+            policy_version="1",
+            side_effect_class=SideEffectClass.NON_IDEMPOTENT_MUTATE,
+            propagate_effect_id_as_provider_key=True,
+        )
+
+
+def test_keyed_mutate_with_declared_param_propagates_by_default() -> None:
+    binding = _keyed_binding(enforce=True)
+    assert should_propagate_effect_id_as_provider_key(binding) is True
+
+
+def test_propagation_flag_does_not_loosen_explicit_blind_capability() -> None:
+    binding = ToolTransitionBinding.for_tool(
+        agent_id="demo",
+        policy_version="1",
+        side_effect_class=SideEffectClass.NON_IDEMPOTENT_MUTATE,
+        provider_idempotency_key_param="idempotency_key",
+        capability=ToolCapability.BLIND,
+        propagate_effect_id_as_provider_key=True,
+    )
+    assert should_propagate_effect_id_as_provider_key(binding) is True
+    assert binding.capability == ToolCapability.BLIND
+    assert binding.effective_capability(has_reconciler=False) == ToolCapability.BLIND
+
+
 # --- config wiring ---------------------------------------------------------
 
 
@@ -248,6 +371,22 @@ tools:
   send_payment:
     side_effect_class: keyed_mutate
     provider_idempotency_key_param: 123
+"""
+    with pytest.raises(ConfigError, match="provider_idempotency_key_param"):
+        load_config_from_string(yaml_text)
+
+
+def test_config_rejects_propagation_without_provider_param() -> None:
+    from mycelium import ConfigError
+
+    yaml_text = """
+transition:
+  agent_id: demo
+  policy_version: "1"
+tools:
+  send_payment:
+    side_effect_class: non_idempotent_mutate
+    propagate_effect_id_as_provider_key: true
 """
     with pytest.raises(ConfigError, match="provider_idempotency_key_param"):
         load_config_from_string(yaml_text)

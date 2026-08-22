@@ -62,6 +62,7 @@ from mycelium.transition import (
     resolve_lease_validity,
     resolve_scope,
     resolve_terminal_outcome,
+    should_propagate_effect_id_as_provider_key,
     terminal_from_legacy_status,
 )
 from mycelium.transition_resolution import (
@@ -667,23 +668,16 @@ class LedgerEntry:
     effect_protocol_required: bool = False
 
     # Stable effect identity (mycelium.transition.derive_effect_id_for_call):
-    # a hash of (scope, tool, canonicalized args/kwargs, destination) that is
-    # deterministic and destination-aware, independent of which request_id a
-    # host happened to supply. ``request_id`` remains the storage key (every
-    # existing backend and test keys rows by it) — effect_id is an additional
-    # durable field for redispatch-collision auditing. When request_id is
-    # *derived* (the default — no explicit request_id/request_id_from kwarg),
-    # request_id already equals effect_id today (derive_request_id falls back
-    # to the same transition-key derivation), so the two collide naturally.
-    # When a host supplies an *explicit* request_id (its own business/audit
-    # id), effect_id is the independent dedup identity computed from the call
-    # shape alone; two different explicit request_ids for what is otherwise
-    # the same (tool, params, destination) are NOT unified into one storage
-    # row by this change (that would require a cross-backend secondary index
-    # keyed by effect_id, which is out of scope here) — hosts that redispatch
-    # the same logical effect must reuse the same request_id, as documented
-    # elsewhere. ``None`` for unclassified claims (no binding to derive from).
+    # deterministic hash of (scope, tool, canonicalized args/kwargs,
+    # destination). This is the authoritative dedup identity for consequential
+    # tools: storage backends maintain an effect_id -> canonical request_id
+    # mapping and claim paths resolve through it before any side-effect write.
+    # ``request_id`` remains the physical row key for backward compatibility.
+    # Unclassified claim() rows still fall back to request_id.
     effect_id: str | None = None
+    # Audit trail of host-supplied request ids that resolved onto this
+    # canonical effect row via effect_id dedupe (includes request_id itself).
+    request_id_aliases: tuple[str, ...] = ()
     # Schema version for this row's shape. See LEDGER_ENTRY_SCHEMA_VERSION.
     schema_version: int = LEDGER_ENTRY_SCHEMA_VERSION
 
@@ -702,6 +696,12 @@ class LedgerEntry:
         # idempotency_key.
         if self.effect_id is None:
             object.__setattr__(self, "effect_id", self.request_id)
+        aliases = tuple(
+            str(item) for item in self.request_id_aliases if item is not None and str(item)
+        )
+        if self.request_id not in aliases:
+            aliases = aliases + (self.request_id,)
+        object.__setattr__(self, "request_id_aliases", aliases)
 
     def resolved_terminal_outcome(self, *, now: float | None = None) -> TerminalOutcome:
         return resolve_terminal_outcome(
@@ -770,6 +770,7 @@ class LedgerEntry:
             "effect_phase": self.effect_phase,
             "effect_protocol_required": self.effect_protocol_required,
             "effect_id": self.effect_id,
+            "request_id_aliases": list(self.request_id_aliases),
             "schema_version": self.schema_version,
             "parent_request_id": self.parent_request_id,
             "handoff_id": self.handoff_id,
@@ -827,6 +828,11 @@ class LedgerEntry:
             # request_id, which is exactly what it would equal for the
             # (default) derived-request_id path anyway.
             effect_id=str(data.get("effect_id") or request_id),
+            request_id_aliases=tuple(
+                str(item)
+                for item in (data.get("request_id_aliases") or (request_id,))
+                if item is not None and str(item)
+            ),
             schema_version=int(data.get("schema_version") or 1),
             parent_request_id=(
                 str(data["parent_request_id"])
@@ -939,6 +945,31 @@ class LedgerStorage:
         """Return all entries. Intended for debugging/auditing only."""
         raise NotImplementedError
 
+    def resolve_request_id(self, effect_id: str) -> str | None:
+        """Resolve ``effect_id`` to its canonical ``request_id``.
+
+        Default implementation scans all rows (legacy-safe, deterministic).
+        Backends with secondary indexes should override.
+        """
+        candidates: list[LedgerEntry] = []
+        for entry in self.list_all():
+            ref = str(getattr(entry, "effect_id", None) or entry.request_id)
+            if ref == effect_id:
+                candidates.append(entry)
+        if not candidates:
+            return None
+        candidates.sort(
+            key=lambda item: (float(getattr(item, "started_at", 0.0) or 0.0), item.request_id)
+        )
+        return candidates[0].request_id
+
+    def get_by_effect_id(self, effect_id: str) -> LedgerEntry | None:
+        """Return the canonical row for ``effect_id``, if present."""
+        request_id = self.resolve_request_id(effect_id)
+        if request_id is None:
+            return None
+        return self.get(request_id)
+
 
 class InMemoryLedgerStorage(LedgerStorage):
     """Default in-memory storage. Survives within the process only.
@@ -950,7 +981,29 @@ class InMemoryLedgerStorage(LedgerStorage):
 
     def __init__(self) -> None:
         self._entries: dict[str, LedgerEntry] = {}
+        self._effect_index: dict[str, str] = {}
         self._lock = threading.RLock()
+
+    @staticmethod
+    def _effect_ref(entry: LedgerEntry) -> str:
+        return str(entry.effect_id or entry.request_id)
+
+    def _resolve_effect_locked(self, effect_id: str) -> str | None:
+        canonical = self._effect_index.get(effect_id)
+        if canonical is not None:
+            row = self._entries.get(canonical)
+            if row is not None and self._effect_ref(row) == effect_id:
+                return canonical
+            self._effect_index.pop(effect_id, None)
+        candidates = [row for row in self._entries.values() if self._effect_ref(row) == effect_id]
+        if not candidates:
+            return None
+        candidates.sort(
+            key=lambda item: (float(getattr(item, "started_at", 0.0) or 0.0), item.request_id)
+        )
+        canonical = candidates[0].request_id
+        self._effect_index[effect_id] = canonical
+        return canonical
 
     def get(self, request_id: str) -> LedgerEntry | None:
         with self._lock:
@@ -958,7 +1011,17 @@ class InMemoryLedgerStorage(LedgerStorage):
 
     def set(self, entry: LedgerEntry) -> None:
         with self._lock:
+            effect_id = self._effect_ref(entry)
+            canonical = self._resolve_effect_locked(effect_id)
+            if (
+                canonical is not None
+                and canonical != entry.request_id
+                and entry.request_id not in self._entries
+            ):
+                return
             self._entries[entry.request_id] = entry
+            if canonical is None or canonical == entry.request_id:
+                self._effect_index[effect_id] = entry.request_id
 
     def try_claim_inflight(
         self,
@@ -967,7 +1030,25 @@ class InMemoryLedgerStorage(LedgerStorage):
         lease_ttl: float = DEFAULT_LEASE_TTL,
     ) -> tuple[str, LedgerEntry | None]:
         with self._lock:
-            return default_try_claim_inflight(self, entry, lease_ttl=lease_ttl)
+            now = time.time()
+            effect_id = self._effect_ref(entry)
+            canonical = self._resolve_effect_locked(effect_id)
+            active_request_id = canonical or entry.request_id
+            existing = self._entries.get(active_request_id)
+            outcome = claim_inflight_outcome(existing, now=now)
+            if outcome == "completed":
+                return "completed", existing
+            if outcome == "in_flight":
+                return "in_flight", existing
+            claim_entry = (
+                entry
+                if active_request_id == entry.request_id
+                else replace(entry, request_id=active_request_id)
+            )
+            leased = with_lease(claim_entry, now=now, lease_ttl=lease_ttl, prior=existing)
+            self._entries[active_request_id] = leased
+            self._effect_index[effect_id] = active_request_id
+            return "claimed", None
 
     def try_transition(
         self,
@@ -1005,6 +1086,17 @@ class InMemoryLedgerStorage(LedgerStorage):
         with self._lock:
             return list(self._entries.values())
 
+    def resolve_request_id(self, effect_id: str) -> str | None:
+        with self._lock:
+            return self._resolve_effect_locked(effect_id)
+
+    def get_by_effect_id(self, effect_id: str) -> LedgerEntry | None:
+        with self._lock:
+            request_id = self._resolve_effect_locked(effect_id)
+            if request_id is None:
+                return None
+            return self._entries.get(request_id)
+
 
 class FileLedgerStorage(LedgerStorage):
     """JSON-file-backed storage with ``fcntl`` + threading locking.
@@ -1015,8 +1107,88 @@ class FileLedgerStorage(LedgerStorage):
     """
 
     def __init__(self, path: str | Path) -> None:
-        self._file = LockedJsonDictFile(path)
+        ledger_path = Path(path)
+        self._file = LockedJsonDictFile(ledger_path)
+        self._effect_index_path = ledger_path.with_suffix(ledger_path.suffix + ".effect-index.json")
         self._lock = threading.Lock()
+
+    @staticmethod
+    def _effect_ref_from_raw(raw: dict[str, Any], request_id: str) -> str:
+        return str(raw.get("effect_id") or request_id)
+
+    @staticmethod
+    def _started_at_from_raw(raw: dict[str, Any]) -> float:
+        value = raw.get("started_at")
+        try:
+            return float(value) if value is not None else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _load_effect_index_unlocked(self) -> dict[str, str]:
+        if not self._effect_index_path.exists():
+            return {}
+        try:
+            with self._effect_index_path.open("r", encoding="utf-8") as handle:
+                loaded = json.load(handle)
+        except (json.JSONDecodeError, OSError):
+            return {}
+        if not isinstance(loaded, dict):
+            return {}
+        index: dict[str, str] = {}
+        for effect_id, request_id in loaded.items():
+            if (
+                isinstance(effect_id, str)
+                and effect_id
+                and isinstance(request_id, str)
+                and request_id
+            ):
+                index[effect_id] = request_id
+        return index
+
+    def _save_effect_index_unlocked(self, index: dict[str, str]) -> None:
+        tmp = self._effect_index_path.with_suffix(self._effect_index_path.suffix + ".tmp")
+        with tmp.open("w", encoding="utf-8") as handle:
+            json.dump(index, handle, indent=2, default=str)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, self._effect_index_path)
+        try:
+            dir_fd = os.open(str(self._effect_index_path.parent), os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            os.fsync(dir_fd)
+        except OSError:
+            pass
+        finally:
+            os.close(dir_fd)
+
+    def _resolve_effect_locked(
+        self,
+        data: dict[str, dict[str, Any]],
+        index: dict[str, str],
+        effect_id: str,
+    ) -> tuple[str | None, bool]:
+        dirty = False
+        canonical = index.get(effect_id)
+        if canonical is not None:
+            raw = data.get(canonical)
+            if raw is not None and self._effect_ref_from_raw(raw, canonical) == effect_id:
+                return canonical, False
+            index.pop(effect_id, None)
+            dirty = True
+        candidates: list[tuple[float, str]] = []
+        for request_id, raw in data.items():
+            if self._effect_ref_from_raw(raw, request_id) == effect_id:
+                candidates.append((self._started_at_from_raw(raw), request_id))
+        if not candidates:
+            return None, dirty
+        candidates.sort(key=lambda item: (item[0], item[1]))
+        canonical = candidates[0][1]
+        if index.get(effect_id) != canonical:
+            index[effect_id] = canonical
+            dirty = True
+        return canonical, dirty
 
     def get(self, request_id: str) -> LedgerEntry | None:
         def read(data: dict[str, dict[str, Any]]) -> LedgerEntry | None:
@@ -1030,7 +1202,24 @@ class FileLedgerStorage(LedgerStorage):
 
     def set(self, entry: LedgerEntry) -> None:
         def mutate(data: dict[str, dict[str, Any]]) -> None:
+            index = self._load_effect_index_unlocked()
+            effect_id = str(entry.effect_id or entry.request_id)
+            canonical, dirty = self._resolve_effect_locked(data, index, effect_id)
+            if (
+                canonical is not None
+                and canonical != entry.request_id
+                and entry.request_id not in data
+            ):
+                if dirty:
+                    self._save_effect_index_unlocked(index)
+                return
             data[entry.request_id] = entry.to_dict()
+            if canonical is None or canonical == entry.request_id:
+                if index.get(effect_id) != entry.request_id:
+                    index[effect_id] = entry.request_id
+                    dirty = True
+            if dirty:
+                self._save_effect_index_unlocked(index)
 
         with self._lock:
             self._file.read_modify_write(mutate)
@@ -1044,18 +1233,36 @@ class FileLedgerStorage(LedgerStorage):
         outcome: list[tuple[str, LedgerEntry | None]] = []
 
         def mutate(data: dict[str, dict[str, Any]]) -> None:
-            raw = data.get(entry.request_id)
+            index = self._load_effect_index_unlocked()
+            effect_id = str(entry.effect_id or entry.request_id)
+            canonical, dirty = self._resolve_effect_locked(data, index, effect_id)
+            active_request_id = canonical or entry.request_id
+            raw = data.get(active_request_id)
             existing = LedgerEntry.from_dict(raw) if raw is not None else None
             now = time.time()
             result = claim_inflight_outcome(existing, now=now)
             if result == "completed":
+                if dirty:
+                    self._save_effect_index_unlocked(index)
                 outcome.append(("completed", existing))
                 return
             if result == "in_flight":
+                if dirty:
+                    self._save_effect_index_unlocked(index)
                 outcome.append(("in_flight", existing))
                 return
-            leased = with_lease(entry, now=now, lease_ttl=lease_ttl, prior=existing)
-            data[entry.request_id] = leased.to_dict()
+            claim_entry = (
+                entry
+                if active_request_id == entry.request_id
+                else replace(entry, request_id=active_request_id)
+            )
+            leased = with_lease(claim_entry, now=now, lease_ttl=lease_ttl, prior=existing)
+            data[active_request_id] = leased.to_dict()
+            if index.get(effect_id) != active_request_id:
+                index[effect_id] = active_request_id
+                dirty = True
+            if dirty:
+                self._save_effect_index_unlocked(index)
             outcome.append(("claimed", None))
 
         with self._lock:
@@ -1075,6 +1282,8 @@ class FileLedgerStorage(LedgerStorage):
         result: list[bool] = []
 
         def mutate(data: dict[str, dict[str, Any]]) -> None:
+            index = self._load_effect_index_unlocked()
+            dirty = False
             raw = data.get(entry.request_id)
             if raw is None:
                 result.append(False)
@@ -1098,6 +1307,15 @@ class FileLedgerStorage(LedgerStorage):
                 result.append(False)
                 return
             data[entry.request_id] = entry.to_dict()
+            effect_id = str(entry.effect_id or entry.request_id)
+            canonical, canonical_dirty = self._resolve_effect_locked(data, index, effect_id)
+            dirty = dirty or canonical_dirty
+            if canonical is None or canonical == entry.request_id:
+                if index.get(effect_id) != entry.request_id:
+                    index[effect_id] = entry.request_id
+                    dirty = True
+            if dirty:
+                self._save_effect_index_unlocked(index)
             result.append(True)
 
         with self._lock:
@@ -1105,8 +1323,38 @@ class FileLedgerStorage(LedgerStorage):
         return result[0]
 
     def list_all(self) -> list[LedgerEntry]:
-        data = self._file.load()
-        return [LedgerEntry.from_dict(raw) for raw in data.values()]
+        def read(data: dict[str, dict[str, Any]]) -> list[LedgerEntry]:
+            return [LedgerEntry.from_dict(raw) for raw in data.values()]
+
+        with self._lock:
+            return self._file.read_modify_write_no_save(read)
+
+    def resolve_request_id(self, effect_id: str) -> str | None:
+        def read(data: dict[str, dict[str, Any]]) -> str | None:
+            index = self._load_effect_index_unlocked()
+            canonical, dirty = self._resolve_effect_locked(data, index, effect_id)
+            if dirty:
+                self._save_effect_index_unlocked(index)
+            return canonical
+
+        with self._lock:
+            return self._file.read_modify_write_no_save(read)
+
+    def get_by_effect_id(self, effect_id: str) -> LedgerEntry | None:
+        def read(data: dict[str, dict[str, Any]]) -> LedgerEntry | None:
+            index = self._load_effect_index_unlocked()
+            canonical, dirty = self._resolve_effect_locked(data, index, effect_id)
+            if dirty:
+                self._save_effect_index_unlocked(index)
+            if canonical is None:
+                return None
+            raw = data.get(canonical)
+            if raw is None:
+                return None
+            return LedgerEntry.from_dict(raw)
+
+        with self._lock:
+            return self._file.read_modify_write_no_save(read)
 
 
 class ActionLedger:
@@ -1238,6 +1486,14 @@ class ActionLedger:
         with _storage_errors("list_all"):
             return self._storage.list_all()
 
+    def _resolve_request_id_for_effect(self, effect_id: str) -> str | None:
+        with _storage_errors("resolve_request_id"):
+            return self._storage.resolve_request_id(effect_id)
+
+    def _get_entry_by_effect_id(self, effect_id: str) -> LedgerEntry | None:
+        with _storage_errors("get_by_effect_id"):
+            return self._storage.get_by_effect_id(effect_id)
+
     def _enforce_args_drift(
         self,
         tool: str,
@@ -1247,6 +1503,7 @@ class ActionLedger:
         request_id: str,
         existing: LedgerEntry | None,
         binding: ToolTransitionBinding | None = None,
+        incoming_request_id: str | None = None,
     ) -> None:
         """Block when the same dispatch ticket is reused with different args.
 
@@ -1281,11 +1538,42 @@ class ActionLedger:
         except ValueError:
             explicit = None
 
+        alias_redispatch = (
+            incoming_request_id is not None
+            and incoming_request_id != request_id
+            and existing is not None
+        )
         if existing is not None:
             stored_fp = _args_drift_fingerprint(
                 tuple(existing.args), dict(existing.kwargs), exclude=exclude
             )
-            if explicit is not None and (
+            if alias_redispatch:
+                alias_kwargs = {
+                    key: value for key, value in kwargs.items() if key != "request_id"
+                }
+                alias_fp = _args_drift_fingerprint(args, alias_kwargs, exclude=exclude)
+                stored_alias_kwargs = {
+                    key: value
+                    for key, value in dict(existing.kwargs).items()
+                    if key != "request_id"
+                }
+                stored_alias_fp = _args_drift_fingerprint(
+                    tuple(existing.args), stored_alias_kwargs, exclude=exclude
+                )
+                if (
+                    existing.tool != tool
+                    or (
+                        not alias_redispatch
+                        and _identity_scopes_differ(existing, kwargs, binding)
+                    )
+                    or stored_alias_fp != alias_fp
+                ):
+                    self._raise_identity_conflict(
+                        tool,
+                        request_id=incoming_request_id,
+                        conflict=existing,
+                    )
+            elif explicit is not None and (
                 existing.tool != tool
                 or _identity_scopes_differ(existing, kwargs, binding)
                 or stored_fp != incoming_fp
@@ -1293,7 +1581,7 @@ class ActionLedger:
                 # Host-owned request_id is the identity: mismatch is
                 # fail-closed even when on_args_drift is off.
                 self._raise_identity_conflict(tool, request_id=request_id, conflict=existing)
-            if stored_fp != incoming_fp:
+            elif stored_fp != incoming_fp:
                 conflict = existing
 
         if self._on_args_drift == ARGS_DRIFT_OFF:
@@ -1758,6 +2046,8 @@ class ActionLedger:
         *,
         binding: ToolTransitionBinding | None = None,
         _provider_key_first_attempt_at: float | None = None,
+        _provider_idempotency_key: str | None = None,
+        _effect_id: str | None = None,
     ) -> LedgerEntry:
         bound = _bind_args(args, kwargs)
         boundary = (
@@ -1765,9 +2055,9 @@ class ActionLedger:
             if binding is not None
             else SideEffectBoundary.NOT_CROSSED.value
         )
-        provider_key = (
-            extract_provider_idempotency_key(kwargs, binding) if binding is not None else None
-        )
+        provider_key = _provider_idempotency_key
+        if provider_key is None and binding is not None:
+            provider_key = extract_provider_idempotency_key(kwargs, binding)
         if provider_key is not None and _provider_key_first_attempt_at is None:
             pkey_first_attempt: float | None = time.time()
         else:
@@ -1788,7 +2078,13 @@ class ActionLedger:
         # derive_request_id's fallback, so request_id == effect_id whenever
         # request_id itself was derived (the default) rather than explicit.
         effect_id = (
-            derive_effect_id_for_call(tool, args, kwargs, binding) if binding is not None else None
+            _effect_id
+            if _effect_id is not None
+            else (
+                derive_effect_id_for_call(tool, args, kwargs, binding)
+                if binding is not None
+                else None
+            )
         )
         return LedgerEntry(
             request_id=request_id,
@@ -2534,6 +2830,7 @@ class ActionLedger:
             if existing.provider_idempotency_key is not None
             else None
         )
+        explicit_provider_key = extract_provider_idempotency_key(kwargs, binding)
         fresh = self._new_inflight_entry(
             request_id,
             tool,
@@ -2541,6 +2838,11 @@ class ActionLedger:
             kwargs,
             binding=binding,
             _provider_key_first_attempt_at=pkey_first,
+            _provider_idempotency_key=(
+                explicit_provider_key
+                if explicit_provider_key is not None
+                else existing.provider_idempotency_key
+            ),
         )
         now = time.time()
         fresh = replace(
@@ -2558,6 +2860,56 @@ class ActionLedger:
             return None
         _outcome_reexec_authorized.set(True)
         return fresh
+
+    def _record_request_id_alias(self, canonical_request_id: str, supplied_request_id: str) -> None:
+        """Best-effort audit stamp for explicit request-id aliases."""
+        if canonical_request_id == supplied_request_id:
+            return
+        existing = self.get(canonical_request_id)
+        if existing is None:
+            return
+        if supplied_request_id in existing.request_id_aliases:
+            return
+        updated = replace(
+            existing,
+            request_id_aliases=existing.request_id_aliases + (supplied_request_id,),
+        )
+        self._try_transition(
+            updated,
+            expected_from=frozenset({existing.terminal_outcome}),
+            expected_owner=existing.owner,
+            expected_fence=existing.fence,
+        )
+
+    def _canonical_request_id_for_effect(
+        self,
+        *,
+        effect_id: str,
+        request_id: str,
+    ) -> str:
+        canonical = self._resolve_request_id_for_effect(effect_id)
+        if canonical is None:
+            return request_id
+        if canonical != request_id:
+            self._record_request_id_alias(canonical, request_id)
+        return canonical
+
+    @staticmethod
+    def _effective_incoming_provider_key(
+        *,
+        binding: ToolTransitionBinding,
+        kwargs: dict[str, Any],
+        effect_id: str,
+        existing: LedgerEntry | None,
+    ) -> str | None:
+        incoming = extract_provider_idempotency_key(kwargs, binding)
+        if incoming is not None:
+            return incoming
+        if not should_propagate_effect_id_as_provider_key(binding):
+            return None
+        if existing is not None and existing.provider_idempotency_key is not None:
+            return existing.provider_idempotency_key
+        return effect_id
 
     def claim_side_effecting(
         self,
@@ -2577,17 +2929,30 @@ class ActionLedger:
         interval = self._poll_interval if poll_interval is None else poll_interval
         timeout = self._poll_timeout if poll_timeout is None else poll_timeout
         poll_deadline = time.time() + timeout if timeout is not None else None
-        incoming_key = extract_provider_idempotency_key(kwargs, binding)
+        effect_id = derive_effect_id_for_call(tool, args, kwargs, binding)
 
         while True:
-            existing = self.get(request_id)
+            claim_kwargs = _claim_kwargs(dict(kwargs), _drop_ledger_keys(dict(kwargs)))
+            canonical_request_id = self._canonical_request_id_for_effect(
+                effect_id=effect_id,
+                request_id=request_id,
+            )
+            existing = self.get(canonical_request_id)
+            explicit_provider_key = extract_provider_idempotency_key(kwargs, binding)
+            incoming_key = self._effective_incoming_provider_key(
+                binding=binding,
+                kwargs=kwargs,
+                effect_id=effect_id,
+                existing=existing,
+            )
             self._enforce_args_drift(
                 tool,
                 args,
-                kwargs,
-                request_id=request_id,
+                claim_kwargs,
+                request_id=canonical_request_id,
                 existing=existing,
                 binding=binding,
+                incoming_request_id=request_id,
             )
             if existing is not None:
                 gate = resolve_side_effect_gate(
@@ -2596,19 +2961,19 @@ class ActionLedger:
                     incoming_provider_idempotency_key=incoming_key,
                 )
                 if gate == TransitionGate.REPAIR:
-                    self.repair_transition(request_id)
+                    self.repair_transition(canonical_request_id)
                     continue
                 if gate == TransitionGate.RETURN:
-                    return existing
+                    return self.get(canonical_request_id) or existing
                 if gate == TransitionGate.HARD_BLOCK:
                     entry = self._reconcile_or_hard_block(
-                        request_id, tool, args, kwargs, existing, binding
+                        canonical_request_id, tool, args, kwargs, existing, binding
                     )
                     if entry.resolved_terminal_outcome() == TerminalOutcome.IN_FLIGHT:
                         if getattr(_reconcile_cas_lost, "val", False):
                             _reconcile_cas_lost.val = False
                             self._poll_side_effecting(
-                                request_id,
+                                canonical_request_id,
                                 tool=tool,
                                 interval=interval,
                                 poll_deadline=poll_deadline,
@@ -2617,7 +2982,7 @@ class ActionLedger:
                     return entry
                 if gate == TransitionGate.POLL:
                     self._poll_side_effecting(
-                        request_id,
+                        canonical_request_id,
                         tool=tool,
                         interval=interval,
                         poll_deadline=poll_deadline,
@@ -2625,13 +2990,13 @@ class ActionLedger:
                     continue
                 if gate == TransitionGate.ALLOW:
                     settled = self._prefer_settle_before_unknown_allow(
-                        request_id, tool, args, kwargs, existing, binding
+                        canonical_request_id, tool, args, kwargs, existing, binding
                     )
                     if settled is not None:
                         return settled
                     if existing.resolved_terminal_outcome() == TerminalOutcome.UNKNOWN:
                         reset = self._reset_unknown_for_same_key_retry(
-                            request_id,
+                            canonical_request_id,
                             tool,
                             args,
                             kwargs,
@@ -2643,18 +3008,20 @@ class ActionLedger:
                             return reset
                         if self._blind_never_retries(tool, binding, existing):
                             return self._raise_hard_block(
-                                request_id, tool, existing, binding=binding
+                                canonical_request_id, tool, existing, binding=binding
                             )
                         continue
                     if self._blind_never_retries(tool, binding, existing):
-                        return self._raise_hard_block(request_id, tool, existing, binding=binding)
+                        return self._raise_hard_block(
+                            canonical_request_id, tool, existing, binding=binding
+                        )
                     if self._reclaim_requires_death_signal and not has_worker_death_evidence(
                         existing,
                         now=time.time(),
                         presumed_dead_after=self._presumed_dead_after,
                     ):
                         self._poll_side_effecting(
-                            request_id,
+                            canonical_request_id,
                             tool=tool,
                             interval=interval,
                             poll_deadline=poll_deadline,
@@ -2667,36 +3034,53 @@ class ActionLedger:
                 else None
             )
             entry = self._new_inflight_entry(
-                request_id,
+                canonical_request_id,
                 tool,
                 args,
-                kwargs,
+                claim_kwargs,
                 binding=binding,
                 _provider_key_first_attempt_at=_old_pkey_attempt,
+                _provider_idempotency_key=(
+                    explicit_provider_key
+                    if explicit_provider_key is not None
+                    else (
+                        existing.provider_idempotency_key
+                        if existing is not None
+                        else None
+                    )
+                ),
+                _effect_id=effect_id,
             )
             outcome, existing = self._try_claim_inflight(entry, lease_ttl=ttl)
             if outcome == "completed" and existing is not None:
                 return existing
             if outcome == "in_flight" and existing is not None:
+                canonical_request_id = existing.request_id
+                incoming_key = self._effective_incoming_provider_key(
+                    binding=binding,
+                    kwargs=kwargs,
+                    effect_id=effect_id,
+                    existing=existing,
+                )
                 gate = resolve_side_effect_gate(
                     existing,
                     binding,
                     incoming_provider_idempotency_key=incoming_key,
                 )
                 if gate == TransitionGate.REPAIR:
-                    self.repair_transition(request_id)
+                    self.repair_transition(canonical_request_id)
                     continue
                 if gate == TransitionGate.RETURN:
                     return existing
                 if gate == TransitionGate.HARD_BLOCK:
                     entry = self._reconcile_or_hard_block(
-                        request_id, tool, args, kwargs, existing, binding
+                        canonical_request_id, tool, args, kwargs, existing, binding
                     )
                     if entry.resolved_terminal_outcome() == TerminalOutcome.IN_FLIGHT:
                         if getattr(_reconcile_cas_lost, "val", False):
                             _reconcile_cas_lost.val = False
                             self._poll_side_effecting(
-                                request_id,
+                                canonical_request_id,
                                 tool=tool,
                                 interval=interval,
                                 poll_deadline=poll_deadline,
@@ -2707,7 +3091,7 @@ class ActionLedger:
                     tool, binding, existing
                 ):
                     self._poll_side_effecting(
-                        request_id,
+                        canonical_request_id,
                         tool=tool,
                         interval=interval,
                         poll_deadline=poll_deadline,
@@ -2720,31 +3104,32 @@ class ActionLedger:
                         presumed_dead_after=self._presumed_dead_after,
                     ):
                         self._poll_side_effecting(
-                            request_id,
+                            canonical_request_id,
                             tool=tool,
                             interval=interval,
                             poll_deadline=poll_deadline,
                         )
                         continue
                 self._poll_side_effecting(
-                    request_id,
+                    canonical_request_id,
                     tool=tool,
                     interval=interval,
                     poll_deadline=poll_deadline,
                 )
                 continue
             if outcome == "claimed":
-                claimed = self.get(request_id)
+                claimed = self.get(canonical_request_id)
                 return claimed if claimed is not None else entry
             if existing is not None:
+                canonical_request_id = existing.request_id
                 entry = self._reconcile_or_hard_block(
-                    request_id, tool, args, kwargs, existing, binding
+                    canonical_request_id, tool, args, kwargs, existing, binding
                 )
                 if entry.resolved_terminal_outcome() == TerminalOutcome.IN_FLIGHT:
                     if getattr(_reconcile_cas_lost, "val", False):
                         _reconcile_cas_lost.val = False
                         self._poll_side_effecting(
-                            request_id,
+                            canonical_request_id,
                             tool=tool,
                             interval=interval,
                             poll_deadline=poll_deadline,
@@ -2753,7 +3138,8 @@ class ActionLedger:
                     return entry
                 return entry
             raise LedgerError(
-                f"Unexpected claim outcome {outcome!r} for side-effecting tool {tool!r}"
+                f"Unexpected claim outcome {outcome!r} for side-effecting tool {tool!r} "
+                f"(request_id={canonical_request_id!r})"
             )
 
     def _poll_side_effecting(
@@ -2833,17 +3219,30 @@ class ActionLedger:
         interval = self._poll_interval if poll_interval is None else poll_interval
         timeout = self._poll_timeout if poll_timeout is None else poll_timeout
         poll_deadline = time.time() + timeout if timeout is not None else None
-        incoming_key = extract_provider_idempotency_key(kwargs, binding)
+        effect_id = derive_effect_id_for_call(tool, args, kwargs, binding)
 
         while True:
-            existing = self.get(request_id)
+            claim_kwargs = _claim_kwargs(dict(kwargs), _drop_ledger_keys(dict(kwargs)))
+            canonical_request_id = self._canonical_request_id_for_effect(
+                effect_id=effect_id,
+                request_id=request_id,
+            )
+            existing = self.get(canonical_request_id)
+            explicit_provider_key = extract_provider_idempotency_key(kwargs, binding)
+            incoming_key = self._effective_incoming_provider_key(
+                binding=binding,
+                kwargs=kwargs,
+                effect_id=effect_id,
+                existing=existing,
+            )
             self._enforce_args_drift(
                 tool,
                 args,
-                kwargs,
-                request_id=request_id,
+                claim_kwargs,
+                request_id=canonical_request_id,
                 existing=existing,
                 binding=binding,
+                incoming_request_id=request_id,
             )
             if existing is not None:
                 gate = resolve_side_effect_gate(
@@ -2852,19 +3251,19 @@ class ActionLedger:
                     incoming_provider_idempotency_key=incoming_key,
                 )
                 if gate == TransitionGate.REPAIR:
-                    self.repair_transition(request_id)
+                    self.repair_transition(canonical_request_id)
                     continue
                 if gate == TransitionGate.RETURN:
-                    return existing
+                    return self.get(canonical_request_id) or existing
                 if gate == TransitionGate.HARD_BLOCK:
                     entry = await self._reconcile_or_hard_block_async(
-                        request_id, tool, args, kwargs, existing, binding
+                        canonical_request_id, tool, args, kwargs, existing, binding
                     )
                     if entry.resolved_terminal_outcome() == TerminalOutcome.IN_FLIGHT:
                         if getattr(_reconcile_cas_lost, "val", False):
                             _reconcile_cas_lost.val = False
                             await self._poll_side_effecting_async(
-                                request_id,
+                                canonical_request_id,
                                 tool=tool,
                                 interval=interval,
                                 poll_deadline=poll_deadline,
@@ -2873,7 +3272,7 @@ class ActionLedger:
                     return entry
                 if gate == TransitionGate.POLL:
                     await self._poll_side_effecting_async(
-                        request_id,
+                        canonical_request_id,
                         tool=tool,
                         interval=interval,
                         poll_deadline=poll_deadline,
@@ -2881,13 +3280,13 @@ class ActionLedger:
                     continue
                 if gate == TransitionGate.ALLOW:
                     settled = await self._prefer_settle_before_unknown_allow_async(
-                        request_id, tool, args, kwargs, existing, binding
+                        canonical_request_id, tool, args, kwargs, existing, binding
                     )
                     if settled is not None:
                         return settled
                     if existing.resolved_terminal_outcome() == TerminalOutcome.UNKNOWN:
                         reset = self._reset_unknown_for_same_key_retry(
-                            request_id,
+                            canonical_request_id,
                             tool,
                             args,
                             kwargs,
@@ -2899,18 +3298,20 @@ class ActionLedger:
                             return reset
                         if self._blind_never_retries(tool, binding, existing):
                             return self._raise_hard_block(
-                                request_id, tool, existing, binding=binding
+                                canonical_request_id, tool, existing, binding=binding
                             )
                         continue
                     if self._blind_never_retries(tool, binding, existing):
-                        return self._raise_hard_block(request_id, tool, existing, binding=binding)
+                        return self._raise_hard_block(
+                            canonical_request_id, tool, existing, binding=binding
+                        )
                     if self._reclaim_requires_death_signal and not has_worker_death_evidence(
                         existing,
                         now=time.time(),
                         presumed_dead_after=self._presumed_dead_after,
                     ):
                         await self._poll_side_effecting_async(
-                            request_id,
+                            canonical_request_id,
                             tool=tool,
                             interval=interval,
                             poll_deadline=poll_deadline,
@@ -2923,36 +3324,53 @@ class ActionLedger:
                 else None
             )
             entry = self._new_inflight_entry(
-                request_id,
+                canonical_request_id,
                 tool,
                 args,
-                kwargs,
+                claim_kwargs,
                 binding=binding,
                 _provider_key_first_attempt_at=_old_pkey_attempt,
+                _provider_idempotency_key=(
+                    explicit_provider_key
+                    if explicit_provider_key is not None
+                    else (
+                        existing.provider_idempotency_key
+                        if existing is not None
+                        else None
+                    )
+                ),
+                _effect_id=effect_id,
             )
             outcome, existing = self._try_claim_inflight(entry, lease_ttl=ttl)
             if outcome == "completed" and existing is not None:
                 return existing
             if outcome == "in_flight" and existing is not None:
+                canonical_request_id = existing.request_id
+                incoming_key = self._effective_incoming_provider_key(
+                    binding=binding,
+                    kwargs=kwargs,
+                    effect_id=effect_id,
+                    existing=existing,
+                )
                 gate = resolve_side_effect_gate(
                     existing,
                     binding,
                     incoming_provider_idempotency_key=incoming_key,
                 )
                 if gate == TransitionGate.REPAIR:
-                    self.repair_transition(request_id)
+                    self.repair_transition(canonical_request_id)
                     continue
                 if gate == TransitionGate.RETURN:
                     return existing
                 if gate == TransitionGate.HARD_BLOCK:
                     entry = await self._reconcile_or_hard_block_async(
-                        request_id, tool, args, kwargs, existing, binding
+                        canonical_request_id, tool, args, kwargs, existing, binding
                     )
                     if entry.resolved_terminal_outcome() == TerminalOutcome.IN_FLIGHT:
                         if getattr(_reconcile_cas_lost, "val", False):
                             _reconcile_cas_lost.val = False
                             await self._poll_side_effecting_async(
-                                request_id,
+                                canonical_request_id,
                                 tool=tool,
                                 interval=interval,
                                 poll_deadline=poll_deadline,
@@ -2963,7 +3381,7 @@ class ActionLedger:
                     tool, binding, existing
                 ):
                     await self._poll_side_effecting_async(
-                        request_id,
+                        canonical_request_id,
                         tool=tool,
                         interval=interval,
                         poll_deadline=poll_deadline,
@@ -2976,31 +3394,32 @@ class ActionLedger:
                         presumed_dead_after=self._presumed_dead_after,
                     ):
                         await self._poll_side_effecting_async(
-                            request_id,
+                            canonical_request_id,
                             tool=tool,
                             interval=interval,
                             poll_deadline=poll_deadline,
                         )
                         continue
                 await self._poll_side_effecting_async(
-                    request_id,
+                    canonical_request_id,
                     tool=tool,
                     interval=interval,
                     poll_deadline=poll_deadline,
                 )
                 continue
             if outcome == "claimed":
-                claimed = self.get(request_id)
+                claimed = self.get(canonical_request_id)
                 return claimed if claimed is not None else entry
             if existing is not None:
+                canonical_request_id = existing.request_id
                 entry = await self._reconcile_or_hard_block_async(
-                    request_id, tool, args, kwargs, existing, binding
+                    canonical_request_id, tool, args, kwargs, existing, binding
                 )
                 if entry.resolved_terminal_outcome() == TerminalOutcome.IN_FLIGHT:
                     if getattr(_reconcile_cas_lost, "val", False):
                         _reconcile_cas_lost.val = False
                         await self._poll_side_effecting_async(
-                            request_id,
+                            canonical_request_id,
                             tool=tool,
                             interval=interval,
                             poll_deadline=poll_deadline,
@@ -3009,7 +3428,8 @@ class ActionLedger:
                     return entry
                 return entry
             raise LedgerError(
-                f"Unexpected claim outcome {outcome!r} for side-effecting tool {tool!r}"
+                f"Unexpected claim outcome {outcome!r} for side-effecting tool {tool!r} "
+                f"(request_id={canonical_request_id!r})"
             )
 
     async def _poll_side_effecting_async(
@@ -3255,6 +3675,57 @@ class ActionLedger:
         ):
             raise LedgerOutcomeAlreadySetError(
                 f"Cannot attach external operation ref to {request_id!r}: transition superseded"
+            )
+        return entry
+
+    def attach_provider_idempotency_key(
+        self,
+        request_id: str,
+        provider_key: str,
+        *,
+        expected_owner: str | None = None,
+        expected_fence: int | None = None,
+    ) -> LedgerEntry:
+        """Persist provider idempotency key on the claimed transition row.
+
+        Used by wrapper-path auto-propagation (effect_id -> provider key):
+        after ATTEMPTING decision CAS succeeds, before tool body starts.
+        """
+        existing = self._get_entry(request_id)
+        if existing is None:
+            raise LedgerError(
+                f"Cannot attach provider idempotency key to unknown request {request_id!r}"
+            )
+        if expected_fence is None:
+            raise LedgerError(
+                f"Attaching provider idempotency key to {request_id!r} requires the claim fence"
+            )
+        key = str(provider_key)
+        stored_provider_key = existing.provider_idempotency_key
+        if stored_provider_key is not None and stored_provider_key != key:
+            raise LedgerOutcomeAlreadySetError(
+                f"Cannot attach provider idempotency key to {request_id!r}: key mismatch "
+                f"({existing.provider_idempotency_key!r} != {key!r})"
+            )
+        first_attempt = existing.provider_key_first_attempt_at
+        if first_attempt is None:
+            first_attempt = time.time()
+        entry = replace(
+            existing,
+            provider_idempotency_key=key,
+            provider_key_first_attempt_at=first_attempt,
+        )
+        if not self._try_transition(
+            entry,
+            expected_from=frozenset({existing.terminal_outcome}),
+            expected_owner=expected_owner,
+            expected_fence=expected_fence,
+            expected_effect_state=(
+                EffectState.ATTEMPTING.value if existing.effect_protocol_required else None
+            ),
+        ):
+            raise LedgerOutcomeAlreadySetError(
+                f"Cannot attach provider idempotency key to {request_id!r}: transition superseded"
             )
         return entry
 
@@ -4299,6 +4770,51 @@ def _raise_denied_decision(request_id: str, decision: Any) -> None:
         )
 
 
+def _ensure_provider_key_for_execution(
+    *,
+    ledger: ActionLedger,
+    request_id: str,
+    transition_binding: ToolTransitionBinding | None,
+    claimed_entry: LedgerEntry,
+    clean_kwargs: dict[str, Any],
+    call_mapping: dict[str, Any],
+    owner: str | None,
+    fence: int,
+) -> LedgerEntry:
+    """Inject and persist provider key from effect_id when policy requests it."""
+    if transition_binding is None:
+        return claimed_entry
+    param = transition_binding.provider_idempotency_key_param
+    if param is None:
+        return claimed_entry
+    if clean_kwargs.get(param) is not None:
+        return claimed_entry
+    if not should_propagate_effect_id_as_provider_key(transition_binding):
+        return claimed_entry
+    provider_key = claimed_entry.provider_idempotency_key or claimed_entry.effect_id
+    if provider_key is None:
+        raise LedgerError(
+            f"Cannot derive provider idempotency key for {request_id!r}: missing effect_id"
+        )
+    updated = ledger.attach_provider_idempotency_key(
+        request_id,
+        provider_key,
+        expected_owner=owner,
+        expected_fence=fence,
+    )
+    clean_kwargs[param] = provider_key
+    call_mapping[param] = provider_key
+    active = _active_transition_var.get()
+    if active is not None and active.request_id == request_id:
+        _active_transition_var.set(
+            replace(
+                active,
+                call_kwargs={**dict(active.call_kwargs), param: provider_key},
+            )
+        )
+    return updated
+
+
 def _identity_lookup_kwargs(
     func: Callable[..., Any],
     args: tuple[Any, ...],
@@ -4375,6 +4891,7 @@ def _run_ledgered(
                 request_id,
             )
         raise
+    request_id = existing.request_id
     if existing.is_terminal_completed():
         ledger._emit_outcome(
             request_id=request_id,
@@ -4542,6 +5059,16 @@ def _run_ledgered(
         if policy_blocked is not None:
             raise policy_blocked
         _raise_denied_decision(request_id, decision)
+        existing = _ensure_provider_key_for_execution(
+            ledger=ledger,
+            request_id=request_id,
+            transition_binding=transition_binding,
+            claimed_entry=existing,
+            clean_kwargs=clean_kwargs,
+            call_mapping=call_mapping,
+            owner=owner,
+            fence=fence,
+        )
 
         ledger._emit_outcome(
             request_id=request_id,
@@ -4741,6 +5268,7 @@ async def _run_ledgered_async(
                 request_id,
             )
         raise
+    request_id = existing.request_id
     if existing.is_terminal_completed():
         ledger._emit_outcome(
             request_id=request_id,
@@ -4908,6 +5436,16 @@ async def _run_ledgered_async(
         if policy_blocked is not None:
             raise policy_blocked
         _raise_denied_decision(request_id, decision)
+        existing = _ensure_provider_key_for_execution(
+            ledger=ledger,
+            request_id=request_id,
+            transition_binding=transition_binding,
+            claimed_entry=existing,
+            clean_kwargs=clean_kwargs,
+            call_mapping=call_mapping,
+            owner=owner,
+            fence=fence,
+        )
 
         ledger._emit_outcome(
             request_id=request_id,

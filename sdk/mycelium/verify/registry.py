@@ -23,6 +23,7 @@ SCENARIO_ORDER = (
     "authority-window",
     "use-time-currency",
     "simulation",
+    "state-machine-exhaustive",
 )
 
 ScenarioFn = Callable[["ScenarioContext"], "VerificationEvidence"]
@@ -88,6 +89,7 @@ def ensure_builtin_scenarios_registered() -> None:
         redispatch,
         secret_in_args,
         simulation,
+        state_machine_exhaustive,
         storage_outage,
         use_time_currency,
         worker_crash,

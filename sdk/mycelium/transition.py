@@ -751,6 +751,11 @@ class ToolTransitionBinding:
     explicit_capability: ToolCapability | None = None
     provider_idempotency_key_param: str | None = None
     provider_idempotency_key_ttl: float | None = None
+    # When True, derive a missing provider key from effect_id and inject it
+    # into the tool call before body execution (after ATTEMPTING decision CAS).
+    # KEYED_MUTATE tools with a declared provider_idempotency_key_param do this
+    # by default even when this flag is False.
+    propagate_effect_id_as_provider_key: bool = False
     request_id_from: str | None = None
 
     @classmethod
@@ -767,8 +772,14 @@ class ToolTransitionBinding:
         capability: ToolCapability | None = None,
         provider_idempotency_key_param: str | None = None,
         provider_idempotency_key_ttl: float | None = None,
+        propagate_effect_id_as_provider_key: bool = False,
         request_id_from: str | None = None,
     ) -> ToolTransitionBinding:
+        if propagate_effect_id_as_provider_key and provider_idempotency_key_param is None:
+            raise ValueError(
+                "propagate_effect_id_as_provider_key=True requires "
+                "provider_idempotency_key_param"
+            )
         # Binding-level capability sees only the statically declared provider
         # idempotency key. Reconciler presence lives on the ledger and can only
         # *tighten to a promise* at recovery time via
@@ -818,6 +829,7 @@ class ToolTransitionBinding:
             explicit_capability=capability,
             provider_idempotency_key_param=provider_idempotency_key_param,
             provider_idempotency_key_ttl=provider_idempotency_key_ttl,
+            propagate_effect_id_as_provider_key=propagate_effect_id_as_provider_key,
             request_id_from=request_id_from,
         )
 
@@ -1142,6 +1154,20 @@ def extract_provider_idempotency_key(
         return None
     value = kwargs.get(param)
     return str(value) if value is not None else None
+
+
+def should_propagate_effect_id_as_provider_key(binding: ToolTransitionBinding) -> bool:
+    """Whether a missing provider key should be injected from ``effect_id``.
+
+    KEYED_MUTATE tools with a declared provider-key param propagate by default.
+    Other side-effect classes require explicit opt-in via
+    ``propagate_effect_id_as_provider_key=True``.
+    """
+    if binding.provider_idempotency_key_param is None:
+        return False
+    if binding.side_effect_class == SideEffectClass.KEYED_MUTATE:
+        return True
+    return binding.propagate_effect_id_as_provider_key
 
 
 def derive_transition_key_for_call(

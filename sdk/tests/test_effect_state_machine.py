@@ -56,13 +56,19 @@ def _scope() -> TransitionScope:
     return TransitionScope(thread_id="thread-1", run_id="run-1")
 
 
+def _case_kwargs(case: str) -> dict[str, str]:
+    return {"case": case}
+
+
 def test_effect_state_transition_matrix_and_illegal_cas_rejections() -> None:
     storage = InMemoryLedgerStorage()
     ledger = ActionLedger(storage=storage)
     binding = _binding()
 
     # INTENDED -> ATTEMPTING -> COMMITTED
-    allowed = ledger.claim_side_effecting("req-allowed", "tool", (), {}, binding)
+    allowed = ledger.claim_side_effecting(
+        "req-allowed", "tool", (), _case_kwargs("allowed"), binding
+    )
     ledger.record_decision(
         "req-allowed",
         _decision(True),
@@ -72,7 +78,9 @@ def test_effect_state_transition_matrix_and_illegal_cas_rejections() -> None:
     assert committed.resolved_effect_state() == EffectState.COMMITTED
 
     # INTENDED -> ABORTED
-    denied = ledger.claim_side_effecting("req-denied", "tool", (), {}, binding)
+    denied = ledger.claim_side_effecting(
+        "req-denied", "tool", (), _case_kwargs("denied"), binding
+    )
     denied_row = ledger.record_decision(
         "req-denied",
         _decision(False),
@@ -81,7 +89,9 @@ def test_effect_state_transition_matrix_and_illegal_cas_rejections() -> None:
     assert denied_row.resolved_effect_state() == EffectState.ABORTED
 
     # ATTEMPTING -> UNKNOWN (BLIND-like after-effect failure)
-    unknown = ledger.claim_side_effecting("req-unknown", "tool", (), {}, binding)
+    unknown = ledger.claim_side_effecting(
+        "req-unknown", "tool", (), _case_kwargs("unknown"), binding
+    )
     ledger.record_decision(
         "req-unknown",
         _decision(True),
@@ -95,7 +105,9 @@ def test_effect_state_transition_matrix_and_illegal_cas_rejections() -> None:
     assert unknown_row.resolved_effect_state() == EffectState.UNKNOWN
 
     # ATTEMPTING -> ABORTED (failure before effect after allow)
-    failed = ledger.claim_side_effecting("req-fail-before", "tool", (), {}, binding)
+    failed = ledger.claim_side_effecting(
+        "req-fail-before", "tool", (), _case_kwargs("fail-before"), binding
+    )
     ledger.record_decision(
         "req-fail-before",
         _decision(True),
@@ -110,7 +122,9 @@ def test_effect_state_transition_matrix_and_illegal_cas_rejections() -> None:
     assert failed_row.resolved_effect_state() == EffectState.ABORTED
 
     # ILLEGAL: complete before decision (still INTENDED)
-    no_decision = ledger.claim_side_effecting("req-no-decision", "tool", (), {}, binding)
+    no_decision = ledger.claim_side_effecting(
+        "req-no-decision", "tool", (), _case_kwargs("no-decision"), binding
+    )
     with pytest.raises(LedgerOutcomeAlreadySetError):
         ledger.complete(
             "req-no-decision",

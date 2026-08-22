@@ -5,6 +5,33 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
 
 ## Unreleased
 
+## 1.35.0 (2026-08-22)
+
+MINOR: closes remaining Core Protocol Architecture gaps from the effect-commit
+roadmap — authoritative `effect_id` dedupe, provider-key auto-propagation, the
+`state-machine-exhaustive` verify scenario, and a TLA+ intent-state sketch.
+
+### Added
+
+- Effect-commit closure batch for Core Protocol Architecture gaps:
+  consequential `claim_side_effecting` now treats derived `effect_id` as the
+  authoritative dedupe key (cross-request aliasing, no second-row duplicates),
+  storage backends expose `resolve_request_id()` / `get_by_effect_id()` with
+  backend-specific effect indexes (file sidecar, Redis secondary key,
+  Sqlite/Postgres unique index), and verify invariants add
+  `check_unique_effect_id_index`. Added deterministic
+  `state-machine-exhaustive` verify scenario plus `sdk/docs/spec/effect_state.tla`
+  and `sdk/docs/spec/README.md` formal-model notes.
+
+### Changed
+
+- For `keyed_mutate` tools that declare `provider_idempotency_key_param`,
+  Mycelium now defaults to propagating `effect_id` as the provider key when the
+  kwarg is omitted, persists the injected key on first attempt, and reuses it
+  for retries (explicit user-provided keys still win and are enforced). Setting
+  `propagate_effect_id_as_provider_key: true` without a declared
+  `provider_idempotency_key_param` is now rejected at binding/config load time.
+
 ## 1.34.0 (2026-08-22)
 
 MINOR: one coherent effect-commit and side-effect-safety batch. PyPI 1.32.0

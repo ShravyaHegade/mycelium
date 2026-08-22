@@ -164,17 +164,19 @@ def run_reconcile(ctx: ScenarioContext) -> VerificationEvidence:
             failures.append("provider key drift did not fail closed")
         else:
             decisions.append("keyed:drift HARD_BLOCK")
-        missing_blocked = False
+        before_keys = list(provider.keys_seen)
         try:
             tool(1, request_id=rid, op_id="keyed")
-        except LedgerHardBlockError:
-            missing_blocked = True
         except Exception as exc:  # noqa: BLE001
-            missing_blocked = "block" in str(exc).lower() or "key" in str(exc).lower()
-        if not missing_blocked:
-            failures.append("missing provider key did not fail closed")
+            failures.append(f"keyed missing-key retry: {type(exc).__name__}: {exc}")
         else:
-            decisions.append("keyed:missing HARD_BLOCK")
+            reused = provider.keys_seen[len(before_keys) :]
+            if reused and reused[-1] == "ikey-stable":
+                decisions.append("keyed:missing reuses stored provider key")
+            else:
+                failures.append(
+                    "missing provider key retry did not reuse stored provider key"
+                )
         before_keys = list(provider.keys_seen)
         try:
             tool(1, request_id=rid, op_id="keyed", idempotency_key="ikey-stable")

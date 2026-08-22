@@ -197,22 +197,25 @@ section; the tests are concrete `file::test_name` entries.
     `mark-dead` (unless overridden with direct evidence).
     *Where:* [Assert worker death](../README.md#operator-runbook-your-agent-hard-blocked).
 
-14. **Provider idempotency-key enforcement (opt-in).** With
-    `provider_idempotency_key_param` declared, a retry that presents a
-    different or missing key hard-blocks (it would risk a second, undeduped
-    effect). The declared key is excluded from the transition-key fingerprint
+14. **Provider idempotency-key enforcement + default propagation for keyed
+    mutate.** With `provider_idempotency_key_param` declared, a retry that
+    presents a different or missing key hard-blocks (it would risk a second,
+    undeduped effect). For `keyed_mutate`, when that kwarg is omitted on first
+    attempt, Mycelium defaults to propagating `effect_id` as the provider key
+    after the `ATTEMPTING` decision write and persists that value for future
+    retries. The declared key is excluded from the transition-key fingerprint
     so key-swapping retries are caught, not silently re-keyed.
     *Where:* [Enforcing the same provider idempotency key](../README.md#enforcing-the-same-provider-idempotency-key-provider_idempotency_key_param).
 
 15. **Effect identity and unified state are deterministic and legacy-safe.**
-    Identical derived redispatches map to one destination-aware SHA-256
-    `effect_id` / transition key; changing a meaningful argument or canonical
-    destination changes it. `EffectState` maps current and legacy rows onto
-    `INTENDED`, `ATTEMPTING`, `COMMITTED`, `ABORTED`, or `UNKNOWN`; the
-    COMMITTED view must agree with legacy `COMPLETED`. An explicit host-owned
-    `request_id` remains the storage key: the independently derived
-    `effect_id` is audit evidence, not a cross-row secondary dedupe index, so
-    the host must reuse the same request id for one logical effect.
+    Identical redispatches map to one destination-aware SHA-256 `effect_id`;
+    changing a meaningful argument or canonical destination changes it.
+    Consequential claims resolve by canonical `effect_id` and never create a
+    second row for a colliding explicit `request_id`; alternate host ids are
+    preserved as audit aliases on the canonical entry. The unified single-row
+    WAL intent model is `INTENDED -> ATTEMPTING -> COMMITTED|ABORTED|UNKNOWN`;
+    `EffectState` maps current and legacy rows onto those states, and the
+    COMMITTED view must agree with legacy `COMPLETED`.
     *Where:* [Transition identity and host-owned `request_id`](../README.md#transition-identity-and-host-owned-request_id).
 
 16. **Task-level idempotency.** The task ledger returns a stored result for a
@@ -282,10 +285,10 @@ than the code makes.
   changed args refuses the second body within the same run (`run_id` /
   `thread_id`; other runs isolated): soft → `ToolBoundaryError`, hard →
   `LedgerHardBlockError`. Derived transition keys still differ by args;
-  `on_args_drift: off` retains the old dual-execute escape hatch. An explicit
-  host-owned `request_id` is the storage key, and reuse with a different tool,
-  scope, or meaningful arguments is fail-closed even when drift checking is
-  off. Default soft pinned by
+  `on_args_drift: off` retains the old dual-execute escape hatch. Explicit
+  host `request_id` aliases are still drift-checked against the canonical row,
+  so reuse with a different tool, scope, or meaningful arguments is fail-closed
+  even when drift checking is off. Default soft pinned by
   `tests/test_args_drift.py::test_default_is_soft_not_off`; derived key split +
   `off` escape hatch by
   `tests/test_mengchheang_public_repro.py::test_semantic_identity`.
@@ -380,8 +383,8 @@ are cited once. "Where documented" links the README section.
 | Release stamps the record (never deleted) | README § [Operator runbook](../README.md#operator-runbook-your-agent-hard-blocked) | `test_operator_release.py::test_release_not_executed_grants_exactly_one_reexecution` (asserts `operator_resolution`/`resolved_by`) · `test_operator_release.py::test_postgres_release_not_executed_round_trip` |
 | Release emits signed audit receipts when configured | README § [Operator runbook](../README.md#operator-runbook-your-agent-hard-blocked) | `test_operator_release.py::test_release_emits_audit_receipt_when_emitter_configured` · `test_audit_receipt.py::test_emitter_signs_and_verifies_tool_receipt` · `test_audit_receipt.py::test_tampered_receipt_fails_verification` |
 | Worker-death gate (opt-in) | README § [Assert worker death](../README.md#operator-runbook-your-agent-hard-blocked) | `test_worker_death_signal.py::test_release_expired_refused_without_death_evidence` · `test_worker_death_signal.py::test_release_expired_allowed_with_asserted_death` · `test_worker_death_signal.py::test_mark_worker_dead_refuses_recent_heartbeat_without_override` · `test_worker_death_signal.py::test_read_only_reclaim_blocked_without_death_evidence` · `test_worker_death_signal.py::test_side_effecting_allow_blocked_without_death_evidence` |
-| Provider idempotency-key enforcement (opt-in) | README § [Enforcing the same provider idempotency key](../README.md#enforcing-the-same-provider-idempotency-key-provider_idempotency_key_param) | `test_provider_idempotency_key.py::test_gate_hard_blocks_different_provider_key` · `test_provider_idempotency_key.py::test_gate_hard_blocks_missing_incoming_key` · `test_provider_idempotency_key.py::test_gate_hard_blocks_missing_stored_key` · `test_provider_idempotency_key.py::test_declared_key_is_excluded_from_transition_key` · `test_provider_key_validity.py::test_same_key_expired_ttl_hard_blocks` · `test_provider_key_validity.py::test_unknown_same_key_valid_ttl_allows` · `test_provider_key_validity.py::test_unknown_same_key_expired_ttl_hard_blocks` · `test_provider_key_validity.py::test_unknown_same_key_prefers_reconciler_over_reexec` |
-| Deterministic effect identity + unified EffectState | README § [Effect-commit protocol](../README.md#effect-commit-protocol) / [Transition identity](../README.md#transition-identity-and-host-owned-request_id) | `test_effect_identity.py` · `test_effect_state_machine.py::test_effect_state_transition_matrix_and_illegal_cas_rejections` · `test_effect_state_machine.py::test_legacy_deserialization_resolves_unified_effect_state` · `test_property_transitions.py::test_transition_key_invariants` |
+| Provider idempotency-key enforcement + keyed-mutate auto-propagation | README § [Enforcing the same provider idempotency key](../README.md#enforcing-the-same-provider-idempotency-key-provider_idempotency_key_param) | `test_provider_idempotency_key.py::test_gate_hard_blocks_different_provider_key` · `test_provider_idempotency_key.py::test_gate_hard_blocks_missing_incoming_key` · `test_provider_idempotency_key.py::test_gate_hard_blocks_missing_stored_key` · `test_provider_idempotency_key.py::test_keyed_mutate_auto_injects_effect_id_key_when_missing` · `test_provider_idempotency_key.py::test_keyed_mutate_missing_key_retry_reuses_stored_effect_id` · `test_provider_key_validity.py::test_same_key_expired_ttl_hard_blocks` · `test_provider_key_validity.py::test_unknown_same_key_valid_ttl_allows` · `test_provider_key_validity.py::test_unknown_same_key_expired_ttl_hard_blocks` · `test_provider_key_validity.py::test_unknown_same_key_prefers_reconciler_over_reexec` |
+| Deterministic effect identity + authoritative `effect_id` dedupe + unified EffectState | README § [Effect-commit protocol](../README.md#effect-commit-protocol) / [Transition identity](../README.md#transition-identity-and-host-owned-request_id) | `test_effect_identity.py` · `test_effect_id_index.py` · `test_effect_state_machine.py::test_effect_state_transition_matrix_and_illegal_cas_rejections` · `test_effect_state_machine.py::test_legacy_deserialization_resolves_unified_effect_state` · `test_property_transitions.py::test_transition_key_invariants` |
 | Task-level idempotency | README § [Quickstart: task-level idempotency](../README.md#quickstart-task-level-idempotency) | `test_cli_run.py::test_run_instruments_sync_tool_and_task_across_processes` |
 | Secret-in-args (when enabled) | README § [Secret-in-args (AF-010)](../README.md#secret-in-args-af-010) | `test_secret_protection.py` · `test_verify.py::test_cli_smoke_each_scenario` (`secret-in-args`) |
 | Destination policy (when enabled) | README § [Entity / destination guard](../README.md#entity--destination-guard-unnumbered) | `test_entity_guard.py` · `test_verify.py::test_cli_smoke_each_scenario` (`entity-guard`) |
@@ -389,7 +392,7 @@ are cited once. "Where documented" links the README section.
 | Authority-window expiry (when enabled) | README § [Authority-window expiry](../README.md#authority-window-expiry) | `test_authority_window.py` · `test_verify.py::test_cli_smoke_each_scenario` (`authority-window`) |
 | Use-time currency (when enabled) | README § [Use-time currency (AF-012)](../README.md#use-time-currency-af-012) | `test_use_time_currency.py` · `test_verify.py::test_cli_smoke_each_scenario` (`use-time-currency`) |
 | Single-key state machine invariants (executions ≤ 1 + not-executed verdicts; COMPLETED terminal; CAS out of IN_FLIGHT) | this doc, § C / [NOT_EXECUTED reset CAS](../README.md#not_executed-reset-cas-v118) | `test_property_transitions.py::test_transition_key_invariants` (Hypothesis, file + Redis) · `test_payment_provider_mock.py::test_redispatch_storm_never_double_charges` |
-| Deterministic simulation invariant (legacy COMPLETED and unified EffectState.COMMITTED) | README § [`mycelium verify`](../README.md#mycelium-verify-exercise-the-guarantees) | `test_simulation.py::test_simulation_scenario_passes_on_shared_backend` · `test_verify.py::test_all_order_sqlite` |
+| Deterministic simulation invariants (legacy + exhaustive interleavings) | README § [`mycelium verify`](../README.md#mycelium-verify-exercise-the-guarantees) | `test_simulation.py::test_simulation_scenario_passes_on_shared_backend` · `test_simulation.py::test_state_machine_exhaustive_scenario_passes` · `test_verify.py::test_all_order_sqlite` |
 
 <sup>1</sup> `test_postgres_storage_atomic_claim` runs when `psycopg` is
 installed and `MYCELIUM_TEST_POSTGRES_DSN` is set; it skips otherwise.
@@ -431,10 +434,11 @@ Still can go wrong — even with everything above configured correctly:
   (server-authoritative, HMAC-derived keys) is the mitigation — the runtime
   enforces *same key on retry*, your application must mint stable, server-side
   keys.
-- **`effect_id` is not a second storage index.** With an explicit business
-  `request_id`, Mycelium records the independently derived `effect_id` for
-  audit and invariant checks but does not merge two differently keyed rows.
-  The host must reuse one stable request id for one logical effect.
+- **`effect_id` quality is only as good as your canonicalization inputs.** The
+  runtime now deduplicates consequential claims by `effect_id`; if a host omits
+  a materially distinct field from identity inputs, distinct operations can
+  collapse onto one canonical row. Keep identity inputs server-authoritative
+  and semantically complete.
 - **Manual hosts can bypass the decision boundary.** The ledger cannot stop
   application code from calling a provider directly. A manual integration
   must call `record_decision(...)` with the claim fence and wait for that write
@@ -472,9 +476,12 @@ Still can go wrong — even with everything above configured correctly:
   --scenario all --strict` to empirically exercise synthetic failure
   scenarios (redispatch, contention, crash windows, storage outage,
   ambiguous effects, reconcile, and deterministic simulation) against an
-  isolated namespace. The simulation scenario is skipped for memory storage;
-  on durable multiprocess-capable backends it checks both legacy COMPLETED and
-  unified EffectState.COMMITTED invariants plus stale-fence takeover. Verify never
+  isolated namespace. The `simulation` scenario is skipped for memory storage;
+  on durable multiprocess-capable backends it checks legacy COMPLETED +
+  EffectState.COMMITTED invariants, explicit-request alias dedupe, and stale
+  fence takeover. The `state-machine-exhaustive` scenario runs in memory and
+  systematically checks stale-fence refusals, reconcile outcomes, and
+  concurrent-intended claim races. Verify never
   runs application tools, never calls an LLM, and never contacts a real
   business provider. Some infrastructure properties (Redis persistence,
   host call-site identity) remain operator assertions or not verifiable

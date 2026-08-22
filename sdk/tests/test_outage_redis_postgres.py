@@ -323,6 +323,17 @@ class FailingPostgresStorage:
         self.fail_claim = False
         self.fail_transition = False
         self.fail_list_all = False
+        self.fail_resolve_request_id = False
+
+    def resolve_request_id(self, effect_id: str) -> str | None:
+        if self.fail_resolve_request_id:
+            raise ConnectionError("storage backend unreachable")
+        return self._mem.resolve_request_id(effect_id)
+
+    def get_by_effect_id(self, effect_id: str) -> LedgerEntry | None:
+        if self.fail_resolve_request_id:
+            raise ConnectionError("storage backend unreachable")
+        return self._mem.get_by_effect_id(effect_id)
 
     def get(self, request_id: str) -> LedgerEntry | None:
         if self.fail_get:
@@ -386,7 +397,10 @@ class TestPostgresOutage:
 
         storage = PostgresLedgerStorage("postgresql://outage:5432/mycelium")
         ledger_inst = ActionLedger(storage=storage)
-        with pytest.raises(LedgerStorageUnavailableError, match=r"during (get|try_claim_inflight)"):
+        with pytest.raises(
+            LedgerStorageUnavailableError,
+            match=r"during (get|try_claim_inflight|resolve_request_id)",
+        ):
             ledger_inst.claim_side_effecting(
                 "req-pg-claim", "send_payment", (), {"amount": 10}, _binding()
             )
