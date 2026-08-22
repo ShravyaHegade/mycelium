@@ -3597,6 +3597,9 @@ class ActionLedger:
             parsed = Decision.from_dict(decision)
         except (KeyError, TypeError, ValueError) as exc:
             raise LedgerError(f"Invalid decision for request {request_id!r}: {exc}") from exc
+        from mycelium.secret_protection import sanitize_for_decision_evidence
+
+        parsed = Decision.from_dict(sanitize_for_decision_evidence(parsed.to_dict()))
         entry = replace(
             existing,
             decision=parsed.to_dict(),
@@ -4115,12 +4118,21 @@ def _record_boundary_decision(
     result is written under the same fenced CAS as every in-flight mutation, so
     a superseded worker cannot record — or act on — a stale decision.
     """
-    from mycelium.decision import DecisionIntent, build_snapshot, get_decision_engine
+    from mycelium.decision import (
+        Decision,
+        DecisionIntent,
+        build_snapshot,
+        emit_policy_outcomes_after_decision,
+        get_decision_engine,
+        get_decision_evidence,
+    )
+    from mycelium.secret_protection import sanitize_for_decision_evidence
 
+    evidence_args, evidence_kwargs = get_decision_evidence(tuple(args), kwargs)
     intent = DecisionIntent(
         tool=tool,
-        args=tuple(args),
-        kwargs=dict(kwargs),
+        args=evidence_args,
+        kwargs=evidence_kwargs,
         request_id=request_id,
         transition_key=transition_key,
     )
@@ -4130,6 +4142,7 @@ def _record_boundary_decision(
         currency_decision=currency_decision,
     )
     decision = get_decision_engine().evaluate(intent, snapshot)
+    decision = Decision.from_dict(sanitize_for_decision_evidence(decision.to_dict()))
     try:
         ledger.record_decision(
             request_id,
@@ -4144,6 +4157,7 @@ def _record_boundary_decision(
             request_id,
         )
         raise
+    emit_policy_outcomes_after_decision(tool, request_id)
     return decision
 
 
@@ -4303,12 +4317,14 @@ def _run_ledgered(
             AuthorityExpiredError,
             get_authority_decisions,
         )
+        from mycelium.decision import finalize_policy_facts_at_boundary
         from mycelium.use_time_currency import (
             UseTimeCurrencyError,
             enforce_use_boundary,
             get_use_time_decisions,
         )
 
+        finalize_policy_facts_at_boundary()
         blocked: AuthorityExpiredError | UseTimeCurrencyError | None = None
         authority_offset = len(get_authority_decisions())
         currency_offset = len(get_use_time_decisions())
@@ -4419,6 +4435,11 @@ def _run_ledgered(
         )
         if blocked is not None:
             raise blocked
+        from mycelium.decision import get_policy_blocked_error
+
+        policy_blocked = get_policy_blocked_error()
+        if policy_blocked is not None:
+            raise policy_blocked
         _raise_denied_decision(request_id, decision)
 
         ledger._emit_outcome(
@@ -4662,12 +4683,14 @@ async def _run_ledgered_async(
             AuthorityExpiredError,
             get_authority_decisions,
         )
+        from mycelium.decision import finalize_policy_facts_at_boundary
         from mycelium.use_time_currency import (
             UseTimeCurrencyError,
             enforce_use_boundary_async,
             get_use_time_decisions,
         )
 
+        finalize_policy_facts_at_boundary()
         blocked: AuthorityExpiredError | UseTimeCurrencyError | None = None
         authority_offset = len(get_authority_decisions())
         currency_offset = len(get_use_time_decisions())
@@ -4778,6 +4801,11 @@ async def _run_ledgered_async(
         )
         if blocked is not None:
             raise blocked
+        from mycelium.decision import get_policy_blocked_error
+
+        policy_blocked = get_policy_blocked_error()
+        if policy_blocked is not None:
+            raise policy_blocked
         _raise_denied_decision(request_id, decision)
 
         ledger._emit_outcome(
