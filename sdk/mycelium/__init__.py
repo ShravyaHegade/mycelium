@@ -189,6 +189,14 @@ from mycelium.entity_guard import (
     enforce_entity_guard,
 )
 from mycelium.history_guard import HistoryGuard, HistoryTruncatedError
+from mycelium.ledger_migrations import (
+    LedgerMigrationError,
+    LedgerMigrationPlan,
+    LedgerMigrationResult,
+    apply_ledger_migration,
+    plan_ledger_migration,
+    upgrade_ledger_entry,
+)
 from mycelium.loop_guard import (
     DEFAULT_CONSECUTIVE_SOFT,
     MISSING_RUN_ID_POLICIES,
@@ -371,6 +379,12 @@ except PackageNotFoundError:  # pragma: no cover - editable/source tree edge
 
 __all__ = [
     "ActionLedger",
+    "LedgerMigrationError",
+    "LedgerMigrationPlan",
+    "LedgerMigrationResult",
+    "apply_ledger_migration",
+    "plan_ledger_migration",
+    "upgrade_ledger_entry",
     "OperatorAuthorizer",
     "OperatorReleaseRequest",
     "StaticTokenOperatorAuthorizer",

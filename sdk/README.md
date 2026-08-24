@@ -561,7 +561,46 @@ protocol: they store a deterministic, destination-aware `effect_id`,
 `schema_version`, claim `fence`, atomic `decision`, and unified effect state.
 Unclassified `claim()` rows keep the protocol disabled; because no binding
 exists, their compatibility `effect_id` falls back to `request_id` rather than
-the destination-aware derivation. The public API is exported from `mycelium`:
+the destination-aware derivation.
+
+### Ledger schema migrations
+
+Ledger schema 2 adds durable `effect_id`, `request_id_aliases`, and
+`schema_version`. Older rows remain readable without migration, but deployments
+that retain durable ledgers can rewrite them explicitly:
+
+```bash
+# Read-only preview. Repeat the storage flag for the apply command.
+mycelium migrate --plan --sqlite mycelium-ledger.db
+
+# Stop workers and back up the ledger before applying.
+mycelium migrate --apply --sqlite mycelium-ledger.db
+
+# Verify that no older rows remain.
+mycelium migrate --plan --sqlite mycelium-ledger.db
+```
+
+The v1→v2 rule sets a missing `effect_id` to the existing `request_id`, sets
+`request_id_aliases` to include that canonical request id, and writes
+`schema_version: 2`; it never invents an empty identity. Planning does not
+rewrite ledger rows, application is idempotent, unsupported future versions
+fail closed, and active
+`IN_FLIGHT` rows are refused unless `--allow-active` is given after workers are
+confirmed stopped. The same `--file`, `--sqlite`, `--redis-url`,
+`--postgres-dsn`, or `--config` storage selection used by operator commands is
+supported.
+
+Rollback is restore-based: before `--apply`, snapshot/copy the file or SQLite
+database, take a Redis snapshot, or use a Postgres backup/transactional snapshot.
+If rollback is needed, stop workers, restore that backup, and run the older
+Mycelium version. In-place downgrades are intentionally refused because an old
+schema cannot represent every newer record safely.
+
+`request_id_aliases` records every request id that resolved to the same
+canonical effect row. It preserves redispatch history; it does not create a new
+effect or grant permission.
+
+The public API is exported from `mycelium`:
 
 ```python
 from mycelium import (
