@@ -1180,6 +1180,29 @@ ledger.release(request_id, verified="not_executed",
                by="ops@example.com", reason="provider shows no charge")
 ```
 
+Small deployments can authenticate releases without an enterprise identity
+provider by assigning each operator a secret token (load tokens from environment
+variables or a secret manager, never source control):
+
+```python
+import os
+from mycelium import ActionLedger, StaticTokenOperatorAuthorizer
+
+authorizer = StaticTokenOperatorAuthorizer({
+    "ops@example.com": os.environ["MYCELIUM_OPS_TOKEN"],
+})
+ledger = ActionLedger(storage=storage, operator_authorizer=authorizer)
+ledger.release(request_id, verified="not_executed",
+               by="ops@example.com", reason="provider shows no charge",
+               credential=presented_token)
+```
+
+When an authorizer is configured, a missing, incorrect, mismatched, or
+authorizer-error credential fails closed before the ledger transition. The
+interface is pluggable so an application can replace static tokens with SSO or
+another identity service later. This does not protect direct backend writes;
+keep ledger write credentials away from operator accounts.
+
 > **Warning: backend access = release authority.** Anyone who can write to the ledger backend can release transitions — `--by` is an audit stamp, not authentication. Protect Redis/Postgres/file access like you protect production credentials, and prefer signed audit receipts (`audit_receipt:`) so releases are tamper-evident.
 
 **4. (When `reclaim_requires_death_signal: true`) Assert worker death:**

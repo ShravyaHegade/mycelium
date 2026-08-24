@@ -214,6 +214,11 @@ from mycelium.loop_guard import (
     resolve_run_id,
 )
 from mycelium.message_validator import MessageValidationError, MessageValidator
+from mycelium.operator_auth import (
+    OperatorAuthorizer,
+    OperatorReleaseRequest,
+    StaticTokenOperatorAuthorizer,
+)
 from mycelium.outcome_emit import (
     OUTCOME_ON_FAILURE_ERROR,
     OUTCOME_ON_FAILURE_POLICIES,
@@ -366,6 +371,9 @@ except PackageNotFoundError:  # pragma: no cover - editable/source tree edge
 
 __all__ = [
     "ActionLedger",
+    "OperatorAuthorizer",
+    "OperatorReleaseRequest",
+    "StaticTokenOperatorAuthorizer",
     "FileLedgerStorage",
     "InMemoryLedgerStorage",
     "LedgerAlreadyResolvedError",
