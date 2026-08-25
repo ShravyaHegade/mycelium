@@ -77,6 +77,7 @@ from mycelium.transition_resolution import (
 
 if TYPE_CHECKING:
     from mycelium.audit_receipt import AuditReceiptEmitter
+    from mycelium.operator_auth import OperatorAuthorizer
     from mycelium.outcome_emit import OutcomeEmitter
 
 P = ParamSpec("P")
@@ -1372,6 +1373,7 @@ class ActionLedger:
         defer_read_only_unknown: bool = False,
         audit_emitter: AuditReceiptEmitter | None = None,
         outcome_emitter: OutcomeEmitter | None = None,
+        operator_authorizer: OperatorAuthorizer | None = None,
         unclassified_policy: str = UNCLASSIFIED_POLICY_WARN,
         on_args_drift: str = ARGS_DRIFT_SOFT,
         reclaim_requires_death_signal: bool = False,
@@ -1393,6 +1395,9 @@ class ActionLedger:
         self._audit_emitter = audit_emitter
         # Optional resolution-telemetry sink (see mycelium.outcome_emit).
         self._outcome_emitter = outcome_emitter
+        # Optional host policy for authenticating and authorizing releases.
+        # None preserves the documented legacy honesty model.
+        self._operator_authorizer = operator_authorizer
         if unclassified_policy not in (
             UNCLASSIFIED_POLICY_WARN,
             UNCLASSIFIED_POLICY_STRICT,
@@ -1893,6 +1898,7 @@ class ActionLedger:
         result: Any = None,
         by: str,
         reason: str,
+        credential: str | None = None,
     ) -> LedgerEntry:
         """Record a human verification that releases a hard-blocked transition.
 
@@ -1929,6 +1935,26 @@ class ActionLedger:
         existing = self._get_entry(request_id)
         if existing is None:
             raise LedgerReleaseRefusedError(f"Cannot release unknown request {request_id!r}")
+        if self._operator_authorizer is not None:
+            from mycelium.operator_auth import OperatorReleaseRequest
+
+            authorization = OperatorReleaseRequest(
+                operator_id=by,
+                request_id=request_id,
+                tool=existing.tool,
+                verified=verified,
+            )
+            try:
+                allowed = self._operator_authorizer.authorize_release(
+                    authorization,
+                    credential=credential,
+                )
+            except Exception as exc:
+                raise LedgerReleaseRefusedError("operator authorization failed closed") from exc
+            if not allowed:
+                raise LedgerReleaseRefusedError(
+                    f"operator {by!r} is not authorized to release request {request_id!r}"
+                )
         if existing.operator_resolution is not None:
             raise LedgerAlreadyResolvedError(
                 f"Request {request_id!r} already has an operator resolution "
@@ -5597,6 +5623,7 @@ def ledger(
     transition_binding: ToolTransitionBinding | None = None,
     *,
     outcome_emitter: OutcomeEmitter | None = None,
+    operator_authorizer: OperatorAuthorizer | None = None,
     lease_ttl: float | None = None,
     lease_renew_interval: float | None = None,
     poll_interval: float | None = None,
@@ -5635,6 +5662,7 @@ def ledger(
         defer_read_only_unknown=defer_read_only_unknown,
         audit_emitter=audit_emitter,
         outcome_emitter=outcome_emitter,
+        operator_authorizer=operator_authorizer,
         unclassified_policy=unclassified_policy,
         on_args_drift=on_args_drift,
         request_identity_policy=request_identity_policy,
@@ -5668,6 +5696,7 @@ def ledger_sync(
     transition_binding: ToolTransitionBinding | None = None,
     *,
     outcome_emitter: OutcomeEmitter | None = None,
+    operator_authorizer: OperatorAuthorizer | None = None,
     lease_ttl: float | None = None,
     lease_renew_interval: float | None = None,
     poll_interval: float | None = None,
@@ -5706,6 +5735,7 @@ def ledger_sync(
         defer_read_only_unknown=defer_read_only_unknown,
         audit_emitter=audit_emitter,
         outcome_emitter=outcome_emitter,
+        operator_authorizer=operator_authorizer,
         unclassified_policy=unclassified_policy,
         on_args_drift=on_args_drift,
         request_identity_policy=request_identity_policy,

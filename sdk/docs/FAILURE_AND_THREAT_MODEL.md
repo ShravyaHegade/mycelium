@@ -274,9 +274,14 @@ section; the tests are concrete `file::test_name` entries.
 These are documented behaviors — called out so nobody reads a stronger promise
 than the code makes.
 
-- **Release authorization.** Anyone who can write to the ledger backend can
-  release a transition. `--by` is an **audit stamp**, not authentication. This
-  is an honesty model, not a safety guarantee. See the runbook's
+- **Release authorization.** By default, anyone who can write to the ledger
+  backend can release a transition. `--by` is an **audit stamp**, not
+  authentication. Applications can supply an `OperatorAuthorizer` to
+  `ActionLedger` (including the lightweight per-operator
+  `StaticTokenOperatorAuthorizer`), but the raw operator CLI and direct backend
+  writes remain the honesty model unless the host restricts them. Short-lived
+  signed release capabilities, built-in scoped permissions, and two-person
+  approval are not implemented. See the runbook's
   [warning](../README.md#operator-runbook-your-agent-hard-blocked). *(Not a
   guarantee — see `test_operator_release.py` for the one-shot/fail-closed
   semantics, and `test_audit_receipt.py::test_tampered_receipt_fails_verification`

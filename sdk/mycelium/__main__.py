@@ -1,4 +1,4 @@
-"""CLI entrypoint: init, demo, run, transitions, loops, budget, scope, outcomes."""
+"""CLI entrypoint: init, demo, run, migrate, and operational utilities."""
 
 from __future__ import annotations
 
@@ -214,9 +214,15 @@ def _operator_storage_configs(args: argparse.Namespace) -> list[dict[str, Any]]:
 def _operator_ledgers(args: argparse.Namespace) -> list[Any]:
     """Build ActionLedgers over the resolved operator storage backends."""
     from mycelium.action_ledger import ActionLedger
+
+    return [ActionLedger(storage=storage) for storage in _operator_storages(args)]
+
+
+def _operator_storages(args: argparse.Namespace) -> list[Any]:
+    """Build the resolved durable operator storage backends."""
     from mycelium.config import ConfigError, MyceliumConfig
 
-    ledgers: list[Any] = []
+    storages: list[Any] = []
     for raw in _operator_storage_configs(args):
         storage_type = raw.get("storage", "memory")
         if storage_type == "memory":
@@ -227,8 +233,8 @@ def _operator_ledgers(args: argparse.Namespace) -> list[Any]:
                 "from a process sharing that storage, or point the CLI at a "
                 "durable backend with --file/--redis-url/--postgres-dsn/--sqlite"
             )
-        ledgers.append(ActionLedger(storage=MyceliumConfig._build_ledger_storage(raw)))
-    return ledgers
+        storages.append(MyceliumConfig._build_ledger_storage(raw))
+    return storages
 
 
 def _find_operator_entry(args: argparse.Namespace, request_id: str) -> tuple[Any, Any]:
@@ -473,6 +479,88 @@ def cmd_transitions_mark_dead(args: argparse.Namespace) -> int:
         f"marked worker dead for {entry.request_id} ({entry.tool}): "
         f"asserted_by={entry.worker_dead_asserted_by}"
     )
+    return 0
+
+
+def cmd_migrate(args: argparse.Namespace) -> int:
+    """Plan or apply explicit ActionLedger schema migrations."""
+    from mycelium.config import ConfigError
+    from mycelium.ledger_migrations import (
+        LedgerMigrationError,
+        apply_ledger_migration,
+        plan_ledger_migration,
+    )
+
+    try:
+        storages = _operator_storages(args)
+        plans = [
+            plan_ledger_migration(storage, target_version=args.target_version)
+            for storage in storages
+        ]
+    except (ConfigError, LedgerMigrationError, OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    payload: dict[str, Any] = {
+        "mode": "plan" if args.plan else "apply",
+        "target_version": args.target_version,
+        "backends": [
+            {"backend": index, **plan.to_dict()}
+            for index, plan in enumerate(plans, start=1)
+        ],
+    }
+    unsupported = any(not plan.can_apply for plan in plans)
+
+    if args.plan:
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            print(f"Ledger migration plan: target schema {args.target_version}")
+            for index, plan in enumerate(plans, start=1):
+                versions = ", ".join(
+                    f"v{version}={count}"
+                    for version, count in sorted(plan.version_counts.items())
+                ) or "empty"
+                print(
+                    f"backend {index}: total={plan.total_entries} "
+                    f"migrate={plan.pending_entries} current={plan.current_entries} "
+                    f"active={plan.active_pending_entries} ({versions})"
+                )
+                if plan.unsupported_versions:
+                    print(f"  unsupported versions: {list(plan.unsupported_versions)}")
+            print("No ledger rows were changed.")
+        return 1 if unsupported else 0
+
+    if unsupported:
+        print("error: migration refused because unsupported schema versions exist", file=sys.stderr)
+        return 1
+
+    try:
+        results = [
+            apply_ledger_migration(
+                storage,
+                target_version=args.target_version,
+                allow_active=bool(args.allow_active),
+            )
+            for storage in storages
+        ]
+    except (LedgerMigrationError, OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    payload["backends"] = [
+        {"backend": index, **result.to_dict()}
+        for index, result in enumerate(results, start=1)
+    ]
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        for index, result in enumerate(results, start=1):
+            print(
+                f"backend {index}: migrated={result.migrated_entries} "
+                f"unchanged={result.unchanged_entries} schema={result.target_version}"
+            )
+        print("Ledger migration complete. Run 'mycelium migrate --plan' to verify.")
     return 0
 
 
@@ -1050,6 +1138,8 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from mycelium.action_ledger import LEDGER_ENTRY_SCHEMA_VERSION
+
     parser = argparse.ArgumentParser(
         prog="mycelium",
         description="Mycelium runtime: scaffold config and utilities",
@@ -1237,6 +1327,46 @@ def main(argv: list[str] | None = None) -> int:
         "child_command",
         nargs=argparse.REMAINDER,
         help="Python command after '--'",
+    )
+
+    migrate_parser = sub.add_parser(
+        "migrate",
+        help="Plan or apply ActionLedger schema migrations",
+        description=(
+            "Upgrade durable ActionLedger rows using explicit version-to-version rules. "
+            "Stop workers and back up the ledger before --apply."
+        ),
+    )
+    _add_operator_storage_args(migrate_parser)
+    migrate_mode = migrate_parser.add_mutually_exclusive_group(required=True)
+    migrate_mode.add_argument(
+        "--plan",
+        action="store_true",
+        help="Inspect versions and show changes without modifying ledger rows",
+    )
+    migrate_mode.add_argument(
+        "--apply",
+        action="store_true",
+        help="Apply the migration (back up the ledger and stop workers first)",
+    )
+    migrate_parser.add_argument(
+        "--target-version",
+        type=int,
+        default=LEDGER_ENTRY_SCHEMA_VERSION,
+        help=(
+            "Target ledger schema version "
+            f"(default: current schema {LEDGER_ENTRY_SCHEMA_VERSION})"
+        ),
+    )
+    migrate_parser.add_argument(
+        "--allow-active",
+        action="store_true",
+        help="Allow IN_FLIGHT rows after workers are confirmed stopped",
+    )
+    migrate_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable migration plan or result",
     )
 
     transitions_parser = sub.add_parser(
@@ -1646,6 +1776,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_demo(redis=args.redis, slow=args.slow)
     if args.command == "run":
         return cmd_run(args.config, args.child_command)
+    if args.command == "migrate":
+        return cmd_migrate(args)
     if args.command == "transitions":
         if args.transitions_command == "list":
             return cmd_transitions_list(args)

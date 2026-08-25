@@ -600,6 +600,107 @@ def test_release_emits_audit_receipt_when_emitter_configured() -> None:
     assert entry.receipt_ref == receipt.receipt_id
 
 
+def test_static_operator_token_authorizes_the_correct_operator() -> None:
+    from mycelium import StaticTokenOperatorAuthorizer
+
+    storage = InMemoryLedgerStorage()
+    storage.set(
+        LedgerEntry(
+            request_id="req-authorized-release",
+            tool="charge",
+            args=[],
+            kwargs={},
+            status="failed",
+            terminal_outcome=TerminalOutcome.BLOCKED.value,
+        )
+    )
+    ledger_inst = ActionLedger(
+        storage=storage,
+        operator_authorizer=StaticTokenOperatorAuthorizer({"alice@example.com": "alice-secret"}),
+    )
+
+    entry = ledger_inst.release(
+        "req-authorized-release",
+        verified="not_executed",
+        by="alice@example.com",
+        reason="provider confirms no charge",
+        credential="alice-secret",
+    )
+
+    assert entry.resolved_by == "alice@example.com"
+
+
+@pytest.mark.parametrize(
+    ("operator_id", "credential"),
+    [
+        ("alice@example.com", None),
+        ("alice@example.com", "wrong-secret"),
+        ("mallory@example.com", "alice-secret"),
+    ],
+)
+def test_static_operator_token_rejects_missing_wrong_or_mismatched_credentials(
+    operator_id: str, credential: str | None
+) -> None:
+    from mycelium import StaticTokenOperatorAuthorizer
+
+    storage = InMemoryLedgerStorage()
+    storage.set(
+        LedgerEntry(
+            request_id="req-refused-release",
+            tool="charge",
+            args=[],
+            kwargs={},
+            status="failed",
+            terminal_outcome=TerminalOutcome.BLOCKED.value,
+        )
+    )
+    ledger_inst = ActionLedger(
+        storage=storage,
+        operator_authorizer=StaticTokenOperatorAuthorizer({"alice@example.com": "alice-secret"}),
+    )
+
+    with pytest.raises(LedgerReleaseRefusedError, match="not authorized"):
+        ledger_inst.release(
+            "req-refused-release",
+            verified="not_executed",
+            by=operator_id,
+            reason="provider confirms no charge",
+            credential=credential,
+        )
+
+    assert storage.get("req-refused-release").operator_resolution is None
+
+
+def test_operator_authorizer_exception_fails_closed() -> None:
+    class BrokenAuthorizer:
+        def authorize_release(self, request, *, credential):
+            raise RuntimeError("identity provider unavailable")
+
+    storage = InMemoryLedgerStorage()
+    storage.set(
+        LedgerEntry(
+            request_id="req-auth-error",
+            tool="charge",
+            args=[],
+            kwargs={},
+            status="failed",
+            terminal_outcome=TerminalOutcome.BLOCKED.value,
+        )
+    )
+    ledger_inst = ActionLedger(storage=storage, operator_authorizer=BrokenAuthorizer())
+
+    with pytest.raises(LedgerReleaseRefusedError, match="failed closed"):
+        ledger_inst.release(
+            "req-auth-error",
+            verified="not_executed",
+            by="alice@example.com",
+            reason="provider confirms no charge",
+            credential="secret",
+        )
+
+    assert storage.get("req-auth-error").operator_resolution is None
+
+
 def test_postgres_release_not_executed_round_trip() -> None:
     from backend_gates import require_postgres_dsn_or_skip
 
