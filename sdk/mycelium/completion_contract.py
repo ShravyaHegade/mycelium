@@ -17,10 +17,13 @@ import warnings
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
 
 from mycelium.loop_guard import resolve_loop_scope_key
+from mycelium.storage.atomic_state import AtomicStateBackend, NamespacedAtomicStorage
 from mycelium.storage.json_file import LockedJsonDictFile
+
+T = TypeVar("T")
 
 STATUS_SUCCESS = "success"
 STATUS_FAILED = "failed"
@@ -215,6 +218,13 @@ class CompletionStorage:
     def set(self, state: CompletionRunState) -> None:
         raise NotImplementedError
 
+    def update(
+        self,
+        scope_key: str,
+        fn: Callable[[CompletionRunState | None], tuple[CompletionRunState, T]],
+    ) -> T:
+        raise NotImplementedError
+
     def list_all(self) -> list[CompletionRunState]:
         raise NotImplementedError
 
@@ -237,6 +247,19 @@ class InMemoryCompletionStorage(CompletionStorage):
             self._entries[state.scope_key] = CompletionRunState.from_dict(
                 state.to_dict()
             )
+
+    def update(
+        self,
+        scope_key: str,
+        fn: Callable[[CompletionRunState | None], tuple[CompletionRunState, T]],
+    ) -> T:
+        with self._lock:
+            raw = self._entries.get(scope_key)
+            existing = None if raw is None else CompletionRunState.from_dict(raw.to_dict())
+            state, result = fn(existing)
+            state.updated_at = time.time()
+            self._entries[scope_key] = CompletionRunState.from_dict(state.to_dict())
+            return result
 
     def list_all(self) -> list[CompletionRunState]:
         with self._lock:
@@ -269,12 +292,69 @@ class FileCompletionStorage(CompletionStorage):
         with self._lock:
             self._file.read_modify_write(mutate)
 
+    def update(
+        self,
+        scope_key: str,
+        fn: Callable[[CompletionRunState | None], tuple[CompletionRunState, T]],
+    ) -> T:
+        def mutate(data: dict[str, dict[str, Any]]) -> T:
+            raw = data.get(scope_key)
+            existing = None if raw is None else CompletionRunState.from_dict(raw)
+            state, result = fn(existing)
+            state.updated_at = time.time()
+            data[scope_key] = state.to_dict()
+            return result
+
+        with self._lock:
+            return self._file.read_modify_write(mutate)
+
     def list_all(self) -> list[CompletionRunState]:
         def read(data: dict[str, dict[str, Any]]) -> list[CompletionRunState]:
             return [CompletionRunState.from_dict(raw) for raw in data.values()]
 
         with self._lock:
             return self._file.read_modify_write_no_save(read)
+
+
+class AtomicCompletionStorage(CompletionStorage):
+    """Completion marks stored through the shared CAS backend."""
+
+    def __init__(
+        self,
+        backend: AtomicStateBackend,
+        *,
+        namespace: str = "completion",
+    ) -> None:
+        self._storage = NamespacedAtomicStorage(
+            backend,
+            namespace,
+            from_dict=CompletionRunState.from_dict,
+            to_dict=lambda state: state.to_dict(),
+        )
+
+    def get(self, scope_key: str) -> CompletionRunState | None:
+        return self._storage.get(scope_key)
+
+    def set(self, state: CompletionRunState) -> None:
+        state.updated_at = time.time()
+        self._storage.set(state.scope_key, state)
+
+    def update(
+        self,
+        scope_key: str,
+        fn: Callable[[CompletionRunState | None], tuple[CompletionRunState, T]],
+    ) -> T:
+        def mutate(
+            existing: CompletionRunState | None,
+        ) -> tuple[CompletionRunState, T]:
+            state, result = fn(existing)
+            state.updated_at = time.time()
+            return state, result
+
+        return self._storage.update_optional(scope_key, mutate)
+
+    def list_all(self) -> list[CompletionRunState]:
+        return self._storage.list_all()
 
 
 @dataclass(frozen=True)
@@ -323,39 +403,38 @@ class CompletionContract:
         return list(self._optional)
 
     def _ensure_state(self, scope_key: str) -> CompletionRunState:
-        state = self._storage.get(scope_key)
-        if state is None:
-            state = CompletionRunState(
-                scope_key=scope_key,
-                required=list(self._required),
-                optional=list(self._optional),
-            )
-            self._storage.set(state)
-            return state
-        # Keep template ids from constructor if state was empty (fresh bind).
-        if not state.required and not state.optional:
-            state.required = list(self._required)
-            state.optional = list(self._optional)
-            self._storage.set(state)
-        return state
+        current = self._storage.get(scope_key)
+        if current is not None and (current.required or current.optional):
+            return current
+
+        def ensure(
+            existing: CompletionRunState | None,
+        ) -> tuple[CompletionRunState, CompletionRunState]:
+            state = existing or CompletionRunState(scope_key=scope_key)
+            if not state.required and not state.optional:
+                state.required = list(self._required)
+                state.optional = list(self._optional)
+            return state, state
+
+        return self._storage.update(scope_key, ensure)
 
     def get_state(self, scope_key: str) -> CompletionRunState | None:
         return self._storage.get(scope_key)
 
     def bind_run(self, scope_key: str) -> CompletionRunState:
         """Ensure run state exists with this contract's required/optional lists."""
-        state = CompletionRunState(
-            scope_key=scope_key,
-            required=list(self._required),
-            optional=list(self._optional),
-            marks={},
-        )
-        existing = self._storage.get(scope_key)
-        if existing is not None and existing.marks:
-            # Preserve marks; refresh template lists from constructor.
-            state.marks = dict(existing.marks)
-        self._storage.set(state)
-        return state
+        def bind(
+            existing: CompletionRunState | None,
+        ) -> tuple[CompletionRunState, CompletionRunState]:
+            state = CompletionRunState(
+                scope_key=scope_key,
+                required=list(self._required),
+                optional=list(self._optional),
+                marks=dict(existing.marks) if existing is not None else {},
+            )
+            return state, state
+
+        return self._storage.update(scope_key, bind)
 
     def mark(
         self,
@@ -383,17 +462,28 @@ class CompletionContract:
             raise CompletionMarkError(
                 "abandoned marks require a non-empty reason"
             )
-        state = self._ensure_state(key)
-        if sid not in state.known_ids():
-            raise CompletionMarkError(
-                f"unknown subtask id {sid!r}; known: {sorted(state.known_ids())}"
+        def mark_atomic(
+            existing: CompletionRunState | None,
+        ) -> tuple[CompletionRunState, CompletionRunState]:
+            state = existing or CompletionRunState(
+                scope_key=key,
+                required=list(self._required),
+                optional=list(self._optional),
             )
-        state.marks[sid] = SubtaskMark(
-            status=status_n,
-            reason=str(reason).strip() if reason else None,
-        )
-        self._storage.set(state)
-        return state
+            if not state.required and not state.optional:
+                state.required = list(self._required)
+                state.optional = list(self._optional)
+            if sid not in state.known_ids():
+                raise CompletionMarkError(
+                    f"unknown subtask id {sid!r}; known: {sorted(state.known_ids())}"
+                )
+            state.marks[sid] = SubtaskMark(
+                status=status_n,
+                reason=str(reason).strip() if reason else None,
+            )
+            return state, state
+
+        return self._storage.update(key, mark_atomic)
 
     def check_terminal(
         self,

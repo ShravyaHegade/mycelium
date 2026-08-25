@@ -391,6 +391,57 @@ def test_file_backend_under_multi_node_fails(tmp_path: Path) -> None:
     assert exit_code_for_report(report) == 1
 
 
+def test_file_state_backend_under_multi_node_fails(tmp_path: Path) -> None:
+    cfg = load_config_from_string(
+        f"""
+deployment:
+  topology: multi_node
+state_backend:
+  storage: file
+  path: {tmp_path / "state.json"}
+loop_guard: {{}}
+tools: {{}}
+"""
+    )
+    report = run_doctor_on_config(cfg, connectivity=False)
+    assert any(
+        check.id == "state_backend.backend"
+        and check.status == DoctorStatus.FAIL
+        for check in report.checks
+    )
+    assert any(
+        check.id == "topology.multi_node" and check.status == DoctorStatus.FAIL
+        for check in report.checks
+    )
+
+
+def test_postgres_state_backend_satisfies_multi_node_topology() -> None:
+    cfg = load_config_from_string(
+        """
+deployment:
+  topology: multi_node
+state_backend:
+  storage: postgres
+  dsn: postgresql://localhost/mycelium
+loop_guard: {}
+scope_guard:
+  allowed_tools: [read]
+tools:
+  read: {}
+"""
+    )
+    report = run_doctor_on_config(cfg, connectivity=False)
+    assert any(
+        check.id == "state_backend.backend"
+        and check.status == DoctorStatus.PASS
+        for check in report.checks
+    )
+    assert any(
+        check.id == "topology.multi_node" and check.status == DoctorStatus.PASS
+        for check in report.checks
+    )
+
+
 def test_backend_connection_failure(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

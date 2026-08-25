@@ -571,6 +571,58 @@ def cmd_migrate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_state_migrate(args: argparse.Namespace) -> int:
+    """Plan or copy legacy guard state into ``state_backend``."""
+
+    from mycelium.config import ConfigError, load_config
+    from mycelium.state_migrations import (
+        StateMigrationError,
+        apply_state_migration,
+        plan_state_migration,
+    )
+
+    try:
+        cfg = load_config(args.config)
+        plan = plan_state_migration(cfg)
+    except (ConfigError, StateMigrationError, OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    if args.plan:
+        payload = {"mode": "plan", **plan.to_dict()}
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            print(
+                "Shared-state migration plan: "
+                f"total={plan.total_records} migrate={plan.pending_records} "
+                f"unchanged={plan.unchanged_records} conflicts={plan.conflicting_records}"
+            )
+            for feature, count in sorted(plan.feature_counts.items()):
+                print(f"  {feature}: {count}")
+            print("No state records were changed.")
+        return 1 if not plan.can_apply else 0
+
+    if not plan.can_apply:
+        print("error: migration refused because destination conflicts exist", file=sys.stderr)
+        return 1
+    try:
+        result = apply_state_migration(cfg)
+    except (StateMigrationError, OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    payload = {"mode": "apply", **result.to_dict()}
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(
+            f"Shared-state migration complete: migrated={result.migrated_records} "
+            f"unchanged={result.unchanged_records}"
+        )
+        print("Switch migrated feature storage to 'shared', then run mycelium doctor.")
+    return 0
+
+
 def _outcome_storage_config(
     args: argparse.Namespace,
 ) -> tuple[dict[str, Any], float | None]:
@@ -1376,6 +1428,43 @@ def main(argv: list[str] | None = None) -> int:
         help="Emit machine-readable migration plan or result",
     )
 
+    state_parser = sub.add_parser(
+        "state",
+        help="Manage the unified guard state backend",
+    )
+    state_sub = state_parser.add_subparsers(dest="state_command", required=True)
+    state_migrate_parser = state_sub.add_parser(
+        "migrate",
+        help="Copy legacy guard state into state_backend",
+        description=(
+            "Copy loop, scope, completion, state-flush, and audit-receipt records "
+            "without deleting or overwriting their source records."
+        ),
+    )
+    state_migrate_parser.add_argument(
+        "-c",
+        "--config",
+        type=Path,
+        default=Path("mycelium.yaml"),
+        help="Config containing source feature storage and destination state_backend",
+    )
+    state_migrate_mode = state_migrate_parser.add_mutually_exclusive_group(required=True)
+    state_migrate_mode.add_argument(
+        "--plan",
+        action="store_true",
+        help="Read-only preview of records to copy",
+    )
+    state_migrate_mode.add_argument(
+        "--apply",
+        action="store_true",
+        help="Copy records without deleting source state",
+    )
+    state_migrate_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable output",
+    )
+
     transitions_parser = sub.add_parser(
         "transitions",
         help="Operator triage and release of stuck (hard-blocked) transitions",
@@ -1785,6 +1874,9 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_run(args.config, args.child_command)
     if args.command == "migrate":
         return cmd_migrate(args)
+    if args.command == "state":
+        if args.state_command == "migrate":
+            return cmd_state_migrate(args)
     if args.command == "transitions":
         if args.transitions_command == "list":
             return cmd_transitions_list(args)

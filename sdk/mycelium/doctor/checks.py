@@ -105,6 +105,18 @@ def _storage_type(raw: dict[str, Any] | None) -> str:
     return str(raw.get("storage", "memory"))
 
 
+def _guard_storage_type(
+    cfg: MyceliumConfig,
+    raw: dict[str, Any] | None,
+) -> str:
+    if raw is None:
+        return "memory"
+    storage = raw.get("storage")
+    if storage == "shared" or (storage is None and cfg.state_backend is not None):
+        return _storage_type(cfg.state_backend)
+    return str(storage or "memory")
+
+
 @doctor_check("configuration")
 def check_configuration(ctx: DoctorContext) -> Iterable[DoctorCheck]:
     cfg = ctx.config
@@ -1148,6 +1160,92 @@ def check_outcomes(ctx: DoctorContext) -> Iterable[DoctorCheck]:
         yield probe
 
 
+@doctor_check("state_backend")
+def check_state_backend(ctx: DoctorContext) -> Iterable[DoctorCheck]:
+    cfg = ctx.config
+    raw = cfg.state_backend
+    if raw is None:
+        yield _check(
+            id="state_backend.skipped",
+            category="Shared state",
+            status=DoctorStatus.SKIP,
+            summary="state_backend: not configured",
+            remediation=(
+                "Configure state_backend for shared loop, scope, completion, "
+                "state-flush, and audit-receipt state."
+            ),
+            evidence=EVIDENCE_STATIC,
+            blocking=False,
+        )
+        return
+
+    storage = _storage_type(raw)
+    namespace = str(raw.get("namespace", "mycelium"))
+    topology = (cfg.deployment or {}).get("topology")
+    if storage == "memory":
+        status = DoctorStatus.FAIL if topology == "multi_node" else DoctorStatus.WARN
+        yield _check(
+            id="state_backend.backend",
+            category="Shared state",
+            status=status,
+            summary="Shared state backend is process-local memory",
+            details=f"namespace={namespace!r}",
+            remediation="Use file for single-node durability or Redis/Postgres for multi-node.",
+            evidence=EVIDENCE_STATIC,
+            blocking=status == DoctorStatus.FAIL,
+        )
+        return
+    if storage in ("file",):
+        status = DoctorStatus.FAIL if topology == "multi_node" else DoctorStatus.PASS
+        yield _check(
+            id="state_backend.backend",
+            category="Shared state",
+            status=status,
+            summary="File shared-state backend configured (single-node only)",
+            details=f"{safe_backend_label(raw)}; namespace={namespace!r}",
+            remediation="Use Redis or Postgres before running multiple workers.",
+            evidence=EVIDENCE_STATIC,
+        )
+    elif storage in DISTRIBUTED_STORAGES:
+        try:
+            if storage == "postgres":
+                resolve_storage_url(raw, url_key="dsn", alt_keys=("url",))
+            else:
+                resolve_storage_url(raw)
+        except ValueError as exc:
+            yield _check(
+                id="state_backend.backend",
+                category="Shared state",
+                status=DoctorStatus.FAIL,
+                summary=f"{storage} shared-state configuration is incomplete",
+                details=redact_secrets(str(exc)),
+                remediation="Configure url/url_env or dsn/dsn_env.",
+                evidence=EVIDENCE_STATIC,
+            )
+            return
+        yield _check(
+            id="state_backend.backend",
+            category="Shared state",
+            status=DoctorStatus.PASS,
+            summary=f"{storage} shared-state backend configured",
+            details=f"{safe_backend_label(raw)}; namespace={namespace!r}; CAS=required",
+            evidence=EVIDENCE_STATIC,
+        )
+    else:
+        yield _check(
+            id="state_backend.backend",
+            category="Shared state",
+            status=DoctorStatus.FAIL,
+            summary=f"Unknown shared-state backend {storage!r}",
+            evidence=EVIDENCE_STATIC,
+        )
+        return
+
+    probe = _probe_storage(ctx, raw=raw, label="state_backend")
+    if probe is not None:
+        yield probe
+
+
 @doctor_check("topology")
 def check_topology(ctx: DoctorContext) -> Iterable[DoctorCheck]:
     cfg = ctx.config
@@ -1162,13 +1260,17 @@ def check_topology(ctx: DoctorContext) -> Iterable[DoctorCheck]:
     if cfg.outcome_emit is not None:
         shared_sections.append(("outcome_emit", _storage_type(cfg.outcome_emit)))
     if cfg.loop_guard is not None:
-        shared_sections.append(("loop_guard", _storage_type(cfg.loop_guard)))
+        shared_sections.append(("loop_guard", _guard_storage_type(cfg, cfg.loop_guard)))
     if cfg.scope_guard is not None:
-        shared_sections.append(("scope_guard", _storage_type(cfg.scope_guard)))
+        shared_sections.append(("scope_guard", _guard_storage_type(cfg, cfg.scope_guard)))
     if cfg.budget is not None:
         shared_sections.append(("budget", _storage_type(cfg.budget)))
     if cfg.completion is not None:
-        shared_sections.append(("completion", _storage_type(cfg.completion)))
+        shared_sections.append(("completion", _guard_storage_type(cfg, cfg.completion)))
+    if cfg.state_flush is not None:
+        shared_sections.append(("state_flush", _guard_storage_type(cfg, cfg.state_flush)))
+    if cfg.audit_receipt is not None:
+        shared_sections.append(("audit_receipt", _guard_storage_type(cfg, cfg.audit_receipt)))
 
     single_node_used = [
         f"{name}={storage}"
@@ -1178,7 +1280,7 @@ def check_topology(ctx: DoctorContext) -> Iterable[DoctorCheck]:
     memory_used = [
         f"{name}=memory"
         for name, storage in shared_sections
-        if storage == "memory" and name in ("action_ledger", "outcome_emit")
+        if storage == "memory"
     ]
 
     if topology is None:

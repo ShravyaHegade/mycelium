@@ -2102,6 +2102,54 @@ outcome_emit:
   # persistence: required
 ```
 
+### Unified durable guard state
+
+Configure one atomic state backend for every stateful guard instead of giving
+each guard a separate file or process-local dictionary:
+
+```yaml
+state_backend:
+  storage: postgres            # memory | file | redis | postgres
+  dsn_env: DATABASE_URL
+  namespace: payments-prod
+
+loop_guard: {}
+scope_guard:
+  allowed_tools: [lookup_invoice, send_payment]
+completion:
+  required: [payment_recorded]
+state_flush: {}
+audit_receipt:
+  signing_key_env: MYCELIUM_AUDIT_SIGNING_KEY
+```
+
+When `state_backend` is present, a stateful guard with no `storage` setting is
+automatically placed in its own namespace on that backend. This also applies to
+any of these five guards you enable later; no config duplication is needed. Use `storage: shared` to
+make the choice explicit, or set a guard's own `storage` to retain a legacy
+backend. `memory` is development-only, `file` is durable for one node, and
+Redis/Postgres provide multi-worker atomic compare-and-swap updates.
+
+A completely new guardrail type still needs a small typed adapter that defines
+how its state is serialized and atomically updated. It can reuse
+`NamespacedAtomicStorage`; the backend implementations themselves do not need
+to change.
+
+To move existing guard files or per-feature Redis/Postgres state safely:
+
+```console
+$ mycelium state migrate --plan --config mycelium.yaml
+$ mycelium state migrate --apply --config mycelium.yaml
+$ mycelium doctor --config mycelium.yaml --strict
+```
+
+During the copy, keep each old feature's `storage` configuration and add the
+new top-level `state_backend`. Stop workers so the source does not change, run
+the plan and apply commands, then remove each feature's `storage`/`path` (or set
+`storage: shared`) and restart. Migration never deletes or overwrites the old
+records, so rollback is switching the feature back to its old storage. It
+refuses conflicting destination records instead of guessing which copy wins.
+
 ### `mycelium doctor` (verify protection is real)
 
 Installing Mycelium does not prove a deployment is protected. `mycelium doctor`
@@ -2113,7 +2161,7 @@ $ mycelium doctor --config mycelium.yaml --strict --json   # CI gate
 ```
 
 It checks profile defaults, tool classification, business request identity,
-durable ActionLedger / outcome backends, run-id guard policies, completion and
+durable ActionLedger / outcome backends, the shared state backend, run-id guard policies, completion and
 budget adapter selection, secret-in-args scanning / fail-closed production,
 destination-policy coverage,
 and optional `deployment.topology`. It never executes

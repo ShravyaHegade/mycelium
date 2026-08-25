@@ -43,6 +43,7 @@ from mycelium.action_ledger import (
     side_effect_async,
 )
 from mycelium.audit_receipt import (
+    AtomicAuditReceiptStorage,
     AuditReceiptEmitter,
     AuditReceiptError,
     AuditReceiptRecord,
@@ -107,6 +108,7 @@ from mycelium.completion_contract import (
     STATUS_FAILED,
     STATUS_PENDING,
     STATUS_SUCCESS,
+    AtomicCompletionStorage,
     CompleteRunResult,
     CompletionContract,
     CompletionError,
@@ -208,6 +210,7 @@ from mycelium.loop_guard import (
     VERIFIED_ALLOW_ONCE,
     VERIFIED_CLEAR,
     VERIFIED_RESOLUTIONS,
+    AtomicLoopGuardStorage,
     FileLoopGuardStorage,
     InMemoryLoopGuardStorage,
     LoopGuard,
@@ -252,6 +255,7 @@ from mycelium.scope_guard import (
     ON_VIOLATION_HARD,
     ON_VIOLATION_SOFT,
     VIOLATION_TOOL,
+    AtomicScopeGuardStorage,
     FileScopeGuardStorage,
     InMemoryScopeGuardStorage,
     ScopeGrant,
@@ -289,11 +293,30 @@ from mycelium.state_authority import (
     state_authority_sync,
 )
 from mycelium.state_flush import (
+    AtomicStateFlushStorage,
     FileStateFlushStorage,
     InMemoryStateFlushStorage,
     StateFlush,
     StateFlushError,
     StateSnapshot,
+)
+from mycelium.state_migrations import (
+    StateMigrationError,
+    StateMigrationPlan,
+    StateMigrationResult,
+    apply_state_migration,
+    plan_state_migration,
+)
+from mycelium.storage.atomic_state import (
+    AtomicStateBackend,
+    AtomicStateContentionError,
+    AtomicStateError,
+    AtomicStateRecord,
+    FileAtomicStateBackend,
+    InMemoryAtomicStateBackend,
+    NamespacedAtomicStorage,
+    PostgresAtomicStateBackend,
+    RedisAtomicStateBackend,
 )
 from mycelium.storage.postgres_ledger import PostgresLedgerStorage, PostgresTaskLedgerStorage
 from mycelium.storage.postgres_outcome import PostgresOutcomeStorage
@@ -380,6 +403,25 @@ except PackageNotFoundError:  # pragma: no cover - editable/source tree edge
     __version__ = "0.0.0.dev"
 
 __all__ = [
+    "AtomicAuditReceiptStorage",
+    "AtomicCompletionStorage",
+    "AtomicLoopGuardStorage",
+    "AtomicScopeGuardStorage",
+    "AtomicStateBackend",
+    "AtomicStateContentionError",
+    "AtomicStateError",
+    "AtomicStateFlushStorage",
+    "AtomicStateRecord",
+    "FileAtomicStateBackend",
+    "InMemoryAtomicStateBackend",
+    "NamespacedAtomicStorage",
+    "PostgresAtomicStateBackend",
+    "RedisAtomicStateBackend",
+    "StateMigrationError",
+    "StateMigrationPlan",
+    "StateMigrationResult",
+    "apply_state_migration",
+    "plan_state_migration",
     "ActionLedger",
     "LedgerMigrationError",
     "LedgerMigrationPlan",
