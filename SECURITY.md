@@ -98,10 +98,19 @@ If you find a way to bypass ledger gates, reconciliation, or guard predicates
 without proper host authorization, report it privately using the advisory form
 above.
 
+Provider reconcilers are security-sensitive because `NOT_EXECUTED` permits one
+more attempt. Before shipping an adapter, run `mycelium providers verify` and
+retain its signed, source-bound report. That report verifies the synthetic
+adapter cases only; it does not authenticate the deployed provider account or
+prove that its credentials have read-only scopes. Enforce those scopes in the
+provider and deployment configuration.
+
 ## Security-related documentation
 
 - Failure and threat model (ledger core guarantees and limits):
   [`sdk/docs/FAILURE_AND_THREAT_MODEL.md`](sdk/docs/FAILURE_AND_THREAT_MODEL.md)
+- Provider conformance commands and report limitations:
+  [`sdk/README.md#provider-adapter-conformance-and-signed-reports`](sdk/README.md#provider-adapter-conformance-and-signed-reports)
 - Release and hotfix policy:
   [`sdk/docs/RELEASE.md`](sdk/docs/RELEASE.md)
 

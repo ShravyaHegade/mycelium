@@ -27,6 +27,7 @@ from mycelium.action_ledger import (
     ledger_sync,
 )
 from mycelium.audit_receipt import (
+    AtomicAuditReceiptStorage,
     AuditReceiptEmitter,
     AuditReceiptStorage,
     FileAuditReceiptStorage,
@@ -57,6 +58,7 @@ from mycelium.budget_guard import (
     parse_duration_seconds,
 )
 from mycelium.completion_contract import (
+    AtomicCompletionStorage,
     CompletionContract,
     CompletionStorage,
     FileCompletionStorage,
@@ -112,6 +114,7 @@ from mycelium.loop_guard import (
     MISSING_RUN_ID_POLICIES,
     MISSING_RUN_ID_POLICY_ERROR,
     MISSING_RUN_ID_POLICY_WARN,
+    AtomicLoopGuardStorage,
     FileLoopGuardStorage,
     InMemoryLoopGuardStorage,
     LoopGuard,
@@ -138,6 +141,7 @@ from mycelium.protect import protect, protect_sync
 from mycelium.scope_guard import (
     ON_VIOLATION_MODES,
     ON_VIOLATION_SOFT,
+    AtomicScopeGuardStorage,
     FileScopeGuardStorage,
     InMemoryScopeGuardStorage,
     ScopeGrant,
@@ -158,11 +162,20 @@ from mycelium.state_authority import (
     apply_state_authority,
 )
 from mycelium.state_flush import (
+    AtomicStateFlushStorage,
     FileStateFlushStorage,
     InMemoryStateFlushStorage,
     StateFlush,
     StateFlushStorage,
     get_active_flush_run,
+)
+from mycelium.storage._helpers import resolve_storage_url
+from mycelium.storage.atomic_state import (
+    AtomicStateBackend,
+    FileAtomicStateBackend,
+    InMemoryAtomicStateBackend,
+    PostgresAtomicStateBackend,
+    RedisAtomicStateBackend,
 )
 from mycelium.task_ledger import (
     TaskFileLedgerStorage,
@@ -433,6 +446,7 @@ class MyceliumConfig:
     tasks: dict[str, TaskConfig] | None = None
     state_flush: dict[str, Any] | None = None
     audit_receipt: dict[str, Any] | None = None
+    state_backend: dict[str, Any] | None = None
     outcome_emit: dict[str, Any] | None = None
     transition: TransitionConfig | None = None
     action_ledger: dict[str, Any] | None = None
@@ -459,6 +473,7 @@ class MyceliumConfig:
     _state_authority: StateAuthority | None = None
     _completion: CompletionContract | None = None
     _state_flush: StateFlush | None = None
+    _state_backend: AtomicStateBackend | None = None
     _destructive_store: Any | None = None
     _audit_auto: bool = False
     _terminal_adapters: frozenset[str] = frozenset()
@@ -1064,6 +1079,62 @@ class MyceliumConfig:
             return None
         return HistoryGuard(**self.history_guard)
 
+    @staticmethod
+    def _build_atomic_state_backend(raw: dict[str, Any]) -> AtomicStateBackend:
+        storage_type = str(raw.get("storage", "memory"))
+        if storage_type == "memory":
+            return InMemoryAtomicStateBackend()
+        if storage_type == "file":
+            path = raw.get("path")
+            if not path:
+                raise ConfigError("state backend storage 'file' requires a 'path'")
+            return FileAtomicStateBackend(path)
+        if storage_type == "redis":
+            try:
+                url = resolve_storage_url(raw)
+            except ValueError as exc:
+                raise ConfigError(str(exc)) from exc
+            return RedisAtomicStateBackend(
+                url,
+                prefix=str(raw.get("prefix", "mycelium:state:")),
+            )
+        if storage_type == "postgres":
+            try:
+                dsn = resolve_storage_url(raw, url_key="dsn", alt_keys=("url",))
+            except ValueError as exc:
+                raise ConfigError(str(exc)) from exc
+            return PostgresAtomicStateBackend(
+                dsn,
+                table=str(raw.get("table", "mycelium_state")),
+            )
+        raise ConfigError(f"unknown state backend storage type: {storage_type!r}")
+
+    def build_state_backend(self) -> AtomicStateBackend | None:
+        """Build the global state backend shared by configured guardrails."""
+
+        if self.state_backend is None:
+            return None
+        if self._state_backend is None:
+            self._state_backend = self._build_atomic_state_backend(self.state_backend)
+        return self._state_backend
+
+    def _guard_atomic_backend(
+        self,
+        raw: dict[str, Any],
+    ) -> tuple[AtomicStateBackend, str] | None:
+        storage_type = raw.get("storage")
+        if storage_type in ("redis", "postgres"):
+            backend = self._build_atomic_state_backend(raw)
+            base = str(raw.get("namespace", "mycelium"))
+            return backend, base
+        if storage_type == "shared" or (storage_type is None and self.state_backend is not None):
+            backend = self.build_state_backend()
+            if backend is None:
+                raise ConfigError("storage: shared requires a top-level state_backend")
+            base = str((self.state_backend or {}).get("namespace", "mycelium"))
+            return backend, base
+        return None
+
     def build_loop_guard(self) -> LoopGuard | None:
         """Build a shared LoopGuard if the config declares ``loop_guard:``."""
         if self.loop_guard is None:
@@ -1071,7 +1142,12 @@ class MyceliumConfig:
         if self._loop_guard is not None:
             return self._loop_guard
         raw = self.loop_guard
-        storage = self._build_loop_guard_storage(raw)
+        shared = self._guard_atomic_backend(raw)
+        storage = (
+            AtomicLoopGuardStorage(shared[0], namespace=f"{shared[1]}:loop_guard")
+            if shared is not None
+            else self._build_loop_guard_storage(raw)
+        )
         consecutive = dict(DEFAULT_CONSECUTIVE_SOFT)
         consecutive_raw = raw.get("consecutive_soft")
         if consecutive_raw is not None:
@@ -1125,11 +1201,6 @@ class MyceliumConfig:
             if not path:
                 raise ConfigError("loop_guard storage 'file' requires a 'path'")
             return FileLoopGuardStorage(path)
-        if storage_type in ("redis", "postgres"):
-            raise ConfigError(
-                f"loop_guard storage {storage_type!r} is not implemented yet; "
-                "use 'memory' or 'file'"
-            )
         raise ConfigError(f"unknown loop_guard storage type: {storage_type!r}")
 
     def build_budget_guard(self) -> BudgetGuard | None:
@@ -1370,7 +1441,12 @@ class MyceliumConfig:
         if self._scope_guard is not None:
             return self._scope_guard
         raw = self.scope_guard
-        storage = self._build_scope_guard_storage(raw)
+        shared = self._guard_atomic_backend(raw)
+        storage = (
+            AtomicScopeGuardStorage(shared[0], namespace=f"{shared[1]}:scope_guard")
+            if shared is not None
+            else self._build_scope_guard_storage(raw)
+        )
         grant = _scope_grant_from_config(
             raw,
             registry_allowed=self.registry_allowed,
@@ -1413,11 +1489,6 @@ class MyceliumConfig:
             if not path:
                 raise ConfigError("scope_guard storage 'file' requires a 'path'")
             return FileScopeGuardStorage(path)
-        if storage_type in ("redis", "postgres"):
-            raise ConfigError(
-                f"scope_guard storage {storage_type!r} is not implemented yet; "
-                "use 'memory' or 'file'"
-            )
         raise ConfigError(f"unknown scope_guard storage type: {storage_type!r}")
 
     @property
@@ -1507,7 +1578,12 @@ class MyceliumConfig:
         if self._completion is not None:
             return self._completion
         raw = self.completion
-        storage = self._build_completion_storage(raw)
+        shared = self._guard_atomic_backend(raw)
+        storage = (
+            AtomicCompletionStorage(shared[0], namespace=f"{shared[1]}:completion")
+            if shared is not None
+            else self._build_completion_storage(raw)
+        )
         required, optional = _parse_completion_id_lists(raw)
         self._completion = CompletionContract(
             storage,
@@ -1526,11 +1602,6 @@ class MyceliumConfig:
             if not path:
                 raise ConfigError("completion storage 'file' requires a 'path'")
             return FileCompletionStorage(path)
-        if storage_type in ("redis", "postgres"):
-            raise ConfigError(
-                f"completion storage {storage_type!r} is not implemented yet; "
-                "use 'memory' or 'file'"
-            )
         raise ConfigError(f"unknown completion storage type: {storage_type!r}")
 
     def mark_completion(
@@ -1629,7 +1700,12 @@ class MyceliumConfig:
             return None
         if self._state_flush is not None:
             return self._state_flush
-        storage = self._build_state_flush_storage(self.state_flush)
+        shared = self._guard_atomic_backend(self.state_flush)
+        storage = (
+            AtomicStateFlushStorage(shared[0], namespace=f"{shared[1]}:state_flush")
+            if shared is not None
+            else self._build_state_flush_storage(self.state_flush)
+        )
         flush_on = self.state_flush.get("flush_on")
         if flush_on is not None and not isinstance(flush_on, list):
             raise ConfigError("'state_flush.flush_on' must be a list")
@@ -1661,7 +1737,14 @@ class MyceliumConfig:
             signing_key=self.audit_receipt.get("signing_key"),
             signing_key_env=self.audit_receipt.get("signing_key_env"),
         )
-        storage = self._build_audit_receipt_storage(self.audit_receipt)
+        shared = self._guard_atomic_backend(self.audit_receipt)
+        storage = (
+            AtomicAuditReceiptStorage(
+                shared[0], namespace=f"{shared[1]}:audit_receipt"
+            )
+            if shared is not None
+            else self._build_audit_receipt_storage(self.audit_receipt)
+        )
         self._audit_emitter = AuditReceiptEmitter(
             agent_id=str(agent_id),
             signing_key=signing_key,
@@ -3938,6 +4021,18 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
 
     profile = _parse_profile(data)
 
+    state_backend_raw = data.get("state_backend")
+    if state_backend_raw is not None and not isinstance(state_backend_raw, dict):
+        raise ConfigError("'state_backend' must be a mapping")
+    if state_backend_raw is not None:
+        storage_type = state_backend_raw.get("storage", "memory")
+        if storage_type not in ("memory", "file", "redis", "postgres"):
+            raise ConfigError(
+                f"unknown state_backend storage type: {storage_type!r}"
+            )
+        if storage_type == "file" and not state_backend_raw.get("path"):
+            raise ConfigError("state_backend storage 'file' requires a 'path'")
+
     action_ledger_raw = data.get("action_ledger")
     if action_ledger_raw is not None and not isinstance(action_ledger_raw, dict):
         raise ConfigError("'action_ledger' must be a mapping")
@@ -3957,6 +4052,14 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
             "'audit_receipt.agent_id' is no longer supported; "
             "set 'transition.agent_id' instead"
         )
+    if audit_receipt_raw is not None:
+        storage_type = audit_receipt_raw.get("storage")
+        if storage_type not in (None, "memory", "file", "redis", "postgres", "shared"):
+            raise ConfigError(f"unknown audit_receipt storage type: {storage_type!r}")
+        if storage_type == "file" and not audit_receipt_raw.get("path"):
+            raise ConfigError("audit_receipt storage 'file' requires a 'path'")
+        if storage_type == "shared" and state_backend_raw is None:
+            raise ConfigError("audit_receipt storage 'shared' requires state_backend")
 
     audit_auto = bool(audit_receipt_raw and audit_receipt_raw.get("auto", True))
 
@@ -4036,10 +4139,12 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
         storage_type = loop_guard_raw.get("storage", "memory")
         if storage_type == "file" and not loop_guard_raw.get("path"):
             raise ConfigError("loop_guard storage 'file' requires a 'path'")
-        if storage_type not in ("memory", "file", "redis", "postgres"):
+        if storage_type not in ("memory", "file", "redis", "postgres", "shared"):
             raise ConfigError(
                 f"unknown loop_guard storage type: {storage_type!r}"
             )
+        if storage_type == "shared" and state_backend_raw is None:
+            raise ConfigError("loop_guard storage 'shared' requires state_backend")
         tools_sel = loop_guard_raw.get("tools", "all")
         if tools_sel != "all" and not isinstance(tools_sel, list):
             raise ConfigError("'loop_guard.tools' must be 'all' or a list of tool names")
@@ -4092,10 +4197,12 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
         storage_type = scope_guard_raw.get("storage", "memory")
         if storage_type == "file" and not scope_guard_raw.get("path"):
             raise ConfigError("scope_guard storage 'file' requires a 'path'")
-        if storage_type not in ("memory", "file", "redis", "postgres"):
+        if storage_type not in ("memory", "file", "redis", "postgres", "shared"):
             raise ConfigError(
                 f"unknown scope_guard storage type: {storage_type!r}"
             )
+        if storage_type == "shared" and state_backend_raw is None:
+            raise ConfigError("scope_guard storage 'shared' requires state_backend")
         tools_sel = scope_guard_raw.get("tools", "all")
         if tools_sel != "all" and not isinstance(tools_sel, list):
             raise ConfigError(
@@ -4125,10 +4232,12 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
         storage_type = completion_raw.get("storage", "memory")
         if storage_type == "file" and not completion_raw.get("path"):
             raise ConfigError("completion storage 'file' requires a 'path'")
-        if storage_type not in ("memory", "file", "redis", "postgres"):
+        if storage_type not in ("memory", "file", "redis", "postgres", "shared"):
             raise ConfigError(
                 f"unknown completion storage type: {storage_type!r}"
             )
+        if storage_type == "shared" and state_backend_raw is None:
+            raise ConfigError("completion storage 'shared' requires state_backend")
         _parse_completion_id_lists(completion_raw)
 
     state_authority_raw = data.get("state_authority")
@@ -4182,6 +4291,14 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
     state_flush_raw = data.get("state_flush")
     if state_flush_raw is not None and not isinstance(state_flush_raw, dict):
         raise ConfigError("'state_flush' must be a mapping")
+    if state_flush_raw is not None:
+        storage_type = state_flush_raw.get("storage")
+        if storage_type not in (None, "memory", "file", "redis", "postgres", "shared"):
+            raise ConfigError(f"unknown state_flush storage type: {storage_type!r}")
+        if storage_type == "file" and not state_flush_raw.get("path"):
+            raise ConfigError("state_flush storage 'file' requires a 'path'")
+        if storage_type == "shared" and state_backend_raw is None:
+            raise ConfigError("state_flush storage 'shared' requires state_backend")
 
     integrations = _parse_integrations(data)
     deployment = _parse_deployment(data)
@@ -4205,6 +4322,7 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
         message_validator=message_validator,
         state_flush=state_flush_raw,
         audit_receipt=audit_receipt_raw,
+        state_backend=state_backend_raw,
         outcome_emit=outcome_emit_raw,
         transition=transition,
         action_ledger=action_ledger_raw,

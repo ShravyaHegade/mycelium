@@ -5,11 +5,12 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
 
 ## Unreleased
 
-## 1.35.0 (2026-08-22)
+## 1.35.0 (2026-08-25)
 
-MINOR: closes remaining Core Protocol Architecture gaps from the effect-commit
-roadmap — authoritative `effect_id` dedupe, provider-key auto-propagation, the
-`state-machine-exhaustive` verify scenario, and a TLA+ intent-state sketch.
+MINOR: one coherent trust-boundary batch: closes the remaining effect-commit
+architecture gaps, authenticates operator releases, versions and migrates the
+ledger schema, unifies durable guard state, and adds adversarial provider
+adapter verification plus agent-assisted setup.
 
 ### Added
 
@@ -22,6 +23,26 @@ roadmap — authoritative `effect_id` dedupe, provider-key auto-propagation, the
   `check_unique_effect_id_index`. Added deterministic
   `state-machine-exhaustive` verify scenario plus `sdk/docs/spec/effect_state.tla`
   and `sdk/docs/spec/README.md` formal-model notes.
+- Pluggable operator-release authentication through `OperatorAuthorizer`, with
+  a small `StaticTokenOperatorAuthorizer` for current deployments. The
+  operator identity is now checked instead of treating `--by` as authority;
+  enterprise identity and two-person approval remain host workflow concerns.
+- Explicit ledger envelope versions, v1-to-v2 upgrade readers, safe migration
+  planning and application for file/SQLite/Redis/Postgres, conflict refusal,
+  rollback guidance, and Doctor checks for pending or unsupported schemas.
+- Unified durable guard state through one namespaced atomic `state_backend`
+  shared by loop, scope, completion, state-flush, and audit-receipt storage.
+  `mycelium state migrate --plan|--apply` copies legacy per-feature records
+  without deleting the source, and Doctor checks backend suitability for the
+  declared deployment topology.
+- Provider-adapter conformance tooling and CLI commands. `mycelium providers
+  verify gmail` exercises lag, ambiguity, duplicate matches, malformed
+  handles, false `NOT_EXECUTED`, and forbidden writes, then emits a signed,
+  source-bound adapter report; `providers verify-report` verifies it.
+- A repository-local `$mycelium-setup` coding-agent skill that inventories
+  application tools, classifies their effects, wires `mycelium.yaml`, and runs
+  Doctor and Verify while leaving secrets and host-owned identity decisions to
+  the developer.
 
 ### Changed
 
@@ -31,6 +52,9 @@ roadmap — authoritative `effect_id` dedupe, provider-key auto-propagation, the
   for retries (explicit user-provided keys still win and are enforced). Setting
   `propagate_effect_id_as_provider_key: true` without a declared
   `provider_idempotency_key_param` is now rejected at binding/config load time.
+- Stateful guards with no per-feature `storage` setting automatically inherit
+  the top-level `state_backend`. Explicit per-feature storage remains available
+  for compatibility and rollback.
 
 ## 1.34.0 (2026-08-22)
 

@@ -57,8 +57,8 @@ mid-action with unknown commit; logs that cannot stand as auditor-verifiable
 proof.
 
 **Flagship promise:** any tool, any provider — prove run-or-not and enforce
-at-most-once. Provider adapters (e.g. Gmail sent-log) are demos of the
-`Reconciler` contract, not the product story.
+at-most-once. Gmail is the only adapter currently shipped; other providers use
+the same `Reconciler` contract and must supply their own adapter.
 
 **Guards:** transition envelope · `ActionLedger` / `TaskLedger` · reconcile ·
 `StateFlush` · audit receipts · default-on `on_args_drift` (identity-conflict;
@@ -66,6 +66,12 @@ default `soft`). `mycelium doctor` inspects configuration and detectable
 wiring. `mycelium verify` empirically exercises synthetic failure scenarios
 against the configured backend (never application tools, LLMs, or real
 providers). Passing Verify does not prove a real business provider is correct.
+Run `mycelium providers verify <adapter>` before shipping a provider adapter.
+The conformance kit rejects false `NOT_EXECUTED`, ambiguous evidence treated as
+safe, duplicate matches, malformed handles, and observed writes, then emits a
+signed report bound to the tested adapter source. The report is synthetic
+evidence: it does not prove the live credential is read-only or the provider is
+available.
 See the [SDK README](../README.md) and
 [failure & threat model](FAILURE_AND_THREAT_MODEL.md).
 

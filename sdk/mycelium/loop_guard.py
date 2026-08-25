@@ -31,6 +31,7 @@ from mycelium.outcome_emit import (
     GATE_SOFT_BLOCK,
     OutcomeEmitter,
 )
+from mycelium.storage.atomic_state import AtomicStateBackend, NamespacedAtomicStorage
 from mycelium.storage.json_file import LockedJsonDictFile
 from mycelium.tool_boundary import ToolBoundaryError
 from mycelium.transition import (
@@ -360,6 +361,49 @@ class FileLoopGuardStorage(LoopGuardStorage):
 
         with self._lock:
             return self._file.read_modify_write_no_save(read)
+
+
+class AtomicLoopGuardStorage(LoopGuardStorage):
+    """Loop state adapter backed by the shared namespaced CAS backend."""
+
+    def __init__(
+        self,
+        backend: AtomicStateBackend,
+        *,
+        namespace: str = "loop_guard",
+    ) -> None:
+        self._storage = NamespacedAtomicStorage(
+            backend,
+            namespace,
+            from_dict=LoopRunState.from_dict,
+            to_dict=lambda state: state.to_dict(),
+        )
+
+    def get(self, scope_key: str) -> LoopRunState | None:
+        return self._storage.get(scope_key)
+
+    def set(self, state: LoopRunState) -> None:
+        state.updated_at = time.time()
+        self._storage.set(state.scope_key, state)
+
+    def update(
+        self,
+        scope_key: str,
+        fn: Callable[[LoopRunState], T],
+    ) -> T:
+        def mutate(state: LoopRunState) -> T:
+            result = fn(state)
+            state.updated_at = time.time()
+            return result
+
+        return self._storage.update(
+            scope_key,
+            initial=lambda: LoopRunState(scope_key=scope_key),
+            mutate=mutate,
+        )
+
+    def list_all(self) -> list[LoopRunState]:
+        return self._storage.list_all()
 
 
 class LoopGuard:
@@ -757,6 +801,7 @@ __all__ = [
     "VERIFIED_ALLOW_ONCE",
     "VERIFIED_CLEAR",
     "VERIFIED_RESOLUTIONS",
+    "AtomicLoopGuardStorage",
     "FileLoopGuardStorage",
     "InMemoryLoopGuardStorage",
     "LoopGuard",

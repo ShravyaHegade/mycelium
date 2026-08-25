@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from mycelium.action_ledger import LedgerEntry
+from mycelium.storage.atomic_state import AtomicStateBackend, NamespacedAtomicStorage
 from mycelium.storage.file_lock import PathFileLock
 from mycelium.task_ledger import TaskLedgerEntry
 
@@ -128,6 +129,39 @@ class FileAuditReceiptStorage(AuditReceiptStorage):
                         continue
                     records.append(AuditReceiptRecord.from_dict(json.loads(line)))
             return records
+
+
+class AtomicAuditReceiptStorage(AuditReceiptStorage):
+    """Immutable receipts stored by receipt id in the shared backend."""
+
+    def __init__(
+        self,
+        backend: AtomicStateBackend,
+        *,
+        namespace: str = "audit_receipt",
+    ) -> None:
+        self._storage = NamespacedAtomicStorage(
+            backend,
+            namespace,
+            from_dict=AuditReceiptRecord.from_dict,
+            to_dict=lambda receipt: receipt.to_dict(),
+        )
+
+    def append(self, receipt: AuditReceiptRecord) -> None:
+        if self._storage.create(receipt.receipt_id, receipt):
+            return
+        existing = self._storage.get(receipt.receipt_id)
+        if existing == receipt:
+            return
+        raise AuditReceiptError(
+            f"audit receipt {receipt.receipt_id!r} already exists with different content"
+        )
+
+    def list_all(self) -> list[AuditReceiptRecord]:
+        return sorted(
+            self._storage.list_all(),
+            key=lambda receipt: (receipt.timestamp, receipt.receipt_id),
+        )
 
 
 def _canonical_json(payload: dict[str, Any]) -> str:
@@ -280,6 +314,7 @@ def resolve_signing_key(
 
 
 __all__ = [
+    "AtomicAuditReceiptStorage",
     "AuditReceiptEmitter",
     "AuditReceiptError",
     "AuditReceiptRecord",

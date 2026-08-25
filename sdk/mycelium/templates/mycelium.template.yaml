@@ -4,7 +4,8 @@
 #
 # Required vs optional
 #   Required for transition guards:  transition, action_ledger (+ tools entries you ledger)
-#   Optional:  integrations, task_ledger, state_flush, audit_receipt, outcome_emit,
+#   Optional:  integrations, task_ledger, state_backend, state_flush,
+#              audit_receipt, outcome_emit,
 #              loop_guard, completion, state_authority, registry, runner,
 #              history_guard, message_validator, deployment, verify,
 #              secret_args, entity_guard, destructive_confirm — delete unused sections
@@ -30,7 +31,9 @@
 # Deployments: set `profile: production` so memory_storage_policy and
 #   missing_run_id_policy become error automatically. Explicit `warn` under
 #   production is rejected (not silently weakened).
-# state_flush / audit_receipt: memory | file only
+# Stateful guards: configure one top-level state_backend (memory | file |
+#   redis | postgres). Enabled loop, scope, completion, state_flush, and
+#   audit_receipt sections without their own storage automatically inherit it.
 #
 # side_effect_class (per ledgered tool): read | idempotent_mutate |
 #   keyed_mutate | non_idempotent_mutate | irreversible
@@ -106,6 +109,25 @@
 #   topology: single_node
 
 # ---------------------------------------------------------------------------
+# state_backend  (optional unified atomic state for stateful guards)
+#   memory — tests only; file — one node; redis/postgres — multiple workers.
+#   Each guard gets its own namespace automatically. New guards enabled later
+#   inherit this backend when their section omits storage.
+#   Existing guard files: keep their old storage while running
+#     mycelium state migrate --plan --config mycelium.yaml
+#     mycelium state migrate --apply --config mycelium.yaml
+#   Then remove per-guard storage (or set storage: shared) and run Doctor.
+# ---------------------------------------------------------------------------
+state_backend:
+  storage: file
+  path: ./mycelium-guard-state.json
+  namespace: mycelium
+  # storage: redis
+  # url_env: MYCELIUM_REDIS_URL
+  # storage: postgres
+  # dsn_env: MYCELIUM_POSTGRES_DSN
+
+# ---------------------------------------------------------------------------
 # verify  (optional isolation permission for mycelium verify)
 #   Doctor inspects configuration. Verify runs synthetic failure scenarios
 #   against an isolated namespace (mycelium:verify:<uuid>:). It never executes
@@ -178,8 +200,7 @@ task_ledger:
 # state_flush  (persist on abort; omit if unused)
 # ---------------------------------------------------------------------------
 state_flush:
-  storage: file            # <TODO: memory | file>
-  path: ./mycelium-state.json
+  # storage omitted: inherits state_backend; use shared to make that explicit
   flush_on: [cancel, disconnect, error]   # subset of cancel | disconnect | error
   # flush_on_complete: true
 
@@ -188,8 +209,7 @@ state_flush:
 # ---------------------------------------------------------------------------
 audit_receipt:
   signing_key_env: MYCELIUM_SIGNING_KEY   # <TODO: set env, or use signing_key:>
-  storage: file                           # <TODO: memory | file>
-  path: ./mycelium-receipts.jsonl
+  # storage omitted: inherits state_backend; receipts remain independently signed
   auto: true
 
 # ---------------------------------------------------------------------------
@@ -250,8 +270,7 @@ tasks: {}
 # loop_guard  (AF-003 — halt identical actions across new tool_call_ids)
 # ---------------------------------------------------------------------------
 loop_guard:
-  storage: file
-  path: ./mycelium-loop.json
+  # storage omitted: inherits state_backend
   escalate_after_soft: 1
   missing_run_id_policy: error  # warn (default, skip if no run_id) | error
   # unclassified_policy: warn   # warn (default): missing side_effect_class → read N=5
@@ -416,8 +435,7 @@ loop_guard:
 # / gate_graph_end / register_terminal_adapter before load_config.
 # ---------------------------------------------------------------------------
 # completion:
-#   storage: file
-#   path: ./mycelium-completion.json
+#   # storage omitted: inherits state_backend
 #   required:
 #     - id: charge_customer
 #     - id: send_receipt
@@ -432,8 +450,7 @@ loop_guard:
 # only. Wrapper: @scope_guard → @loop_guard → @ledger → @bounded → @protect.
 # ---------------------------------------------------------------------------
 # scope_guard:
-#   storage: file
-#   path: ./mycelium-scope.json
+#   # storage omitted: inherits state_backend
 #   # missing_run_id_policy: error   # warn (default, skip if no run_id) | error
 #   # allowed_tools: from_registry   # default; or all | [tool_a, tool_b]
 #   # on_violation: soft             # soft (ToolBoundaryError) | hard

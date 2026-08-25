@@ -331,7 +331,11 @@ than the code makes.
   before the tool runs.
 - **Trusting the reconciler.** If your reconciler returns `NOT_EXECUTED` when
   the effect actually happened, the runtime will re-execute once. Reconcilers
-  are read-only *by contract*, not enforced by Mycelium.
+  are read-only *by contract*, not enforced against live provider credentials.
+  The provider conformance kit tests lag, ambiguity, duplicates, malformed
+  handles, false `NOT_EXECUTED`, and synthetic forbidden writes, and emits a
+  signed source-bound report. It cannot prove that a deployed provider token
+  has read-only scopes; operators must enforce those scopes separately.
 - **In-memory ledgers across processes.** `storage: memory` claims are not
   durable beyond the process. Mycelium emits a warning when a side-effecting
   tool is configured with memory storage; the guard only holds within the
@@ -340,6 +344,14 @@ than the code makes.
   Durable storage preserves `maybe_crossed` across restart but cannot alone
   prove whether the provider completed; unresolved ambiguity stays
   fail-closed.
+- **Stateful guards across processes.** Loop, scope, completion, state-flush,
+  and audit-receipt state share the namespaced atomic `state_backend` when it
+  is configured. Redis/Postgres use revision-checked updates so concurrent
+  workers do not silently overwrite one another; file is single-node only.
+  Without `state_backend` (or an explicit durable per-feature backend), the
+  legacy memory/file limitations still apply. Existing records can be copied
+  with `mycelium state migrate --plan` and `--apply`; migration is copy-only
+  and refuses conflicts.
 - **Unclassified tools under the library/development `warn` policy.** A tool without a
   transition binding that fails is re-executed on reclaim (legacy behavior,
   with a one-time warning). `unclassified_policy: strict` routes them through

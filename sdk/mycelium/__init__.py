@@ -26,6 +26,7 @@ from mycelium.action_ledger import (
     LedgerPendingError,
     LedgerPollTimeoutError,
     LedgerReleaseRefusedError,
+    LedgerSchemaVersionError,
     LedgerSoftBlockError,
     LedgerStorage,
     LedgerStorageUnavailableError,
@@ -42,6 +43,7 @@ from mycelium.action_ledger import (
     side_effect_async,
 )
 from mycelium.audit_receipt import (
+    AtomicAuditReceiptStorage,
     AuditReceiptEmitter,
     AuditReceiptError,
     AuditReceiptRecord,
@@ -106,6 +108,7 @@ from mycelium.completion_contract import (
     STATUS_FAILED,
     STATUS_PENDING,
     STATUS_SUCCESS,
+    AtomicCompletionStorage,
     CompleteRunResult,
     CompletionContract,
     CompletionError,
@@ -194,6 +197,7 @@ from mycelium.ledger_migrations import (
     LedgerMigrationPlan,
     LedgerMigrationResult,
     apply_ledger_migration,
+    inspect_ledger_schema_versions,
     plan_ledger_migration,
     upgrade_ledger_entry,
 )
@@ -206,6 +210,7 @@ from mycelium.loop_guard import (
     VERIFIED_ALLOW_ONCE,
     VERIFIED_CLEAR,
     VERIFIED_RESOLUTIONS,
+    AtomicLoopGuardStorage,
     FileLoopGuardStorage,
     InMemoryLoopGuardStorage,
     LoopGuard,
@@ -243,13 +248,36 @@ from mycelium.outcome_emit import (
     compute_dttr_from_storage,
 )
 from mycelium.protect import protect, protect_sync
-from mycelium.providers import GmailReconciler, canonicalize_message_id
+from mycelium.provider_conformance import (
+    ADAPTER_REPORT_SCHEMA_VERSION,
+    ADAPTER_REPORT_SIGNATURE_ALGORITHM,
+    PROVIDER_CONFORMANCE_SUITE_VERSION,
+    REQUIRED_PROVIDER_CONFORMANCE_CASES,
+    AdapterConformanceCase,
+    AdapterVerificationReport,
+    ProviderCallAudit,
+    ProviderConformanceFixture,
+    ProviderObservation,
+    adapter_report_is_verified,
+    adapter_report_json,
+    adapter_report_matches_fixture,
+    create_adapter_verification_report,
+    run_provider_conformance_cases,
+    verify_adapter_report_signature,
+)
+from mycelium.providers import (
+    GmailConformanceFixture,
+    GmailReconciler,
+    canonicalize_message_id,
+    get_provider_conformance_fixture,
+)
 from mycelium.reconcile import Reconciler, ReconcileResult, ReconcileStatus
 from mycelium.schema import SchemaBuildError
 from mycelium.scope_guard import (
     ON_VIOLATION_HARD,
     ON_VIOLATION_SOFT,
     VIOLATION_TOOL,
+    AtomicScopeGuardStorage,
     FileScopeGuardStorage,
     InMemoryScopeGuardStorage,
     ScopeGrant,
@@ -287,11 +315,30 @@ from mycelium.state_authority import (
     state_authority_sync,
 )
 from mycelium.state_flush import (
+    AtomicStateFlushStorage,
     FileStateFlushStorage,
     InMemoryStateFlushStorage,
     StateFlush,
     StateFlushError,
     StateSnapshot,
+)
+from mycelium.state_migrations import (
+    StateMigrationError,
+    StateMigrationPlan,
+    StateMigrationResult,
+    apply_state_migration,
+    plan_state_migration,
+)
+from mycelium.storage.atomic_state import (
+    AtomicStateBackend,
+    AtomicStateContentionError,
+    AtomicStateError,
+    AtomicStateRecord,
+    FileAtomicStateBackend,
+    InMemoryAtomicStateBackend,
+    NamespacedAtomicStorage,
+    PostgresAtomicStateBackend,
+    RedisAtomicStateBackend,
 )
 from mycelium.storage.postgres_ledger import PostgresLedgerStorage, PostgresTaskLedgerStorage
 from mycelium.storage.postgres_outcome import PostgresOutcomeStorage
@@ -378,11 +425,32 @@ except PackageNotFoundError:  # pragma: no cover - editable/source tree edge
     __version__ = "0.0.0.dev"
 
 __all__ = [
+    "AtomicAuditReceiptStorage",
+    "AtomicCompletionStorage",
+    "AtomicLoopGuardStorage",
+    "AtomicScopeGuardStorage",
+    "AtomicStateBackend",
+    "AtomicStateContentionError",
+    "AtomicStateError",
+    "AtomicStateFlushStorage",
+    "AtomicStateRecord",
+    "FileAtomicStateBackend",
+    "InMemoryAtomicStateBackend",
+    "NamespacedAtomicStorage",
+    "PostgresAtomicStateBackend",
+    "RedisAtomicStateBackend",
+    "StateMigrationError",
+    "StateMigrationPlan",
+    "StateMigrationResult",
+    "apply_state_migration",
+    "plan_state_migration",
     "ActionLedger",
     "LedgerMigrationError",
     "LedgerMigrationPlan",
     "LedgerMigrationResult",
+    "LedgerSchemaVersionError",
     "apply_ledger_migration",
+    "inspect_ledger_schema_versions",
     "plan_ledger_migration",
     "upgrade_ledger_entry",
     "OperatorAuthorizer",
@@ -445,7 +513,24 @@ __all__ = [
     "unregister_decision_predicate",
     "reset_decision_engine",
     "GmailReconciler",
+    "GmailConformanceFixture",
     "canonicalize_message_id",
+    "get_provider_conformance_fixture",
+    "ADAPTER_REPORT_SCHEMA_VERSION",
+    "ADAPTER_REPORT_SIGNATURE_ALGORITHM",
+    "PROVIDER_CONFORMANCE_SUITE_VERSION",
+    "REQUIRED_PROVIDER_CONFORMANCE_CASES",
+    "AdapterConformanceCase",
+    "AdapterVerificationReport",
+    "ProviderCallAudit",
+    "ProviderConformanceFixture",
+    "ProviderObservation",
+    "adapter_report_is_verified",
+    "adapter_report_json",
+    "adapter_report_matches_fixture",
+    "create_adapter_verification_report",
+    "run_provider_conformance_cases",
+    "verify_adapter_report_signature",
     "get_ledger",
     "ledger",
     "ledger_sync",

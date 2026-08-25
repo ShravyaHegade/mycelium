@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from mycelium.session import Session
+from mycelium.storage.atomic_state import AtomicStateBackend, NamespacedAtomicStorage
 from mycelium.storage.json_file import LockedJsonDictFile
 
 FlushReason = Literal["cancel", "disconnect", "error"]
@@ -63,6 +64,9 @@ class StateFlushStorage:
     def set(self, snapshot: StateSnapshot) -> None:
         raise NotImplementedError
 
+    def list_all(self) -> list[StateSnapshot]:
+        raise NotImplementedError
+
 
 class InMemoryStateFlushStorage(StateFlushStorage):
     def __init__(self) -> None:
@@ -73,6 +77,9 @@ class InMemoryStateFlushStorage(StateFlushStorage):
 
     def set(self, snapshot: StateSnapshot) -> None:
         self._snapshots[snapshot.run_id] = snapshot
+
+    def list_all(self) -> list[StateSnapshot]:
+        return list(self._snapshots.values())
 
 
 class FileStateFlushStorage(StateFlushStorage):
@@ -95,6 +102,38 @@ class FileStateFlushStorage(StateFlushStorage):
             data[snapshot.run_id] = snapshot.to_dict()
 
         self._file.read_modify_write(mutate)
+
+    def list_all(self) -> list[StateSnapshot]:
+        def read(data: dict[str, dict[str, Any]]) -> list[StateSnapshot]:
+            return [StateSnapshot.from_dict(raw) for raw in data.values()]
+
+        return self._file.read_modify_write_no_save(read)
+
+
+class AtomicStateFlushStorage(StateFlushStorage):
+    """Run snapshots stored through the shared namespaced backend."""
+
+    def __init__(
+        self,
+        backend: AtomicStateBackend,
+        *,
+        namespace: str = "state_flush",
+    ) -> None:
+        self._storage = NamespacedAtomicStorage(
+            backend,
+            namespace,
+            from_dict=StateSnapshot.from_dict,
+            to_dict=lambda snapshot: snapshot.to_dict(),
+        )
+
+    def get(self, run_id: str) -> StateSnapshot | None:
+        return self._storage.get(run_id)
+
+    def set(self, snapshot: StateSnapshot) -> None:
+        self._storage.set(snapshot.run_id, snapshot)
+
+    def list_all(self) -> list[StateSnapshot]:
+        return self._storage.list_all()
 
 
 class _FlushRun:
@@ -168,6 +207,10 @@ class StateFlush:
         self._flush_on = set(flush_on or ["cancel", "disconnect", "error"])
         self._flush_on_complete = flush_on_complete
 
+    @property
+    def storage(self) -> StateFlushStorage:
+        return self._storage
+
     def load(self, run_id: str) -> StateSnapshot | None:
         return self._storage.get(run_id)
 
@@ -234,6 +277,7 @@ class _StateFlushContext(AbstractContextManager[_FlushRun]):
 
 
 __all__ = [
+    "AtomicStateFlushStorage",
     "FileStateFlushStorage",
     "FlushReason",
     "InMemoryStateFlushStorage",

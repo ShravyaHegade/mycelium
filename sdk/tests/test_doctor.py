@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,8 @@ import pytest
 
 from mycelium import (
     DoctorStatus,
+    LedgerEntry,
+    SqliteLedgerStorage,
     exit_code_for_report,
     load_config_from_string,
     run_doctor,
@@ -105,6 +108,46 @@ def test_fully_protected_single_node(tmp_path: Path) -> None:
     assert report.distributed_ready is False
     assert exit_code_for_report(report) == 0
     assert any(c.id == "ledger.backend" and c.status == DoctorStatus.PASS for c in report.checks)
+    assert any(c.id == "ledger.schema" and c.status == DoctorStatus.SKIP for c in report.checks)
+
+
+def _doctor_schema_check(tmp_path: Path, version: int):
+    ledger_path = tmp_path / "ledger.db"
+    storage = SqliteLedgerStorage(ledger_path)
+    entry = LedgerEntry(
+        request_id=f"schema-{version}",
+        tool="charge",
+        args=[],
+        kwargs={},
+        status="completed",
+        terminal_outcome="COMPLETED",
+        schema_version=min(version, 2),
+    )
+    storage.set(entry)
+    if version > 2:
+        payload = entry.to_dict()
+        payload["schema_version"] = version
+        with sqlite3.connect(ledger_path) as conn:
+            conn.execute(
+                "UPDATE mycelium_action_ledger SET payload = ? WHERE request_id = ?",
+                (json.dumps(payload), entry.request_id),
+            )
+            conn.commit()
+    cfg = load_config_from_string(_single_node_prod(tmp_path))
+    report = run_doctor_on_config(cfg, connectivity=True)
+    return next(c for c in report.checks if c.id == "ledger.schema")
+
+
+@pytest.mark.parametrize(
+    ("version", "expected"),
+    [(1, DoctorStatus.WARN), (2, DoctorStatus.PASS), (3, DoctorStatus.FAIL)],
+)
+def test_doctor_reports_ledger_schema_versions(
+    tmp_path: Path, version: int, expected: DoctorStatus
+) -> None:
+    check = _doctor_schema_check(tmp_path, version)
+    assert check.status == expected
+    assert f"v{version}=1" in check.details
 
 
 def test_fully_protected_multi_node_postgres(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -346,6 +389,57 @@ def test_file_backend_under_multi_node_fails(tmp_path: Path) -> None:
     )
     assert report.distributed_ready is False
     assert exit_code_for_report(report) == 1
+
+
+def test_file_state_backend_under_multi_node_fails(tmp_path: Path) -> None:
+    cfg = load_config_from_string(
+        f"""
+deployment:
+  topology: multi_node
+state_backend:
+  storage: file
+  path: {tmp_path / "state.json"}
+loop_guard: {{}}
+tools: {{}}
+"""
+    )
+    report = run_doctor_on_config(cfg, connectivity=False)
+    assert any(
+        check.id == "state_backend.backend"
+        and check.status == DoctorStatus.FAIL
+        for check in report.checks
+    )
+    assert any(
+        check.id == "topology.multi_node" and check.status == DoctorStatus.FAIL
+        for check in report.checks
+    )
+
+
+def test_postgres_state_backend_satisfies_multi_node_topology() -> None:
+    cfg = load_config_from_string(
+        """
+deployment:
+  topology: multi_node
+state_backend:
+  storage: postgres
+  dsn: postgresql://localhost/mycelium
+loop_guard: {}
+scope_guard:
+  allowed_tools: [read]
+tools:
+  read: {}
+"""
+    )
+    report = run_doctor_on_config(cfg, connectivity=False)
+    assert any(
+        check.id == "state_backend.backend"
+        and check.status == DoctorStatus.PASS
+        for check in report.checks
+    )
+    assert any(
+        check.id == "topology.multi_node" and check.status == DoctorStatus.PASS
+        for check in report.checks
+    )
 
 
 def test_backend_connection_failure(

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
+from mycelium.action_ledger import LEDGER_ENTRY_SCHEMA_VERSION
 from mycelium.config import (
     PROFILE_PRODUCTION,
     MyceliumConfig,
@@ -37,6 +38,7 @@ from mycelium.doctor.types import (
     DoctorCheck,
     DoctorStatus,
 )
+from mycelium.ledger_migrations import inspect_ledger_schema_versions
 from mycelium.loop_guard import MISSING_RUN_ID_POLICY_ERROR
 from mycelium.outcome_emit import (
     OUTCOME_ON_FAILURE_ERROR,
@@ -101,6 +103,18 @@ def _storage_type(raw: dict[str, Any] | None) -> str:
     if not raw:
         return "memory"
     return str(raw.get("storage", "memory"))
+
+
+def _guard_storage_type(
+    cfg: MyceliumConfig,
+    raw: dict[str, Any] | None,
+) -> str:
+    if raw is None:
+        return "memory"
+    storage = raw.get("storage")
+    if storage == "shared" or (storage is None and cfg.state_backend is not None):
+        return _storage_type(cfg.state_backend)
+    return str(storage or "memory")
 
 
 @doctor_check("configuration")
@@ -508,6 +522,98 @@ def check_action_ledger(ctx: DoctorContext) -> Iterable[DoctorCheck]:
     probe = _probe_storage(ctx, raw=sample, label="action_ledger")
     if probe is not None:
         yield probe
+
+    durable_raws: list[dict[str, Any]] = []
+    for name in consequential:
+        candidate = _ledger_storage_for_tool(cfg, name)
+        if _storage_type(candidate) != "memory" and candidate not in durable_raws:
+            durable_raws.append(candidate)
+    if not durable_raws:
+        yield _check(
+            id="ledger.schema",
+            category="Action ledger",
+            status=DoctorStatus.SKIP,
+            summary="No durable ledger rows to inspect",
+            evidence=EVIDENCE_NOT_VERIFIABLE,
+            blocking=False,
+        )
+        return
+    if not ctx.connectivity:
+        yield _check(
+            id="ledger.schema",
+            category="Action ledger",
+            status=DoctorStatus.SKIP,
+            summary="Ledger schema inspection skipped (--no-connectivity)",
+            remediation="Run mycelium doctor with connectivity enabled.",
+            evidence=EVIDENCE_NOT_VERIFIABLE,
+            blocking=False,
+        )
+        return
+    if probe is not None and probe.status == DoctorStatus.FAIL:
+        yield _check(
+            id="ledger.schema",
+            category="Action ledger",
+            status=DoctorStatus.SKIP,
+            summary="Ledger schema could not be inspected",
+            details="The connectivity check failed first.",
+            remediation="Restore backend connectivity, then run mycelium doctor again.",
+            evidence=EVIDENCE_NOT_VERIFIABLE,
+            blocking=False,
+        )
+        return
+
+    versions: dict[int, int] = {}
+    try:
+        for raw in durable_raws:
+            for version, count in inspect_ledger_schema_versions(raw).items():
+                versions[version] = versions.get(version, 0) + count
+    except Exception as exc:
+        yield _check(
+            id="ledger.schema",
+            category="Action ledger",
+            status=DoctorStatus.FAIL,
+            summary="Ledger schema inspection failed",
+            details=redact_secrets(str(exc)),
+            remediation="Repair the malformed row or backend, then run migration planning.",
+            evidence=EVIDENCE_CONNECTIVITY,
+        )
+        return
+
+    version_detail = ", ".join(
+        f"v{version}={count}" for version, count in sorted(versions.items())
+    ) or "no rows"
+    future = sorted(version for version in versions if version > LEDGER_ENTRY_SCHEMA_VERSION)
+    older = sorted(version for version in versions if version < LEDGER_ENTRY_SCHEMA_VERSION)
+    if future:
+        yield _check(
+            id="ledger.schema",
+            category="Action ledger",
+            status=DoctorStatus.FAIL,
+            summary="Ledger contains unsupported future schema versions",
+            details=version_detail,
+            remediation="Upgrade Mycelium before reading or modifying these ledger rows.",
+            evidence=EVIDENCE_CONNECTIVITY,
+        )
+    elif older:
+        yield _check(
+            id="ledger.schema",
+            category="Action ledger",
+            status=DoctorStatus.WARN,
+            summary="Ledger migration is available",
+            details=version_detail,
+            remediation="Run 'mycelium migrate --plan', back up, then use --apply.",
+            evidence=EVIDENCE_CONNECTIVITY,
+            blocking=False,
+        )
+    else:
+        yield _check(
+            id="ledger.schema",
+            category="Action ledger",
+            status=DoctorStatus.PASS,
+            summary=f"Ledger schema is current (v{LEDGER_ENTRY_SCHEMA_VERSION})",
+            details=version_detail,
+            evidence=EVIDENCE_CONNECTIVITY,
+        )
 
 
 @doctor_check("run_identity")
@@ -1054,6 +1160,92 @@ def check_outcomes(ctx: DoctorContext) -> Iterable[DoctorCheck]:
         yield probe
 
 
+@doctor_check("state_backend")
+def check_state_backend(ctx: DoctorContext) -> Iterable[DoctorCheck]:
+    cfg = ctx.config
+    raw = cfg.state_backend
+    if raw is None:
+        yield _check(
+            id="state_backend.skipped",
+            category="Shared state",
+            status=DoctorStatus.SKIP,
+            summary="state_backend: not configured",
+            remediation=(
+                "Configure state_backend for shared loop, scope, completion, "
+                "state-flush, and audit-receipt state."
+            ),
+            evidence=EVIDENCE_STATIC,
+            blocking=False,
+        )
+        return
+
+    storage = _storage_type(raw)
+    namespace = str(raw.get("namespace", "mycelium"))
+    topology = (cfg.deployment or {}).get("topology")
+    if storage == "memory":
+        status = DoctorStatus.FAIL if topology == "multi_node" else DoctorStatus.WARN
+        yield _check(
+            id="state_backend.backend",
+            category="Shared state",
+            status=status,
+            summary="Shared state backend is process-local memory",
+            details=f"namespace={namespace!r}",
+            remediation="Use file for single-node durability or Redis/Postgres for multi-node.",
+            evidence=EVIDENCE_STATIC,
+            blocking=status == DoctorStatus.FAIL,
+        )
+        return
+    if storage in ("file",):
+        status = DoctorStatus.FAIL if topology == "multi_node" else DoctorStatus.PASS
+        yield _check(
+            id="state_backend.backend",
+            category="Shared state",
+            status=status,
+            summary="File shared-state backend configured (single-node only)",
+            details=f"{safe_backend_label(raw)}; namespace={namespace!r}",
+            remediation="Use Redis or Postgres before running multiple workers.",
+            evidence=EVIDENCE_STATIC,
+        )
+    elif storage in DISTRIBUTED_STORAGES:
+        try:
+            if storage == "postgres":
+                resolve_storage_url(raw, url_key="dsn", alt_keys=("url",))
+            else:
+                resolve_storage_url(raw)
+        except ValueError as exc:
+            yield _check(
+                id="state_backend.backend",
+                category="Shared state",
+                status=DoctorStatus.FAIL,
+                summary=f"{storage} shared-state configuration is incomplete",
+                details=redact_secrets(str(exc)),
+                remediation="Configure url/url_env or dsn/dsn_env.",
+                evidence=EVIDENCE_STATIC,
+            )
+            return
+        yield _check(
+            id="state_backend.backend",
+            category="Shared state",
+            status=DoctorStatus.PASS,
+            summary=f"{storage} shared-state backend configured",
+            details=f"{safe_backend_label(raw)}; namespace={namespace!r}; CAS=required",
+            evidence=EVIDENCE_STATIC,
+        )
+    else:
+        yield _check(
+            id="state_backend.backend",
+            category="Shared state",
+            status=DoctorStatus.FAIL,
+            summary=f"Unknown shared-state backend {storage!r}",
+            evidence=EVIDENCE_STATIC,
+        )
+        return
+
+    probe = _probe_storage(ctx, raw=raw, label="state_backend")
+    if probe is not None:
+        yield probe
+
+
 @doctor_check("topology")
 def check_topology(ctx: DoctorContext) -> Iterable[DoctorCheck]:
     cfg = ctx.config
@@ -1068,13 +1260,17 @@ def check_topology(ctx: DoctorContext) -> Iterable[DoctorCheck]:
     if cfg.outcome_emit is not None:
         shared_sections.append(("outcome_emit", _storage_type(cfg.outcome_emit)))
     if cfg.loop_guard is not None:
-        shared_sections.append(("loop_guard", _storage_type(cfg.loop_guard)))
+        shared_sections.append(("loop_guard", _guard_storage_type(cfg, cfg.loop_guard)))
     if cfg.scope_guard is not None:
-        shared_sections.append(("scope_guard", _storage_type(cfg.scope_guard)))
+        shared_sections.append(("scope_guard", _guard_storage_type(cfg, cfg.scope_guard)))
     if cfg.budget is not None:
         shared_sections.append(("budget", _storage_type(cfg.budget)))
     if cfg.completion is not None:
-        shared_sections.append(("completion", _storage_type(cfg.completion)))
+        shared_sections.append(("completion", _guard_storage_type(cfg, cfg.completion)))
+    if cfg.state_flush is not None:
+        shared_sections.append(("state_flush", _guard_storage_type(cfg, cfg.state_flush)))
+    if cfg.audit_receipt is not None:
+        shared_sections.append(("audit_receipt", _guard_storage_type(cfg, cfg.audit_receipt)))
 
     single_node_used = [
         f"{name}={storage}"
@@ -1084,7 +1280,7 @@ def check_topology(ctx: DoctorContext) -> Iterable[DoctorCheck]:
     memory_used = [
         f"{name}=memory"
         for name, storage in shared_sections
-        if storage == "memory" and name in ("action_ledger", "outcome_emit")
+        if storage == "memory"
     ]
 
     if topology is None:

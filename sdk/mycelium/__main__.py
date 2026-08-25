@@ -23,6 +23,7 @@ _ENV_REDIS_URL = "MYCELIUM_REDIS_URL"
 _ENV_POSTGRES_DSN = "MYCELIUM_POSTGRES_DSN"
 _ENV_SQLITE_PATH = "MYCELIUM_SQLITE_PATH"
 _ENV_OUTCOME_FILE = "MYCELIUM_OUTCOME_FILE"
+_ENV_ADAPTER_REPORT_SIGNING_KEY = "MYCELIUM_ADAPTER_REPORT_SIGNING_KEY"
 
 
 def _load_template(*, full: bool, minimal: bool) -> tuple[str, str]:
@@ -65,6 +66,100 @@ def cmd_demo(*, redis: bool = False, slow: bool = False) -> int:
     from mycelium.quickstart import run_demo
 
     return run_demo(redis=redis, slow=slow)
+
+
+def _adapter_report_signing_key(env_name: str) -> str:
+    value = os.environ.get(env_name, "").strip()
+    if not value:
+        raise ValueError(f"environment variable {env_name!r} is not set")
+    return value
+
+
+def cmd_providers_verify(args: argparse.Namespace) -> int:
+    """Run the synthetic provider suite and write a signed report."""
+
+    from mycelium.provider_conformance import (
+        adapter_report_json,
+        create_adapter_verification_report,
+    )
+    from mycelium.providers import get_provider_conformance_fixture
+
+    try:
+        signing_key = _adapter_report_signing_key(args.signing_key_env)
+        fixture = get_provider_conformance_fixture(args.adapter)
+        report = create_adapter_verification_report(
+            fixture,
+            signing_key=signing_key,
+            signer_key_id=args.key_id or args.signing_key_env,
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    rendered = adapter_report_json(report) + "\n"
+    if args.output is None:
+        print(rendered, end="")
+    else:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(rendered, encoding="utf-8")
+        print(f"Wrote signed adapter report: {args.output}")
+        print(f"Adapter {report.adapter_name}: {report.status}")
+    return 0 if report.verified else 1
+
+
+def cmd_providers_verify_report(args: argparse.Namespace) -> int:
+    """Verify a stored adapter report's signature and passing status."""
+
+    from mycelium.provider_conformance import (
+        AdapterVerificationReport,
+        adapter_report_is_verified,
+        adapter_report_matches_fixture,
+        verify_adapter_report_signature,
+    )
+    from mycelium.providers import get_provider_conformance_fixture
+
+    try:
+        signing_key = _adapter_report_signing_key(args.signing_key_env)
+        report = AdapterVerificationReport.from_dict(
+            json.loads(args.report.read_text(encoding="utf-8"))
+        )
+    except (KeyError, json.JSONDecodeError, OSError, TypeError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    authentic = verify_adapter_report_signature(report, signing_key)
+    try:
+        fixture = get_provider_conformance_fixture(report.adapter_name)
+    except ValueError:
+        fixture = None
+    source_matches = (
+        fixture is not None and adapter_report_matches_fixture(report, fixture)
+    )
+    verified = (
+        fixture is not None
+        and adapter_report_is_verified(report, signing_key, fixture=fixture)
+    )
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "adapter": report.adapter_name,
+                    "authentic": authentic,
+                    "report_status": report.status,
+                    "source_matches": source_matches,
+                    "verified": verified,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+    else:
+        print(
+            f"Adapter {report.adapter_name}: signature="
+            f"{'valid' if authentic else 'invalid'} status={report.status} "
+            f"source={'matches' if source_matches else 'changed'}"
+        )
+    return 0 if verified else 1
 
 
 def _validated_python_command(command: list[str]) -> list[str]:
@@ -484,6 +579,7 @@ def cmd_transitions_mark_dead(args: argparse.Namespace) -> int:
 
 def cmd_migrate(args: argparse.Namespace) -> int:
     """Plan or apply explicit ActionLedger schema migrations."""
+    from mycelium.action_ledger import LedgerSchemaVersionError
     from mycelium.config import ConfigError
     from mycelium.ledger_migrations import (
         LedgerMigrationError,
@@ -497,7 +593,13 @@ def cmd_migrate(args: argparse.Namespace) -> int:
             plan_ledger_migration(storage, target_version=args.target_version)
             for storage in storages
         ]
-    except (ConfigError, LedgerMigrationError, OSError, ValueError) as exc:
+    except (
+        ConfigError,
+        LedgerMigrationError,
+        LedgerSchemaVersionError,
+        OSError,
+        ValueError,
+    ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
@@ -544,7 +646,7 @@ def cmd_migrate(args: argparse.Namespace) -> int:
             )
             for storage in storages
         ]
-    except (LedgerMigrationError, OSError, ValueError) as exc:
+    except (LedgerMigrationError, LedgerSchemaVersionError, OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
@@ -561,6 +663,58 @@ def cmd_migrate(args: argparse.Namespace) -> int:
                 f"unchanged={result.unchanged_entries} schema={result.target_version}"
             )
         print("Ledger migration complete. Run 'mycelium migrate --plan' to verify.")
+    return 0
+
+
+def cmd_state_migrate(args: argparse.Namespace) -> int:
+    """Plan or copy legacy guard state into ``state_backend``."""
+
+    from mycelium.config import ConfigError, load_config
+    from mycelium.state_migrations import (
+        StateMigrationError,
+        apply_state_migration,
+        plan_state_migration,
+    )
+
+    try:
+        cfg = load_config(args.config)
+        plan = plan_state_migration(cfg)
+    except (ConfigError, StateMigrationError, OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    if args.plan:
+        payload = {"mode": "plan", **plan.to_dict()}
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            print(
+                "Shared-state migration plan: "
+                f"total={plan.total_records} migrate={plan.pending_records} "
+                f"unchanged={plan.unchanged_records} conflicts={plan.conflicting_records}"
+            )
+            for feature, count in sorted(plan.feature_counts.items()):
+                print(f"  {feature}: {count}")
+            print("No state records were changed.")
+        return 1 if not plan.can_apply else 0
+
+    if not plan.can_apply:
+        print("error: migration refused because destination conflicts exist", file=sys.stderr)
+        return 1
+    try:
+        result = apply_state_migration(cfg)
+    except (StateMigrationError, OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    payload = {"mode": "apply", **result.to_dict()}
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(
+            f"Shared-state migration complete: migrated={result.migrated_records} "
+            f"unchanged={result.unchanged_records}"
+        )
+        print("Switch migrated feature storage to 'shared', then run mycelium doctor.")
     return 0
 
 
@@ -1369,6 +1523,101 @@ def main(argv: list[str] | None = None) -> int:
         help="Emit machine-readable migration plan or result",
     )
 
+    state_parser = sub.add_parser(
+        "state",
+        help="Manage the unified guard state backend",
+    )
+    state_sub = state_parser.add_subparsers(dest="state_command", required=True)
+    state_migrate_parser = state_sub.add_parser(
+        "migrate",
+        help="Copy legacy guard state into state_backend",
+        description=(
+            "Copy loop, scope, completion, state-flush, and audit-receipt records "
+            "without deleting or overwriting their source records."
+        ),
+    )
+    state_migrate_parser.add_argument(
+        "-c",
+        "--config",
+        type=Path,
+        default=Path("mycelium.yaml"),
+        help="Config containing source feature storage and destination state_backend",
+    )
+    state_migrate_mode = state_migrate_parser.add_mutually_exclusive_group(required=True)
+    state_migrate_mode.add_argument(
+        "--plan",
+        action="store_true",
+        help="Read-only preview of records to copy",
+    )
+    state_migrate_mode.add_argument(
+        "--apply",
+        action="store_true",
+        help="Copy records without deleting source state",
+    )
+    state_migrate_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable output",
+    )
+
+    providers_parser = sub.add_parser(
+        "providers",
+        help="Verify shipped read-only provider reconciliation adapters",
+    )
+    providers_sub = providers_parser.add_subparsers(
+        dest="providers_command", required=True
+    )
+    providers_verify_parser = providers_sub.add_parser(
+        "verify",
+        help="Run adversarial conformance tests and sign the report",
+        description=(
+            "Run synthetic lag, ambiguity, duplicate, malformed-handle, and "
+            "forbidden-write checks. This does not contact the live provider."
+        ),
+    )
+    providers_verify_parser.add_argument(
+        "adapter",
+        choices=("gmail",),
+        help="Shipped provider adapter to verify",
+    )
+    providers_verify_parser.add_argument(
+        "--signing-key-env",
+        default=_ENV_ADAPTER_REPORT_SIGNING_KEY,
+        help=(
+            "Environment variable containing the HMAC signing key "
+            f"(default: {_ENV_ADAPTER_REPORT_SIGNING_KEY})"
+        ),
+    )
+    providers_verify_parser.add_argument(
+        "--key-id",
+        default=None,
+        help="Non-secret signer key identifier stored in the report",
+    )
+    providers_verify_parser.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        default=None,
+        help="Write the signed JSON report to this path (default: stdout)",
+    )
+
+    providers_report_parser = providers_sub.add_parser(
+        "verify-report",
+        help="Verify a signed adapter report",
+    )
+    providers_report_parser.add_argument("report", type=Path)
+    providers_report_parser.add_argument(
+        "--signing-key-env",
+        default=_ENV_ADAPTER_REPORT_SIGNING_KEY,
+        help=(
+            "Environment variable containing the HMAC verification key "
+            f"(default: {_ENV_ADAPTER_REPORT_SIGNING_KEY})"
+        ),
+    )
+    providers_report_parser.add_argument(
+        "--json", action="store_true", help="Emit machine-readable verification"
+    )
+
     transitions_parser = sub.add_parser(
         "transitions",
         help="Operator triage and release of stuck (hard-blocked) transitions",
@@ -1778,6 +2027,14 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_run(args.config, args.child_command)
     if args.command == "migrate":
         return cmd_migrate(args)
+    if args.command == "state":
+        if args.state_command == "migrate":
+            return cmd_state_migrate(args)
+    if args.command == "providers":
+        if args.providers_command == "verify":
+            return cmd_providers_verify(args)
+        if args.providers_command == "verify-report":
+            return cmd_providers_verify_report(args)
     if args.command == "transitions":
         if args.transitions_command == "list":
             return cmd_transitions_list(args)

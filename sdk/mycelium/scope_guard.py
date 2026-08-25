@@ -24,11 +24,13 @@ from mycelium.loop_guard import (
     enforce_run_identity,
     resolve_loop_scope_key,
 )
+from mycelium.storage.atomic_state import AtomicStateBackend, NamespacedAtomicStorage
 from mycelium.storage.json_file import LockedJsonDictFile
 from mycelium.tool_boundary import ToolBoundaryError
 
 P = ParamSpec("P")
 R = TypeVar("R")
+T = TypeVar("T")
 
 ON_VIOLATION_SOFT = "soft"
 ON_VIOLATION_HARD = "hard"
@@ -103,6 +105,13 @@ class ScopeGuardStorage:
     def set(self, state: ScopeRunState) -> None:
         raise NotImplementedError
 
+    def update(
+        self,
+        scope_key: str,
+        fn: Callable[[ScopeRunState | None], tuple[ScopeRunState, T]],
+    ) -> T:
+        raise NotImplementedError
+
     def list_all(self) -> list[ScopeRunState]:
         raise NotImplementedError
 
@@ -123,6 +132,19 @@ class InMemoryScopeGuardStorage(ScopeGuardStorage):
         with self._lock:
             state.updated_at = time.time()
             self._entries[state.scope_key] = ScopeRunState.from_dict(state.to_dict())
+
+    def update(
+        self,
+        scope_key: str,
+        fn: Callable[[ScopeRunState | None], tuple[ScopeRunState, T]],
+    ) -> T:
+        with self._lock:
+            raw = self._entries.get(scope_key)
+            existing = None if raw is None else ScopeRunState.from_dict(raw.to_dict())
+            state, result = fn(existing)
+            state.updated_at = time.time()
+            self._entries[scope_key] = ScopeRunState.from_dict(state.to_dict())
+            return result
 
     def list_all(self) -> list[ScopeRunState]:
         with self._lock:
@@ -152,12 +174,69 @@ class FileScopeGuardStorage(ScopeGuardStorage):
         with self._lock:
             self._file.read_modify_write(mutate)
 
+    def update(
+        self,
+        scope_key: str,
+        fn: Callable[[ScopeRunState | None], tuple[ScopeRunState, T]],
+    ) -> T:
+        def mutate(data: dict[str, dict[str, Any]]) -> T:
+            raw = data.get(scope_key)
+            existing = None if raw is None else ScopeRunState.from_dict(raw)
+            state, result = fn(existing)
+            state.updated_at = time.time()
+            data[scope_key] = state.to_dict()
+            return result
+
+        with self._lock:
+            return self._file.read_modify_write(mutate)
+
     def list_all(self) -> list[ScopeRunState]:
         def read(data: dict[str, dict[str, Any]]) -> list[ScopeRunState]:
             return [ScopeRunState.from_dict(raw) for raw in data.values()]
 
         with self._lock:
             return self._file.read_modify_write_no_save(read)
+
+
+class AtomicScopeGuardStorage(ScopeGuardStorage):
+    """Frozen scope grants stored through the shared CAS backend."""
+
+    def __init__(
+        self,
+        backend: AtomicStateBackend,
+        *,
+        namespace: str = "scope_guard",
+    ) -> None:
+        self._storage = NamespacedAtomicStorage(
+            backend,
+            namespace,
+            from_dict=ScopeRunState.from_dict,
+            to_dict=lambda state: state.to_dict(),
+        )
+
+    def get(self, scope_key: str) -> ScopeRunState | None:
+        return self._storage.get(scope_key)
+
+    def set(self, state: ScopeRunState) -> None:
+        state.updated_at = time.time()
+        self._storage.set(state.scope_key, state)
+
+    def update(
+        self,
+        scope_key: str,
+        fn: Callable[[ScopeRunState | None], tuple[ScopeRunState, T]],
+    ) -> T:
+        def mutate(
+            existing: ScopeRunState | None,
+        ) -> tuple[ScopeRunState, T]:
+            state, result = fn(existing)
+            state.updated_at = time.time()
+            return state, result
+
+        return self._storage.update_optional(scope_key, mutate)
+
+    def list_all(self) -> list[ScopeRunState]:
+        return self._storage.list_all()
 
 
 class ScopeGuard:
@@ -224,23 +303,25 @@ class ScopeGuard:
             raise ValueError(
                 "ScopeGuard.bind requires an explicit grant or a default_grant"
             )
-        existing = self._storage.get(key)
-        if existing is not None:
-            if not resolved.is_at_most_as_permissive_as(existing.grant):
-                raise ScopeWidenRefusedError(
-                    f"ScopeGuard: refused to widen allowlist for run {key!r} "
-                    f"(tools cannot expand mid-run)"
+        def bind_atomic(
+            existing: ScopeRunState | None,
+        ) -> tuple[ScopeRunState, ScopeRunState]:
+            if existing is not None:
+                if not resolved.is_at_most_as_permissive_as(existing.grant):
+                    raise ScopeWidenRefusedError(
+                        f"ScopeGuard: refused to widen allowlist for run {key!r} "
+                        f"(tools cannot expand mid-run)"
+                    )
+                state = ScopeRunState(
+                    scope_key=key,
+                    grant=resolved,
+                    bound_at=existing.bound_at,
                 )
-            state = ScopeRunState(
-                scope_key=key,
-                grant=resolved,
-                bound_at=existing.bound_at,
-            )
-            self._storage.set(state)
-            return state
-        state = ScopeRunState(scope_key=key, grant=resolved)
-        self._storage.set(state)
-        return state
+            else:
+                state = ScopeRunState(scope_key=key, grant=resolved)
+            return state, state
+
+        return self._storage.update(key, bind_atomic)
 
     def check(
         self,
@@ -367,6 +448,7 @@ __all__ = [
     "ON_VIOLATION_MODES",
     "ON_VIOLATION_SOFT",
     "VIOLATION_TOOL",
+    "AtomicScopeGuardStorage",
     "FileScopeGuardStorage",
     "InMemoryScopeGuardStorage",
     "ScopeGrant",

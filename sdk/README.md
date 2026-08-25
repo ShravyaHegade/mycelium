@@ -20,6 +20,12 @@ currency); SQLite + Redis/Postgres; DTTR; worker-death detection; and lease auto
 
 ## One painful bug → a few lines of config
 
+Prefer agent-assisted setup? The source repository includes the
+[`mycelium-setup`](../.agents/skills/mycelium-setup/SKILL.md) skill. A coding
+agent using it can inspect the application, fill/merge YAML, wire the real tool
+boundary, add tests, and run Doctor/Verify. It remains fail-closed for secrets,
+business identity, and provider authority that cannot be safely inferred.
+
 **LangGraph Cloud redispatches a long tool call while the first is still running.** Both complete. You pay twice. Side effects run twice. [langgraph#7417](https://github.com/langchain-ai/langgraph/issues/7417) — catalog class **AF-002**.
 
 Mycelium’s answer is a provider-reconciled, operator-releaseable, auditable **execution ledger** (the transition envelope under AF-002): **any tool, any provider** — prove run-or-not and enforce **at-most-once**. Claim before the side effect, hold a **lease** while work is in flight, record **terminal state**, and **hard-block** (or reconcile with the provider) when a mutating redispatch would be unsafe. Same key while in-flight → poll; completed → return stored; ambiguous mutate → stop. Not “idempotency key + cached result” alone.
@@ -566,8 +572,10 @@ the destination-aware derivation.
 ### Ledger schema migrations
 
 Ledger schema 2 adds durable `effect_id`, `request_id_aliases`, and
-`schema_version`. Older rows remain readable without migration, but deployments
-that retain durable ledgers can rewrite them explicitly:
+`schema_version`. The top-level `schema_version` field is the ledger row's
+versioned envelope; there is no separate wrapper. Older rows remain readable
+without migration, but deployments that retain durable ledgers can rewrite them
+explicitly:
 
 ```bash
 # Read-only preview. Repeat the storage flag for the apply command.
@@ -584,11 +592,16 @@ The v1→v2 rule sets a missing `effect_id` to the existing `request_id`, sets
 `request_id_aliases` to include that canonical request id, and writes
 `schema_version: 2`; it never invents an empty identity. Planning does not
 rewrite ledger rows, application is idempotent, unsupported future versions
-fail closed, and active
+fail closed during both normal reads and migration planning, and active
 `IN_FLIGHT` rows are refused unless `--allow-active` is given after workers are
 confirmed stopped. The same `--file`, `--sqlite`, `--redis-url`,
 `--postgres-dsn`, or `--config` storage selection used by operator commands is
 supported.
+
+`mycelium doctor` inspects durable ledger versions without creating tables or
+rewriting rows. With connectivity enabled it reports PASS for current rows,
+WARN when migration is available, and FAIL for malformed or unsupported future
+versions. `--no-connectivity` reports this check as SKIP.
 
 Rollback is restore-based: before `--apply`, snapshot/copy the file or SQLite
 database, take a Redis snapshot, or use a Postgres backup/transactional snapshot.
@@ -1053,6 +1066,39 @@ Like all reconcilers, `GmailReconciler` is strict about indexing lag: zero match
 send (e.g. to `…@mail.gmail.com`). A pre-transport `rfc822msgid:` lookup can
 then always miss → reconciler stays `UNKNOWN` (fail-closed; not a defect).
 Operator release is still required on that account class.
+
+#### Provider-adapter conformance and signed reports
+
+A false `NOT_EXECUTED` verdict is authority to run a consequential operation
+one more time. Before shipping a reconciler, run Mycelium's adversarial
+conformance kit. The shipped Gmail fixture covers exactly-one and zero matches,
+provider indexing lag, ambiguous errors/responses, duplicate matches, malformed
+handles, false `NOT_EXECUTED`, and forbidden provider writes:
+
+```console
+$ export MYCELIUM_ADAPTER_REPORT_SIGNING_KEY='from-your-secret-manager'
+$ mycelium providers verify gmail \
+    --key-id provider-ci-2026-01 \
+    --output gmail-adapter-report.json
+$ mycelium providers verify-report gmail-adapter-report.json --json
+```
+
+The JSON report is HMAC-SHA256 signed and binds the suite version, adapter
+version, SHA-256 of the adapter source, every case result, timestamp, and signer
+key id. `verify-report` rejects a bad signature, failed/missing case, old suite,
+or report whose source hash no longer matches the installed adapter.
+
+For another provider, implement `ProviderConformanceFixture`: supply a valid
+handle, malformed handles, an entry factory, adapter source bytes, and a
+provider-specific scripted client that consumes `ProviderObservation` values
+and records every read/write in `ProviderCallAudit`. Then call
+`create_adapter_verification_report(...)`. The generic runner decides the
+outcome; an adapter cannot receive verified status if uncertain evidence
+returns `NOT_EXECUTED` or the fixture observes a write.
+
+This report verifies synthetic adapter behavior, not the live provider account.
+Production credentials must still be restricted to read-only provider scopes;
+the report states this limitation explicitly.
 
 #### Field mapping for external verifiers
 
@@ -2095,6 +2141,54 @@ outcome_emit:
   # persistence: required
 ```
 
+### Unified durable guard state
+
+Configure one atomic state backend for every stateful guard instead of giving
+each guard a separate file or process-local dictionary:
+
+```yaml
+state_backend:
+  storage: postgres            # memory | file | redis | postgres
+  dsn_env: DATABASE_URL
+  namespace: payments-prod
+
+loop_guard: {}
+scope_guard:
+  allowed_tools: [lookup_invoice, send_payment]
+completion:
+  required: [payment_recorded]
+state_flush: {}
+audit_receipt:
+  signing_key_env: MYCELIUM_AUDIT_SIGNING_KEY
+```
+
+When `state_backend` is present, a stateful guard with no `storage` setting is
+automatically placed in its own namespace on that backend. This also applies to
+any of these five guards you enable later; no config duplication is needed. Use `storage: shared` to
+make the choice explicit, or set a guard's own `storage` to retain a legacy
+backend. `memory` is development-only, `file` is durable for one node, and
+Redis/Postgres provide multi-worker atomic compare-and-swap updates.
+
+A completely new guardrail type still needs a small typed adapter that defines
+how its state is serialized and atomically updated. It can reuse
+`NamespacedAtomicStorage`; the backend implementations themselves do not need
+to change.
+
+To move existing guard files or per-feature Redis/Postgres state safely:
+
+```console
+$ mycelium state migrate --plan --config mycelium.yaml
+$ mycelium state migrate --apply --config mycelium.yaml
+$ mycelium doctor --config mycelium.yaml --strict
+```
+
+During the copy, keep each old feature's `storage` configuration and add the
+new top-level `state_backend`. Stop workers so the source does not change, run
+the plan and apply commands, then remove each feature's `storage`/`path` (or set
+`storage: shared`) and restart. Migration never deletes or overwrites the old
+records, so rollback is switching the feature back to its old storage. It
+refuses conflicting destination records instead of guessing which copy wins.
+
 ### `mycelium doctor` (verify protection is real)
 
 Installing Mycelium does not prove a deployment is protected. `mycelium doctor`
@@ -2106,7 +2200,7 @@ $ mycelium doctor --config mycelium.yaml --strict --json   # CI gate
 ```
 
 It checks profile defaults, tool classification, business request identity,
-durable ActionLedger / outcome backends, run-id guard policies, completion and
+durable ActionLedger / outcome backends, the shared state backend, run-id guard policies, completion and
 budget adapter selection, secret-in-args scanning / fail-closed production,
 destination-policy coverage,
 and optional `deployment.topology`. It never executes

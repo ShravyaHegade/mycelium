@@ -100,6 +100,20 @@ Not Langfuse. Use both if you want traces and guards. Not an approvals inbox, ho
 
 ## Use it
 
+### Let your coding agent wire it
+
+This repository ships the discoverable
+[`mycelium-setup`](.agents/skills/mycelium-setup/SKILL.md) skill. Once the skill
+is available to the coding agent, the developer can simply ask: “Set up
+Mycelium in this project.” The agent inventories tools, classifies side effects,
+adds dependencies, creates or merges `mycelium.yaml`, wires the actual runtime
+boundary, adds tests, and runs Doctor/Verify.
+
+The workflow is intentionally fail-closed: it will not invent production
+secrets, business request identities, provider permissions, or authorization.
+It completes everything supported by repository evidence and reports only the
+specific host-owned input that genuinely cannot be derived.
+
 ```bash
 pip install mycelium-runtime
 pip install 'mycelium-runtime[langgraph]'  # automatic LangGraph runtime IDs
