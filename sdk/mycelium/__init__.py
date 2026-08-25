@@ -248,7 +248,29 @@ from mycelium.outcome_emit import (
     compute_dttr_from_storage,
 )
 from mycelium.protect import protect, protect_sync
-from mycelium.providers import GmailReconciler, canonicalize_message_id
+from mycelium.provider_conformance import (
+    ADAPTER_REPORT_SCHEMA_VERSION,
+    ADAPTER_REPORT_SIGNATURE_ALGORITHM,
+    PROVIDER_CONFORMANCE_SUITE_VERSION,
+    REQUIRED_PROVIDER_CONFORMANCE_CASES,
+    AdapterConformanceCase,
+    AdapterVerificationReport,
+    ProviderCallAudit,
+    ProviderConformanceFixture,
+    ProviderObservation,
+    adapter_report_is_verified,
+    adapter_report_json,
+    adapter_report_matches_fixture,
+    create_adapter_verification_report,
+    run_provider_conformance_cases,
+    verify_adapter_report_signature,
+)
+from mycelium.providers import (
+    GmailConformanceFixture,
+    GmailReconciler,
+    canonicalize_message_id,
+    get_provider_conformance_fixture,
+)
 from mycelium.reconcile import Reconciler, ReconcileResult, ReconcileStatus
 from mycelium.schema import SchemaBuildError
 from mycelium.scope_guard import (
@@ -491,7 +513,24 @@ __all__ = [
     "unregister_decision_predicate",
     "reset_decision_engine",
     "GmailReconciler",
+    "GmailConformanceFixture",
     "canonicalize_message_id",
+    "get_provider_conformance_fixture",
+    "ADAPTER_REPORT_SCHEMA_VERSION",
+    "ADAPTER_REPORT_SIGNATURE_ALGORITHM",
+    "PROVIDER_CONFORMANCE_SUITE_VERSION",
+    "REQUIRED_PROVIDER_CONFORMANCE_CASES",
+    "AdapterConformanceCase",
+    "AdapterVerificationReport",
+    "ProviderCallAudit",
+    "ProviderConformanceFixture",
+    "ProviderObservation",
+    "adapter_report_is_verified",
+    "adapter_report_json",
+    "adapter_report_matches_fixture",
+    "create_adapter_verification_report",
+    "run_provider_conformance_cases",
+    "verify_adapter_report_signature",
     "get_ledger",
     "ledger",
     "ledger_sync",

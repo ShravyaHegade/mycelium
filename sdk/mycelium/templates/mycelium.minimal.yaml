@@ -10,6 +10,9 @@
 # Optional AF-011: destructive_confirm: {enabled: true, missing_policy: error}
 # Optional authority_window: {enabled: true, use_time_check: required}
 # Optional AF-012: use_time_currency: {enabled: true, missing_policy: error}
+# Stateful guards below share one backend. File is single-node; change it to
+#   Redis/Postgres for multiple workers. Guards added later inherit it when
+#   their section omits storage.
 #
 # side_effect_class required only for tools listed under action_ledger.tools:
 #   read | idempotent_mutate | keyed_mutate | non_idempotent_mutate | irreversible
@@ -20,6 +23,11 @@ transition:
   agent_id: "<TODO: fill with your agent id — used in transition keys and receipts>"
   policy_version: "<TODO: fill with your policy version string, e.g. 2026.07.1>"
   reclaim_requires_death_signal: true
+
+state_backend:
+  storage: file
+  path: ./mycelium-guard-state.json
+  namespace: mycelium
 
 action_ledger:
   storage: sqlite
@@ -34,14 +42,11 @@ task_ledger:
   tasks:
     - process_invoice
 
-state_flush:
-  storage: file
-  path: ./mycelium-state.json
+state_flush: {}  # inherits state_backend
 
 audit_receipt:
   signing_key_env: MYCELIUM_SIGNING_KEY
-  storage: file
-  path: ./mycelium-receipts.jsonl
+  # inherits state_backend
 
 tools:
   fetch_customer:
@@ -91,8 +96,7 @@ tasks:
       - invoice_id
 
 loop_guard:
-  storage: file
-  path: ./mycelium-loop.json
+  # inherits state_backend
   escalate_after_soft: 1
   missing_run_id_policy: error  # warn (default) | error
   consecutive_soft:
@@ -103,8 +107,7 @@ loop_guard:
     irreversible: 2
 
 # completion:                         # AF-007 opt-in; LangGraph END auto-wired
-#   storage: file
-#   path: ./mycelium-completion.json
+#   # storage omitted: inherits state_backend
 #   required:
 #     - id: charge_customer
 #   optional:

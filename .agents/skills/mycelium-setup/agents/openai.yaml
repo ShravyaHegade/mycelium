@@ -1,0 +1,4 @@
+interface:
+  display_name: "Set Up Mycelium"
+  short_description: "Wire Mycelium safely into an agent project"
+  default_prompt: "Use $mycelium-setup to inspect this project and complete the Mycelium integration, configuration, and verification."

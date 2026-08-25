@@ -331,7 +331,11 @@ than the code makes.
   before the tool runs.
 - **Trusting the reconciler.** If your reconciler returns `NOT_EXECUTED` when
   the effect actually happened, the runtime will re-execute once. Reconcilers
-  are read-only *by contract*, not enforced by Mycelium.
+  are read-only *by contract*, not enforced against live provider credentials.
+  The provider conformance kit tests lag, ambiguity, duplicates, malformed
+  handles, false `NOT_EXECUTED`, and synthetic forbidden writes, and emits a
+  signed source-bound report. It cannot prove that a deployed provider token
+  has read-only scopes; operators must enforce those scopes separately.
 - **In-memory ledgers across processes.** `storage: memory` claims are not
   durable beyond the process. Mycelium emits a warning when a side-effecting
   tool is configured with memory storage; the guard only holds within the

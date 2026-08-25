@@ -20,6 +20,12 @@ currency); SQLite + Redis/Postgres; DTTR; worker-death detection; and lease auto
 
 ## One painful bug → a few lines of config
 
+Prefer agent-assisted setup? The source repository includes the
+[`mycelium-setup`](../.agents/skills/mycelium-setup/SKILL.md) skill. A coding
+agent using it can inspect the application, fill/merge YAML, wire the real tool
+boundary, add tests, and run Doctor/Verify. It remains fail-closed for secrets,
+business identity, and provider authority that cannot be safely inferred.
+
 **LangGraph Cloud redispatches a long tool call while the first is still running.** Both complete. You pay twice. Side effects run twice. [langgraph#7417](https://github.com/langchain-ai/langgraph/issues/7417) — catalog class **AF-002**.
 
 Mycelium’s answer is a provider-reconciled, operator-releaseable, auditable **execution ledger** (the transition envelope under AF-002): **any tool, any provider** — prove run-or-not and enforce **at-most-once**. Claim before the side effect, hold a **lease** while work is in flight, record **terminal state**, and **hard-block** (or reconcile with the provider) when a mutating redispatch would be unsafe. Same key while in-flight → poll; completed → return stored; ambiguous mutate → stop. Not “idempotency key + cached result” alone.
@@ -1060,6 +1066,39 @@ Like all reconcilers, `GmailReconciler` is strict about indexing lag: zero match
 send (e.g. to `…@mail.gmail.com`). A pre-transport `rfc822msgid:` lookup can
 then always miss → reconciler stays `UNKNOWN` (fail-closed; not a defect).
 Operator release is still required on that account class.
+
+#### Provider-adapter conformance and signed reports
+
+A false `NOT_EXECUTED` verdict is authority to run a consequential operation
+one more time. Before shipping a reconciler, run Mycelium's adversarial
+conformance kit. The shipped Gmail fixture covers exactly-one and zero matches,
+provider indexing lag, ambiguous errors/responses, duplicate matches, malformed
+handles, false `NOT_EXECUTED`, and forbidden provider writes:
+
+```console
+$ export MYCELIUM_ADAPTER_REPORT_SIGNING_KEY='from-your-secret-manager'
+$ mycelium providers verify gmail \
+    --key-id provider-ci-2026-01 \
+    --output gmail-adapter-report.json
+$ mycelium providers verify-report gmail-adapter-report.json --json
+```
+
+The JSON report is HMAC-SHA256 signed and binds the suite version, adapter
+version, SHA-256 of the adapter source, every case result, timestamp, and signer
+key id. `verify-report` rejects a bad signature, failed/missing case, old suite,
+or report whose source hash no longer matches the installed adapter.
+
+For another provider, implement `ProviderConformanceFixture`: supply a valid
+handle, malformed handles, an entry factory, adapter source bytes, and a
+provider-specific scripted client that consumes `ProviderObservation` values
+and records every read/write in `ProviderCallAudit`. Then call
+`create_adapter_verification_report(...)`. The generic runner decides the
+outcome; an adapter cannot receive verified status if uncertain evidence
+returns `NOT_EXECUTED` or the fixture observes a write.
+
+This report verifies synthetic adapter behavior, not the live provider account.
+Production credentials must still be restricted to read-only provider scopes;
+the report states this limitation explicitly.
 
 #### Field mapping for external verifiers
 
