@@ -3166,14 +3166,55 @@ def _parse_verify(data: dict[str, Any]) -> dict[str, Any] | None:
         return None
     if not isinstance(raw, dict):
         raise ConfigError("'verify' must be a mapping")
-    unknown = set(raw) - {"allow_temporary_schema"}
+    unknown = set(raw) - {"allow_temporary_schema", "cluster"}
     if unknown:
         names = ", ".join(sorted(str(name) for name in unknown))
         raise ConfigError(f"unsupported 'verify' option(s): {names}")
     allow = raw.get("allow_temporary_schema", False)
     if not isinstance(allow, bool):
         raise ConfigError("'verify.allow_temporary_schema' must be a boolean")
-    return {"allow_temporary_schema": allow}
+    parsed: dict[str, Any] = {"allow_temporary_schema": allow}
+    cluster = raw.get("cluster")
+    if cluster is None:
+        return parsed
+    if not isinstance(cluster, dict):
+        raise ConfigError("'verify.cluster' must be a mapping")
+    cluster_unknown = set(cluster) - {"enabled", "provider", "attestation"}
+    if cluster_unknown:
+        names = ", ".join(sorted(str(name) for name in cluster_unknown))
+        raise ConfigError(f"unsupported 'verify.cluster' option(s): {names}")
+    enabled = cluster.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ConfigError("'verify.cluster.enabled' must be a boolean")
+
+    provider = cluster.get("provider", {})
+    if not isinstance(provider, dict):
+        raise ConfigError("'verify.cluster.provider' must be a mapping")
+    provider_unknown = set(provider) - {
+        "adapter",
+        "name",
+        "sandbox",
+        "base_url_env",
+        "token_env",
+        "timeout",
+    }
+    if provider_unknown:
+        names = ", ".join(sorted(str(name) for name in provider_unknown))
+        raise ConfigError(f"unsupported 'verify.cluster.provider' option(s): {names}")
+
+    attestation = cluster.get("attestation", {})
+    if not isinstance(attestation, dict):
+        raise ConfigError("'verify.cluster.attestation' must be a mapping")
+    attestation_unknown = set(attestation) - {"signing_key_env", "key_id"}
+    if attestation_unknown:
+        names = ", ".join(sorted(str(name) for name in attestation_unknown))
+        raise ConfigError(f"unsupported 'verify.cluster.attestation' option(s): {names}")
+    parsed["cluster"] = {
+        "enabled": enabled,
+        "provider": dict(provider),
+        "attestation": dict(attestation),
+    }
+    return parsed
 
 
 def secret_args_policy_from_mapping(raw: dict[str, Any]) -> SecretArgsPolicy:

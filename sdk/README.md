@@ -2242,6 +2242,68 @@ only when every selected scenario passed; Doctor `operator_asserted` /
 `not_verifiable` evidence is never promoted to “proven.” File and SQLite are
 labeled single-node; PostgreSQL is the recommended distributed backend.
 
+#### Optional cluster verification
+
+Cluster verification is deliberately separate and is never run by ordinary
+`mycelium verify --scenario ...` commands. Enable it only in a test/change-approval
+environment with a shared Redis or PostgreSQL ledger and an external provider's
+**sandbox** API:
+
+```yaml
+deployment:
+  topology: multi_node
+
+verify:
+  cluster:
+    enabled: true
+    provider:
+      adapter: http_json
+      name: payments-sandbox
+      sandbox: true
+      base_url_env: PAYMENTS_SANDBOX_URL
+      token_env: PAYMENTS_SANDBOX_TOKEN  # optional
+      timeout: 5
+    attestation:
+      signing_key_env: MYCELIUM_DEPLOYMENT_ATTESTATION_KEY
+      key_id: ci-2026-08
+```
+
+```console
+$ export PAYMENTS_SANDBOX_URL=https://sandbox.example.test/mycelium-verify
+$ export MYCELIUM_DEPLOYMENT_ATTESTATION_KEY='a CI-managed secret'
+$ mycelium verify --config mycelium.yaml --cluster --strict --json \
+    --attestation-output deployment-attestation.json
+$ mycelium verify --verify-attestation deployment-attestation.json \
+    --attestation-key-env MYCELIUM_DEPLOYMENT_ATTESTATION_KEY --json
+```
+
+The built-in `http_json` adapter uses a narrow sandbox contract:
+
+- `PUT /operations/{operation_id}` executes an idempotent sandbox operation.
+- `GET /operations/{operation_id}` is read-only and returns `404` when absent.
+- A completed response has JSON `status` equal to `completed`, `complete`,
+  `succeeded`, or `success`.
+
+The verifier creates a unique ledger namespace, launches two subprocess workers,
+interrupts their backend connection through a verifier-owned TCP proxy, restores
+it, lets worker A reach the sandbox provider, hard-kills A, and requires worker B
+to reconcile the recorded operation without executing the provider body again.
+It signs a versioned attestation containing the config digest and every check.
+Secrets and provider tokens are read from environment variables and are not
+included in the attestation.
+
+`--keep-artifacts` is for debugging: it deliberately makes the signed cleanup
+check fail because namespaced backend evidence was retained. The sandbox
+operation itself is not deleted; use a sandbox with automatic test-data expiry.
+
+The command refuses to start unless all opt-ins and prerequisites are present:
+`verify.cluster.enabled: true`, `deployment.topology: multi_node`, Redis or
+PostgreSQL, `provider.sandbox: true`, a sandbox URL, and an attestation key plus
+key id. Use only a private test backend. The built-in fault proxy rejects
+`rediss://` and hostname-verifying PostgreSQL TLS modes because rewriting those
+endpoints would invalidate their certificates. Normal Verify remains synthetic
+and does not contact any provider.
+
 **Minimum integration (3 steps):**
 
 ```yaml

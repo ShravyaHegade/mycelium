@@ -412,11 +412,16 @@ from mycelium.use_time_currency import (
     use_time_facts,
 )
 from mycelium.verify import (
+    ClusterVerificationResult,
+    DeploymentAttestation,
     IsolationRefused,
     VerificationEvidence,
     VerificationReport,
     VerificationStatus,
+    deployment_attestation_is_verified,
+    run_cluster_verify,
     run_verify,
+    verify_deployment_attestation_signature,
 )
 
 try:
@@ -632,11 +637,16 @@ __all__ = [
     "exit_code_for_report",
     "run_doctor",
     "run_doctor_on_config",
+    "ClusterVerificationResult",
+    "DeploymentAttestation",
     "IsolationRefused",
     "VerificationEvidence",
     "VerificationReport",
     "VerificationStatus",
+    "deployment_attestation_is_verified",
+    "run_cluster_verify",
     "run_verify",
+    "verify_deployment_attestation_signature",
     "SideEffectClass",
     "SideEffectBoundary",
     "Spendability",
