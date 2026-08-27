@@ -1266,8 +1266,81 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
-    """Empirical verification using synthetic operations only."""
+    """Empirical verification, with an explicitly optional cluster mode."""
     import sys
+
+    if args.verify_attestation:
+        from mycelium.verify.cluster import (
+            DeploymentAttestation,
+            deployment_attestation_is_verified,
+        )
+
+        if args.cluster or args.scenario:
+            print(
+                "error: --verify-attestation cannot be combined with --cluster or --scenario",
+                file=sys.stderr,
+            )
+            return 2
+        key_env = str(args.attestation_key_env or "")
+        signing_key = os.environ.get(key_env, "") if key_env else ""
+        try:
+            if not signing_key:
+                raise ValueError(
+                    "--attestation-key-env must name a non-empty environment variable"
+                )
+            attestation = DeploymentAttestation.from_dict(
+                json.loads(args.verify_attestation.read_text(encoding="utf-8"))
+            )
+            valid = deployment_attestation_is_verified(attestation, signing_key)
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+            print(f"error: invalid deployment attestation: {exc}", file=sys.stderr)
+            return 2
+        payload = {
+            "attestation_id": attestation.attestation_id,
+            "status": attestation.status,
+            "signature_valid": valid,
+            "signer_key_id": attestation.signer_key_id,
+        }
+        print(json.dumps(payload, indent=2, sort_keys=True) if args.json else payload)
+        return 0 if valid else 1
+
+    if bool(args.cluster):
+        from mycelium.verify.cluster import cluster_exit_code, run_cluster_verify
+
+        if args.scenario:
+            print("error: --cluster cannot be combined with --scenario", file=sys.stderr)
+            return 2
+        result = run_cluster_verify(
+            args.config,
+            timeout_seconds=float(args.timeout),
+            connectivity=not args.no_connectivity,
+            keep_artifacts=bool(args.keep_artifacts),
+        )
+        rendered = json.dumps(result.to_dict(), indent=2, sort_keys=True)
+        if args.json:
+            print(rendered)
+        else:
+            print(f"Cluster verification: {result.status}")
+            if result.attestation is not None:
+                print(f"Attestation: {result.attestation.attestation_id}")
+                for check in result.attestation.checks:
+                    print(f"  [{check.status}] {check.name}: {check.detail}")
+            if result.error:
+                print(f"Error: {result.error}", file=sys.stderr)
+        if args.attestation_output:
+            if result.attestation is None:
+                print("error: no attestation was produced", file=sys.stderr)
+            else:
+                try:
+                    args.attestation_output.write_text(
+                        json.dumps(result.attestation.to_dict(), indent=2, sort_keys=True)
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                except OSError as exc:
+                    print(f"error: could not write attestation: {exc}", file=sys.stderr)
+                    return 2
+        return cluster_exit_code(result)
 
     from mycelium.verify import exit_code_for_verify, run_verify
     from mycelium.verify.render import write_report
@@ -1347,12 +1420,12 @@ def main(argv: list[str] | None = None) -> int:
 
     verify_parser = sub.add_parser(
         "verify",
-        help="Empirically verify production guarantees with synthetic scenarios",
+        help="Empirically verify guarantees with synthetic or opt-in cluster scenarios",
         description=(
             "Run Doctor, then exercise Mycelium's production guarantees against "
             "the configured storage backend using synthetic operations only. "
-            "Never executes application tools, never calls an LLM, never contacts "
-            "a real business provider. "
+            "Normal mode never executes application tools, calls an LLM, or contacts "
+            "a provider. Optional --cluster requires an explicitly configured sandbox. "
             "CI: mycelium verify --config mycelium.yaml --scenario all --strict --json"
         ),
     )
@@ -1374,6 +1447,30 @@ def main(argv: list[str] | None = None) -> int:
             "secret-in-args, entity-guard, destructive-confirm, "
             "authority-window, use-time-currency, or all"
         ),
+    )
+    verify_parser.add_argument(
+        "--cluster",
+        action="store_true",
+        help=(
+            "Run the optional two-worker cluster fault test and emit a signed "
+            "deployment attestation; requires verify.cluster.enabled: true"
+        ),
+    )
+    verify_parser.add_argument(
+        "--attestation-output",
+        type=Path,
+        help="Also write the signed cluster attestation JSON to this file",
+    )
+    verify_parser.add_argument(
+        "--verify-attestation",
+        type=Path,
+        metavar="FILE",
+        help="Verify a previously produced deployment attestation instead of running tests",
+    )
+    verify_parser.add_argument(
+        "--attestation-key-env",
+        metavar="ENV",
+        help="Environment variable containing the key for --verify-attestation",
     )
     verify_parser.add_argument(
         "--json",

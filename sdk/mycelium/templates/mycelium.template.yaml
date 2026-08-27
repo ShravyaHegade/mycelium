@@ -138,6 +138,21 @@ state_backend:
 # ---------------------------------------------------------------------------
 # verify:
 #   allow_temporary_schema: false
+#   # Optional deployment test. Ordinary `mycelium verify --scenario ...`
+#   # never runs this. Use only a private Redis/Postgres test backend and a
+#   # provider sandbox implementing PUT/GET /operations/{operation_id}.
+#   cluster:
+#     enabled: false
+#     provider:
+#       adapter: http_json
+#       name: provider-sandbox
+#       sandbox: true
+#       base_url_env: MYCELIUM_VERIFY_SANDBOX_URL
+#       token_env: MYCELIUM_VERIFY_SANDBOX_TOKEN
+#       timeout: 5
+#     attestation:
+#       signing_key_env: MYCELIUM_DEPLOYMENT_ATTESTATION_KEY
+#       key_id: ci-key-id
 
 # ---------------------------------------------------------------------------
 # integrations (optional framework metadata; core remains framework-agnostic)
