@@ -5,6 +5,34 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
 
 ## Unreleased
 
+## 1.36.0 (2026-08-27)
+
+MINOR: adds an opt-in deployment verification layer for teams that want to
+exercise Mycelium across real shared infrastructure before approving a change.
+Ordinary `mycelium verify --scenario ...` remains synthetic and unchanged.
+
+### Added
+
+- Optional `mycelium verify --cluster` mode for Redis/PostgreSQL deployments.
+  It requires explicit `verify.cluster.enabled: true` and
+  `deployment.topology: multi_node`, launches exactly two subprocess workers,
+  interrupts their real backend connection through a verifier-owned TCP proxy,
+  hard-kills worker A after a sandbox provider operation, and requires worker B
+  to reconcile the recorded operation without executing the provider body a
+  second time.
+- Fail-closed `http_json` sandbox-provider adapter using idempotent
+  `PUT /operations/{operation_id}` and read-only
+  `GET /operations/{operation_id}` calls. Provider URLs, tokens, and attestation
+  keys are read from named environment variables and excluded from reports.
+- Versioned HMAC-SHA256 deployment attestations binding the configuration
+  digest, backend, topology, namespace, provider adapter, worker count, cleanup,
+  and the complete required check set. CI and change-approval systems can
+  validate a report with `mycelium verify --verify-attestation FILE
+  --attestation-key-env ENV`.
+- Cluster configuration examples, safety limitations, dedicated unit tests, and
+  a live Redis integration test covering interruption, hard worker death,
+  reconciliation, duplicate prevention, cleanup, and signature verification.
+
 ## 1.35.0 (2026-08-25)
 
 MINOR: one coherent trust-boundary batch: closes the remaining effect-commit
