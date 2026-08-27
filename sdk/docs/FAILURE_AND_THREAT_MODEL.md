@@ -410,6 +410,7 @@ are cited once. "Where documented" links the README section.
 | Use-time currency (when enabled) | README § [Use-time currency (AF-012)](../README.md#use-time-currency-af-012) | `test_use_time_currency.py` · `test_verify.py::test_cli_smoke_each_scenario` (`use-time-currency`) |
 | Single-key state machine invariants (executions ≤ 1 + not-executed verdicts; COMPLETED terminal; CAS out of IN_FLIGHT) | this doc, § C / [NOT_EXECUTED reset CAS](../README.md#not_executed-reset-cas-v118) | `test_property_transitions.py::test_transition_key_invariants` (Hypothesis, file + Redis) · `test_payment_provider_mock.py::test_redispatch_storm_never_double_charges` |
 | Deterministic simulation invariants (legacy + exhaustive interleavings) | README § [`mycelium verify`](../README.md#mycelium-verify-exercise-the-guarantees) | `test_simulation.py::test_simulation_scenario_passes_on_shared_backend` · `test_simulation.py::test_state_machine_exhaustive_scenario_passes` · `test_verify.py::test_all_order_sqlite` |
+| Optional two-worker cluster interruption, hard-kill recovery, sandbox reconciliation, cleanup, and signed deployment attestation | README § [Optional cluster verification](../README.md#optional-cluster-verification) | `test_cluster_verify.py::test_live_redis_cluster_flow_when_configured` · `test_cluster_verify.py::test_backend_fault_proxy_interrupts_and_restores_connections` · `test_cluster_verify.py::test_cli_verifies_signed_attestation` |
 
 <sup>1</sup> `test_postgres_storage_atomic_claim` runs when `psycopg` is
 installed and `MYCELIUM_TEST_POSTGRES_DSN` is set; it skips otherwise.
@@ -503,6 +504,19 @@ Still can go wrong — even with everything above configured correctly:
   business provider. Some infrastructure properties (Redis persistence,
   host call-site identity) remain operator assertions or not verifiable
   and are not converted into “proven” by a passing Verify report.
+- **Cluster verification is opt-in deployment evidence, not a production
+  proof.** `mycelium verify --cluster` requires an explicit multi-node
+  Redis/PostgreSQL test deployment, provider sandbox, and attestation key. It
+  launches two workers, severs their backend connection, kills one after the
+  sandbox effect, and requires the survivor to reconcile without re-executing
+  the provider body. The signed attestation binds the tested configuration and
+  complete check set, but cannot prove that production behaves like the
+  sandbox, that Redis persistence is enabled, that a signing key is
+  uncompromised, or that failures outside the injected sequence are safe. The
+  built-in TCP proxy rejects `rediss://` and hostname-verifying PostgreSQL TLS;
+  the sandbox operation is retained and should expire under provider test-data
+  policy. Ordinary `--scenario` verification remains synthetic and never
+  contacts a provider.
 
 
 ---
