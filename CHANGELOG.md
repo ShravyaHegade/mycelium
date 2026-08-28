@@ -5,6 +5,13 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
 
 ## Unreleased
 
+### Added
+
+- Bounded transition lifecycle operations: Postgres connection pooling and
+  server-side filtered keyset pagination, Redis status/start/finish sorted-set
+  indexes with legacy backfill, configurable retention age, sanitized NDJSON
+  export/archive, and safe-by-default `mycelium transitions prune --dry-run`.
+
 ## 1.36.0 (2026-08-27)
 
 MINOR: adds an opt-in deployment verification layer for teams that want to
@@ -194,6 +201,15 @@ MINOR: side-effect guardrails batch for unsafe / irreversible writes.
 Secret-in-args, destination policy, destructive confirm, authority-window
 expiry, and use-time currency ship together so decide-time authority
 cannot authorize a stale execute-time side effect.
+
+### Community contributions
+
+- **Contributor acknowledgement (added retroactively):** Thanks to
+  [@Mr-Neutr0n](https://github.com/Mr-Neutr0n) for improving release safety,
+  framework-support documentation, and allowed-path symlink handling in
+  [#88](https://github.com/mycelium-labs/mycelium/pull/88),
+  [#89](https://github.com/mycelium-labs/mycelium/pull/89), and
+  [#90](https://github.com/mycelium-labs/mycelium/pull/90).
 
 ### Added
 

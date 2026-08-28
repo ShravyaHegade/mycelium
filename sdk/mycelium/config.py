@@ -5,6 +5,7 @@ from __future__ import annotations
 import functools
 import importlib
 import inspect
+import os
 import re
 import warnings
 from collections.abc import Callable
@@ -136,6 +137,12 @@ from mycelium.outcome_emit import (
     InMemoryOutcomeStorage,
     OutcomeEmitter,
     OutcomeStorage,
+)
+from mycelium.outcome_export import (
+    FanoutOutcomeStorage,
+    OpenTelemetryOutcomeStorage,
+    PrometheusOutcomeStorage,
+    WebhookOutcomeStorage,
 )
 from mycelium.protect import protect, protect_sync
 from mycelium.scope_guard import (
@@ -1762,6 +1769,9 @@ class MyceliumConfig:
         if self.transition is not None:
             agent_id = self.transition.agent_id
         storage = self._build_outcome_storage(self.outcome_emit)
+        exporters = self._build_outcome_exporters(self.outcome_emit)
+        if exporters:
+            storage = FanoutOutcomeStorage(storage, *exporters)
         on_failure = _outcome_on_failure(
             self.outcome_emit, profile=self.profile
         )
@@ -1906,10 +1916,12 @@ class MyceliumConfig:
             except ValueError as exc:
                 raise ConfigError(str(exc)) from exc
             ttl = raw.get("in_flight_ttl", 604800)
+            retention = raw.get("retention_seconds")
             return RedisLedgerStorage(
                 url,
                 prefix=str(raw.get("prefix", "mycelium:action:")),
                 in_flight_ttl=float(ttl) if ttl is not None else None,
+                retention_seconds=float(retention) if retention is not None else None,
             )
         if storage_type == "postgres":
             from mycelium.storage._helpers import resolve_storage_url
@@ -1922,6 +1934,13 @@ class MyceliumConfig:
             return PostgresLedgerStorage(
                 dsn,
                 table=str(raw.get("table", "mycelium_action_ledger")),
+                pool_min_size=int(raw.get("pool_min_size", 1)),
+                pool_max_size=int(raw.get("pool_max_size", 10)),
+                retention_seconds=(
+                    float(raw["retention_seconds"])
+                    if raw.get("retention_seconds") is not None
+                    else None
+                ),
             )
         if storage_type == "sqlite":
             from mycelium.storage.sqlite_ledger import SqliteLedgerStorage
@@ -2051,6 +2070,58 @@ class MyceliumConfig:
             except ValueError as exc:
                 raise ConfigError(str(exc)) from exc
         raise ConfigError(f"unknown outcome_emit storage type: {storage_type!r}")
+
+    @staticmethod
+    def _build_outcome_exporters(raw: dict[str, Any]) -> list[OutcomeStorage]:
+        configured = raw.get("exporters", [])
+        if not isinstance(configured, list):
+            raise ConfigError("'outcome_emit.exporters' must be a list")
+        exporters: list[OutcomeStorage] = []
+        for index, item in enumerate(configured):
+            if not isinstance(item, dict):
+                raise ConfigError(
+                    f"'outcome_emit.exporters[{index}]' must be a mapping"
+                )
+            exporter_type = item.get("type")
+            try:
+                if exporter_type == "opentelemetry":
+                    exporters.append(OpenTelemetryOutcomeStorage())
+                elif exporter_type == "prometheus":
+                    exporters.append(PrometheusOutcomeStorage())
+                elif exporter_type == "webhook":
+                    from mycelium.storage._helpers import resolve_storage_url
+
+                    url = resolve_storage_url(item, url_key="url")
+                    headers = item.get("headers")
+                    if headers is not None and not isinstance(headers, dict):
+                        raise ConfigError(
+                            f"'outcome_emit.exporters[{index}].headers' must be a mapping"
+                        )
+                    secret = item.get("secret")
+                    secret_env = item.get("secret_env")
+                    if secret is None and secret_env:
+                        secret = os.environ.get(str(secret_env))
+                        if not secret:
+                            raise ConfigError(
+                                f"environment variable {secret_env!r} is not set"
+                            )
+                    exporters.append(
+                        WebhookOutcomeStorage(
+                            url,
+                            headers={str(k): str(v) for k, v in (headers or {}).items()},
+                            secret=str(secret) if secret is not None else None,
+                            timeout=float(item.get("timeout", 5.0)),
+                        )
+                    )
+                else:
+                    raise ConfigError(
+                        f"unknown outcome exporter type: {exporter_type!r}"
+                    )
+            except (ImportError, TypeError, ValueError) as exc:
+                raise ConfigError(
+                    f"outcome exporter {exporter_type!r} is invalid: {exc}"
+                ) from exc
+        return exporters
 
     def wrap_module(self, module: Any) -> Any:
         """

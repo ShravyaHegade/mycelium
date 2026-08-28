@@ -12,6 +12,8 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
+from mycelium.transition import TerminalOutcome
+
 _TEMPLATE_QUICKSTART = "mycelium.quickstart.yaml"
 _TEMPLATE_FULL = "mycelium.template.yaml"
 _TEMPLATE_MINIMAL = "mycelium.minimal.yaml"
@@ -414,26 +416,43 @@ def cmd_transitions_list(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     now = time.time()
+    outcome = TerminalOutcome(args.outcome) if args.outcome is not None else None
     entries = []
+    next_cursors: list[str] = []
     for ledger in ledgers:
-        entries.extend(
-            ledger.list_transitions(
+        if args.limit is not None or args.cursor is not None:
+            page = ledger.list_transitions_page(
+                limit=args.limit or 100,
+                cursor=args.cursor,
                 stuck=args.stuck,
                 tool=args.tool,
+                outcome=outcome,
                 parent_request_id=getattr(args, "parent", None),
             )
-        )
+            entries.extend(page.entries)
+            if page.next_cursor is not None:
+                next_cursors.append(page.next_cursor)
+        else:
+            entries.extend(
+                ledger.list_transitions(
+                    stuck=args.stuck,
+                    tool=args.tool,
+                    outcome=outcome,
+                    parent_request_id=getattr(args, "parent", None),
+                )
+            )
     entries.sort(key=lambda entry: entry.started_at)
     if args.json:
         from mycelium.secret_protection import sanitize_for_evidence
 
-        print(
-            json.dumps(
-                sanitize_for_evidence([_entry_row(entry, now) for entry in entries]),
-                indent=2,
-                default=str,
-            )
-        )
+        rows = sanitize_for_evidence([_entry_row(entry, now) for entry in entries])
+        payload: Any = rows
+        if args.limit is not None or args.cursor is not None:
+            payload = {
+                "transitions": rows,
+                "next_cursor": next_cursors[0] if len(next_cursors) == 1 else None,
+            }
+        print(json.dumps(payload, indent=2, default=str))
         return 0
     if not entries:
         print("no transitions found" + (" (stuck only)" if args.stuck else ""))
@@ -449,6 +468,97 @@ def cmd_transitions_list(args: argparse.Namespace) -> int:
         print(line)
         if args.stuck:
             print(f"    next: {_next_action_hint(entry, resolved)}")
+    return 0
+
+
+def cmd_transitions_export(args: argparse.Namespace) -> int:
+    from mycelium.config import ConfigError
+    from mycelium.secret_protection import sanitize_for_evidence
+    from mycelium.transition import TerminalOutcome
+
+    try:
+        ledgers = _operator_ledgers(args)
+        outcome = TerminalOutcome(args.outcome) if args.outcome else None
+        output = Path(args.output)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        count = 0
+        with output.open("w", encoding="utf-8") as handle:
+            for ledger in ledgers:
+                cursor: str | None = None
+                while True:
+                    page = ledger.list_transitions_page(
+                        limit=args.page_size,
+                        cursor=cursor,
+                        tool=args.tool,
+                        outcome=outcome,
+                    )
+                    for entry in page.entries:
+                        row = sanitize_for_evidence(entry.to_dict())
+                        handle.write(json.dumps(row, default=str, sort_keys=True) + "\n")
+                        count += 1
+                    cursor = page.next_cursor
+                    if cursor is None:
+                        break
+    except (ConfigError, OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(f"exported {count} transitions to {output}")
+    return 0
+
+
+def cmd_transitions_prune(args: argparse.Namespace) -> int:
+    from mycelium.budget_guard import parse_duration_seconds
+    from mycelium.config import ConfigError
+    from mycelium.secret_protection import sanitize_for_evidence
+    from mycelium.transition import TerminalOutcome
+
+    try:
+        ledgers = _operator_ledgers(args)
+        before = None
+        if args.older_than is not None:
+            before = time.time() - parse_duration_seconds(args.older_than)
+        outcomes = (
+            frozenset(TerminalOutcome(value) for value in args.outcome)
+            if args.outcome
+            else None
+        )
+        candidates: list[Any] = []
+        plans: list[tuple[Any, list[Any]]] = []
+        for ledger in ledgers:
+            selected, _ = ledger.prune_transitions(
+                before=before,
+                outcomes=outcomes,
+                dry_run=True,
+                limit=args.page_size,
+            )
+            candidates.extend(selected)
+            plans.append((ledger, selected))
+        if args.archive is not None:
+            archive = Path(args.archive)
+            archive.parent.mkdir(parents=True, exist_ok=True)
+            with archive.open("w", encoding="utf-8") as handle:
+                for entry in candidates:
+                    handle.write(
+                        json.dumps(
+                            sanitize_for_evidence(entry.to_dict()),
+                            default=str,
+                            sort_keys=True,
+                        )
+                        + "\n"
+                    )
+        deleted = 0
+        if args.execute:
+            for ledger, selected in plans:
+                deleted += ledger.delete_transitions(
+                    [entry.request_id for entry in selected]
+                )
+        mode = "would prune" if not args.execute else "pruned"
+        print(f"{mode} {len(candidates) if not args.execute else deleted} transitions")
+        if args.archive is not None:
+            print(f"archive: {args.archive}")
+    except (ConfigError, OSError, ValueError, NotImplementedError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     return 0
 
 
@@ -1734,6 +1844,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     list_parser.add_argument("--tool", default=None, help="Filter by tool name")
     list_parser.add_argument(
+        "--outcome",
+        choices=[item.value for item in TerminalOutcome],
+        default=None,
+        help="Filter by resolved terminal outcome",
+    )
+    list_parser.add_argument("--limit", type=int, default=None, help="Return one bounded page")
+    list_parser.add_argument("--cursor", default=None, help="Opaque cursor from a prior page")
+    list_parser.add_argument(
         "--parent",
         default=None,
         metavar="REQUEST_ID",
@@ -1741,6 +1859,44 @@ def main(argv: list[str] | None = None) -> int:
     )
     list_parser.add_argument(
         "--json", action="store_true", help="Machine-readable JSON output"
+    )
+
+    export_parser = transitions_sub.add_parser(
+        "export", help="Export transitions as sanitized newline-delimited JSON"
+    )
+    _add_operator_storage_args(export_parser)
+    export_parser.add_argument("--output", required=True)
+    export_parser.add_argument("--tool", default=None)
+    export_parser.add_argument(
+        "--outcome", choices=[item.value for item in TerminalOutcome]
+    )
+    export_parser.add_argument("--page-size", type=int, default=500)
+
+    prune_parser = transitions_sub.add_parser(
+        "prune", help="Apply the transition retention policy (dry-run by default)"
+    )
+    _add_operator_storage_args(prune_parser)
+    prune_parser.add_argument(
+        "--older-than",
+        default=None,
+        metavar="DURATION",
+        help="Override retention age (for example 30d)",
+    )
+    prune_parser.add_argument(
+        "--outcome",
+        action="append",
+        default=None,
+        choices=[item.value for item in TerminalOutcome],
+        help="Eligible stored outcome; repeat to select multiple",
+    )
+    prune_parser.add_argument(
+        "--archive", default=None, help="Write candidates to NDJSON before deletion"
+    )
+    prune_parser.add_argument("--page-size", type=int, default=500)
+    prune_mode = prune_parser.add_mutually_exclusive_group()
+    prune_mode.add_argument("--dry-run", action="store_true", help="Preview only (the default)")
+    prune_mode.add_argument(
+        "--execute", action="store_true", help="Permanently delete eligible rows"
     )
 
     show_parser = transitions_sub.add_parser(
@@ -2137,6 +2293,10 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_transitions_list(args)
         if args.transitions_command == "show":
             return cmd_transitions_show(args)
+        if args.transitions_command == "export":
+            return cmd_transitions_export(args)
+        if args.transitions_command == "prune":
+            return cmd_transitions_prune(args)
         if args.transitions_command == "release":
             return cmd_transitions_release(args)
         if args.transitions_command == "mark-dead":

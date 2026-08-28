@@ -247,6 +247,23 @@ from mycelium.outcome_emit import (
     compute_dttr,
     compute_dttr_from_storage,
 )
+from mycelium.outcome_export import (
+    METRIC_AMBIGUITY_AGE,
+    METRIC_DECISION_DENIALS,
+    METRIC_DEFINITIONS,
+    METRIC_FENCE_REJECTIONS,
+    METRIC_HARD_BLOCKS,
+    METRIC_LEASE_RENEWAL_FAILURES,
+    METRIC_OPERATOR_RELEASES,
+    METRIC_RECOVERY_TIME,
+    FanoutOutcomeStorage,
+    OpenTelemetryOutcomeStorage,
+    OutcomeMetricPoint,
+    OutcomeMetricProjector,
+    PrometheusOutcomeStorage,
+    WebhookOutcomeStorage,
+    export_rows,
+)
 from mycelium.protect import protect, protect_sync
 from mycelium.provider_conformance import (
     ADAPTER_REPORT_SCHEMA_VERSION,
@@ -345,6 +362,7 @@ from mycelium.storage.postgres_outcome import PostgresOutcomeStorage
 from mycelium.storage.redis_ledger import RedisLedgerStorage, RedisTaskLedgerStorage
 from mycelium.storage.redis_outcome import RedisOutcomeStorage
 from mycelium.storage.sqlite_ledger import SqliteLedgerStorage, SqliteTaskLedgerStorage
+from mycelium.storage.transition_query import TransitionPage
 from mycelium.task_ledger import (
     TaskFileLedgerStorage,
     TaskInMemoryLedgerStorage,
@@ -597,16 +615,31 @@ __all__ = [
     "wrap_llm_callable",
     "parse_duration_seconds",
     "OutcomeEmitter",
+    "OutcomeMetricPoint",
+    "OutcomeMetricProjector",
     "OutcomeRow",
     "OutcomeStorage",
+    "FanoutOutcomeStorage",
     "FileOutcomeStorage",
     "InMemoryOutcomeStorage",
+    "OpenTelemetryOutcomeStorage",
+    "PrometheusOutcomeStorage",
+    "WebhookOutcomeStorage",
+    "METRIC_AMBIGUITY_AGE",
+    "METRIC_DECISION_DENIALS",
+    "METRIC_DEFINITIONS",
+    "METRIC_FENCE_REJECTIONS",
+    "METRIC_HARD_BLOCKS",
+    "METRIC_LEASE_RENEWAL_FAILURES",
+    "METRIC_OPERATOR_RELEASES",
+    "METRIC_RECOVERY_TIME",
     "PostgresOutcomeStorage",
     "RedisOutcomeStorage",
     "DttrReport",
     "TransitionDttr",
     "compute_dttr",
     "compute_dttr_from_storage",
+    "export_rows",
     "TaskFileLedgerStorage",
     "TaskInMemoryLedgerStorage",
     "TaskLedger",
@@ -620,6 +653,7 @@ __all__ = [
     "PostgresTaskLedgerStorage",
     "SqliteLedgerStorage",
     "SqliteTaskLedgerStorage",
+    "TransitionPage",
     "get_task_ledger",
     "task_ledger",
     "task_ledger_sync",

@@ -48,6 +48,7 @@ from mycelium.outcome_emit import (
     OutcomeEmitter,
     OutcomeRow,
 )
+from mycelium.outcome_export import FanoutOutcomeStorage, WebhookOutcomeStorage
 
 _BINDING = ToolTransitionBinding.for_tool(
     agent_id="test",
@@ -488,6 +489,30 @@ outcome_emit:
     assert emitter is not None
     assert emitter.agent_id == "acme"
     assert isinstance(emitter.storage, FileOutcomeStorage)
+
+
+def test_config_fans_out_to_generic_webhook(tmp_path: Path) -> None:
+    config = load_config_from_string(
+        f"""
+transition:
+  agent_id: acme
+  policy_version: "1"
+outcome_emit:
+  storage: file
+  path: {tmp_path / "outcomes.jsonl"}
+  exporters:
+    - type: webhook
+      url: https://events.example.test/mycelium
+      secret: test-secret
+"""
+    )
+    emitter = config.build_outcome_emitter()
+    assert emitter is not None
+    assert isinstance(emitter.storage, FanoutOutcomeStorage)
+    assert any(
+        isinstance(sink, WebhookOutcomeStorage)
+        for sink in emitter.storage._sinks
+    )
 
 
 def test_config_apply_tool_wires_outcome_emitter(tmp_path: Path) -> None:

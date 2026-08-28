@@ -46,6 +46,9 @@ EVENT_BODY_START = "body_start"      # tool body began executing
 EVENT_BODY_COMPLETE = "body_complete"  # tool body returned successfully
 EVENT_BODY_FAIL = "body_fail"        # tool body raised; failure recorded
 EVENT_RELEASE = "release"            # operator release recorded
+EVENT_FENCE_REJECTION = "fence_rejection"  # stale owner/fence write refused
+EVENT_LEASE_RENEWAL_FAILURE = "lease_renewal_failure"  # heartbeat failed
+EVENT_DECISION_DENIAL = "decision_denial"  # final-boundary decision denied
 
 # Coarse gate names attached to resolution events.
 GATE_ALLOW = "ALLOW"
@@ -465,6 +468,9 @@ __all__ = [
     "EVENT_BODY_COMPLETE",
     "EVENT_BODY_FAIL",
     "EVENT_BODY_START",
+    "EVENT_DECISION_DENIAL",
+    "EVENT_FENCE_REJECTION",
+    "EVENT_LEASE_RENEWAL_FAILURE",
     "EVENT_RELEASE",
     "EVENT_RESOLUTION",
     "FileOutcomeStorage",

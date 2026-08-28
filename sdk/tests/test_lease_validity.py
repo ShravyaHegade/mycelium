@@ -16,15 +16,18 @@ from mycelium import (
     LeaseValidity,
     LedgerEntry,
     LedgerError,
+    OutcomeEmitter,
     SideEffectClass,
     TerminalOutcome,
     ToolTransitionBinding,
     TransitionScope,
     execution_scope,
+    get_ledger,
     ledger_sync,
     renew_lease,
     resolve_lease_validity,
 )
+from mycelium.outcome_emit import EVENT_LEASE_RENEWAL_FAILURE
 from mycelium.transition_resolution import TransitionGate, resolve_side_effect_gate
 
 
@@ -302,6 +305,42 @@ def test_auto_renew_disabled_when_interval_zero() -> None:
 
     with execution_scope(TransitionScope(thread_id="t1", run_id="r1", node="n1")):
         assert slow_charge(3.0) == {"charged": 3.0}
+
+
+def test_auto_renew_failure_emits_operational_outcome() -> None:
+    storage = InMemoryLedgerStorage()
+    emitter = OutcomeEmitter(agent_id="agent")
+    binding = ToolTransitionBinding.for_tool(
+        agent_id="agent",
+        policy_version="1",
+        side_effect_class=SideEffectClass.NON_IDEMPOTENT_MUTATE,
+    )
+
+    @ledger_sync(
+        storage=storage,
+        transition_binding=binding,
+        outcome_emitter=emitter,
+        lease_ttl=1.0,
+        lease_renew_interval=0.01,
+    )
+    def slow_charge(amount: float) -> dict:
+        time.sleep(0.05)
+        return {"charged": amount}
+
+    ledger_instance = get_ledger(slow_charge)
+    assert ledger_instance is not None
+
+    def fail_renew(*_: object, **__: object) -> None:
+        raise LedgerError("heartbeat backend unavailable")
+
+    ledger_instance.renew_lease = fail_renew  # type: ignore[method-assign]
+    with execution_scope(TransitionScope(thread_id="t1", run_id="r1", node="n1")):
+        assert slow_charge(3.0) == {"charged": 3.0}
+
+    assert any(
+        row.event == EVENT_LEASE_RENEWAL_FAILURE
+        for row in emitter.storage.list_all()
+    )
 
 
 async def test_auto_renew_async_ledger() -> None:

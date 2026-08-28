@@ -10,6 +10,7 @@ from dataclasses import replace
 from typing import Any, TypeVar
 
 from mycelium.storage._helpers import ClaimOutcome, claim_inflight_outcome, with_lease
+from mycelium.storage.transition_query import TransitionPage, decode_cursor, encode_cursor
 
 E = TypeVar("E")
 
@@ -51,6 +52,9 @@ class PostgresEntryStorage:
         *,
         table: str,
         from_dict: Callable[[dict[str, Any]], E],
+        pool_min_size: int = 1,
+        pool_max_size: int = 10,
+        retention_seconds: float | None = None,
     ) -> None:
         psycopg, sql = _require_psycopg()
         self._psycopg = psycopg
@@ -58,13 +62,43 @@ class PostgresEntryStorage:
         self._dsn = dsn
         self._table = _validate_table_name(table)
         self._from_dict = from_dict
+        if pool_min_size < 0 or pool_max_size < 1 or pool_min_size > pool_max_size:
+            raise ValueError("Postgres pool sizes must satisfy 0 <= min_size <= max_size")
+        self._pool_min_size = pool_min_size
+        self._pool_max_size = pool_max_size
+        self.retention_seconds = retention_seconds
+        self._pool: Any | None = None
         self._schema_ready = False
+
+    def _connection(self) -> Any:
+        if self._pool is None:
+            try:
+                from psycopg_pool import ConnectionPool
+            except ImportError as exc:
+                raise ImportError(
+                    "Postgres pooling requires 'psycopg_pool'. Install with: "
+                    "pip install 'mycelium-runtime[postgres]'"
+                ) from exc
+            self._pool = ConnectionPool(
+                self._dsn,
+                min_size=self._pool_min_size,
+                max_size=self._pool_max_size,
+                open=True,
+            )
+        return self._pool.connection()
+
+    def close(self) -> None:
+        if self._pool is not None:
+            self._pool.close()
 
     def _table_id(self) -> Any:
         return self._sql.Identifier(self._table)
 
     def _effect_index_id(self) -> Any:
         return self._sql.Identifier(f"{self._table}_effect_id_unique")
+
+    def _index_id(self, suffix: str) -> Any:
+        return self._sql.Identifier(f"{self._table}_{suffix}")
 
     @staticmethod
     def _effect_id_for_entry(entry: Any) -> str:
@@ -80,10 +114,23 @@ class PostgresEntryStorage:
             "CREATE UNIQUE INDEX IF NOT EXISTS {} ON {} "
             "((COALESCE(payload->>'effect_id', request_id)))"
         ).format(self._effect_index_id(), self._table_id())
-        with self._psycopg.connect(self._dsn) as conn:
+        outcome_time_index = self._sql.SQL(
+            "CREATE INDEX IF NOT EXISTS {} ON {} "
+            "((COALESCE(payload->>'terminal_outcome', "
+            "CASE payload->>'status' WHEN 'completed' THEN 'COMPLETED' "
+            "WHEN 'failed' THEN 'FAILED_BEFORE_EFFECT' ELSE 'IN_FLIGHT' END)), "
+            "((payload->>'started_at')::double precision), request_id)"
+        ).format(self._index_id("outcome_started_idx"), self._table_id())
+        finished_index = self._sql.SQL(
+            "CREATE INDEX IF NOT EXISTS {} ON {} "
+            "(((payload->>'finished_at')::double precision), request_id) "
+            "WHERE payload->>'finished_at' IS NOT NULL"
+        ).format(self._index_id("finished_idx"), self._table_id())
+        with self._connection() as conn:
             conn.execute(query)
             conn.execute(effect_index)
-            conn.commit()
+            conn.execute(outcome_time_index)
+            conn.execute(finished_index)
         self._schema_ready = True
 
     def get(self, request_id: str) -> E | None:
@@ -91,7 +138,7 @@ class PostgresEntryStorage:
         query = self._sql.SQL("SELECT payload FROM {} WHERE request_id = %s").format(
             self._table_id()
         )
-        with self._psycopg.connect(self._dsn) as conn:
+        with self._connection() as conn:
             row = conn.execute(query, (request_id,)).fetchone()
         if row is None:
             return None
@@ -110,13 +157,12 @@ class PostgresEntryStorage:
             "INSERT INTO {} (request_id, payload) VALUES (%s, %s::jsonb) "
             "ON CONFLICT (request_id) DO UPDATE SET payload = EXCLUDED.payload"
         ).format(self._table_id())
-        with self._psycopg.connect(self._dsn) as conn:
+        with self._connection() as conn:
             existing = conn.execute(lookup_query, (effect_id,)).fetchone()
             if existing is not None and str(existing[0]) != entry.request_id:
                 conn.commit()
                 return
             conn.execute(query, (entry.request_id, json.dumps(payload)))
-            conn.commit()
 
     def try_claim_inflight(
         self,
@@ -147,7 +193,7 @@ class PostgresEntryStorage:
             "UPDATE {} SET payload = %s::jsonb WHERE request_id = %s RETURNING request_id"
         ).format(self._table_id())
 
-        with self._psycopg.connect(self._dsn) as conn:
+        with self._connection() as conn:
             with conn.transaction():
                 inserted = conn.execute(
                     insert_query,
@@ -246,17 +292,98 @@ class PostgresEntryStorage:
             "AND payload->>'terminal_outcome' = ANY(%s) {} "
             "RETURNING request_id"
         ).format(table, extra_clauses)
-        with self._psycopg.connect(self._dsn) as conn:
+        with self._connection() as conn:
             row = conn.execute(query, tuple(params)).fetchone()
-            conn.commit()
         return row is not None
 
     def list_all(self) -> list[E]:
         self._ensure_schema()
         query = self._sql.SQL("SELECT payload FROM {}").format(self._table_id())
-        with self._psycopg.connect(self._dsn) as conn:
+        with self._connection() as conn:
             rows = conn.execute(query).fetchall()
         return [self._from_dict(_payload_dict(row[0])) for row in rows]
+
+    def list_page(
+        self,
+        *,
+        limit: int = 100,
+        cursor: str | None = None,
+        tool: str | None = None,
+        outcome: str | None = None,
+        parent_request_id: str | None = None,
+        started_after: float | None = None,
+        started_before: float | None = None,
+        finished_before: float | None = None,
+    ) -> TransitionPage[E]:
+        self._ensure_schema()
+        if limit < 1 or limit > 10_000:
+            raise ValueError("transition page limit must be between 1 and 10000")
+        clauses: list[Any] = []
+        params: list[Any] = []
+        if tool is not None:
+            clauses.append(self._sql.SQL("payload->>'tool' = %s"))
+            params.append(tool)
+        if outcome is not None:
+            clauses.append(
+                self._sql.SQL(
+                    "COALESCE(payload->>'terminal_outcome', "
+                    "CASE payload->>'status' WHEN 'completed' THEN 'COMPLETED' "
+                    "WHEN 'failed' THEN 'FAILED_BEFORE_EFFECT' ELSE 'IN_FLIGHT' END) = %s"
+                )
+            )
+            params.append(outcome)
+        if parent_request_id is not None:
+            clauses.append(self._sql.SQL("payload->>'parent_request_id' = %s"))
+            params.append(parent_request_id)
+        if started_after is not None:
+            clauses.append(self._sql.SQL("(payload->>'started_at')::double precision >= %s"))
+            params.append(started_after)
+        if started_before is not None:
+            clauses.append(self._sql.SQL("(payload->>'started_at')::double precision < %s"))
+            params.append(started_before)
+        order_expression = self._sql.SQL("(payload->>'started_at')::double precision")
+        if finished_before is not None:
+            clauses.append(self._sql.SQL("payload->>'finished_at' IS NOT NULL"))
+            clauses.append(self._sql.SQL("(payload->>'finished_at')::double precision < %s"))
+            params.append(finished_before)
+            order_expression = self._sql.SQL("(payload->>'finished_at')::double precision")
+        decoded = decode_cursor(cursor)
+        if decoded is not None:
+            clauses.append(
+                self._sql.SQL(
+                    "({}, request_id) > (%s, %s)"
+                ).format(order_expression)
+            )
+            params.extend(decoded)
+        where = (
+            self._sql.SQL(" WHERE ") + self._sql.SQL(" AND ").join(clauses)
+            if clauses
+            else self._sql.SQL("")
+        )
+        query = self._sql.SQL(
+            "SELECT payload FROM {}{} ORDER BY {}, request_id LIMIT %s"
+        ).format(self._table_id(), where, order_expression)
+        params.append(limit + 1)
+        with self._connection() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+        entries = [self._from_dict(_payload_dict(row[0])) for row in rows[:limit]]
+        next_cursor = None
+        if len(rows) > limit and entries:
+            last = entries[-1]
+            cursor_time = last.finished_at if finished_before is not None else last.started_at
+            next_cursor = encode_cursor(float(cursor_time or 0.0), last.request_id)
+        return TransitionPage(entries, next_cursor)
+
+    def delete_entries(self, request_ids: list[str]) -> int:
+        self._ensure_schema()
+        if not request_ids:
+            return 0
+        query = self._sql.SQL("DELETE FROM {} WHERE request_id = ANY(%s)").format(
+            self._table_id()
+        )
+        with self._connection() as conn:
+            result = conn.execute(query, (request_ids,))
+        return int(result.rowcount)
 
     def resolve_request_id(self, effect_id: str) -> str | None:
         self._ensure_schema()
@@ -265,7 +392,7 @@ class PostgresEntryStorage:
             "WHERE COALESCE(payload->>'effect_id', request_id) = %s "
             "ORDER BY request_id LIMIT 1"
         ).format(self._table_id())
-        with self._psycopg.connect(self._dsn) as conn:
+        with self._connection() as conn:
             row = conn.execute(query, (effect_id,)).fetchone()
         if row is None:
             return None
@@ -286,6 +413,9 @@ class PostgresLedgerStorage:
         dsn: str,
         *,
         table: str = "mycelium_action_ledger",
+        pool_min_size: int = 1,
+        pool_max_size: int = 10,
+        retention_seconds: float | None = None,
     ) -> None:
         from mycelium.action_ledger import LedgerEntry
 
@@ -293,7 +423,11 @@ class PostgresLedgerStorage:
             dsn,
             table=table,
             from_dict=LedgerEntry.from_dict,
+            pool_min_size=pool_min_size,
+            pool_max_size=pool_max_size,
+            retention_seconds=retention_seconds,
         )
+        self.retention_seconds = retention_seconds
 
     def get(self, request_id: str) -> Any:
         return self._inner.get(request_id)
@@ -311,6 +445,15 @@ class PostgresLedgerStorage:
 
     def list_all(self) -> list[Any]:
         return self._inner.list_all()
+
+    def list_page(self, **kwargs: Any) -> TransitionPage[Any]:
+        return self._inner.list_page(**kwargs)
+
+    def delete_entries(self, request_ids: list[str]) -> int:
+        return self._inner.delete_entries(request_ids)
+
+    def close(self) -> None:
+        self._inner.close()
 
     def resolve_request_id(self, effect_id: str) -> str | None:
         return self._inner.resolve_request_id(effect_id)

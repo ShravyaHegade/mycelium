@@ -31,6 +31,12 @@ from mycelium.storage._helpers import (
     with_lease,
 )
 from mycelium.storage.json_file import LockedJsonDictFile
+from mycelium.storage.transition_query import (
+    TransitionPage,
+    decode_cursor,
+    encode_cursor,
+    entry_sort_key,
+)
 from mycelium.tool_boundary import ToolBoundaryError
 from mycelium.transition import (
     CONSEQUENTIAL_SIDE_EFFECT_CLASSES,
@@ -508,6 +514,7 @@ def _lease_auto_renew(
     ledger: ActionLedger,
     request_id: str,
     *,
+    tool: str | None = None,
     owner: str | None,
     fence: int,
 ) -> Iterator[None]:
@@ -526,6 +533,28 @@ def _lease_auto_renew(
 
     stop = threading.Event()
 
+    def _emit_renewal_failure(exc: Exception) -> None:
+        event_tool = tool
+        if event_tool is None:
+            try:
+                entry = ledger.get(request_id)
+                event_tool = entry.tool if entry is not None else "unknown"
+            except Exception:
+                event_tool = "unknown"
+        try:
+            ledger._emit_outcome(
+                request_id=request_id,
+                tool=event_tool,
+                event="lease_renewal_failure",
+                error_class=type(exc).__name__,
+                owner=owner,
+            )
+        except Exception:
+            _logger.exception(
+                "could not emit lease-renewal failure for %s",
+                request_id,
+            )
+
     def _loop() -> None:
         while not stop.wait(interval):
             try:
@@ -536,13 +565,15 @@ def _lease_auto_renew(
                     _expected_fence=fence,
                 )
             except LedgerError as exc:
+                _emit_renewal_failure(exc)
                 _logger.warning(
                     "lease auto-renew stopped for %s: %s",
                     request_id,
                     exc,
                 )
                 return
-            except Exception:
+            except Exception as exc:
+                _emit_renewal_failure(exc)
                 _logger.exception(
                     "lease auto-renew failed for %s; will retry",
                     request_id,
@@ -977,6 +1008,52 @@ class LedgerStorage:
         """Return all entries. Intended for debugging/auditing only."""
         raise NotImplementedError
 
+    def list_page(
+        self,
+        *,
+        limit: int = 100,
+        cursor: str | None = None,
+        tool: str | None = None,
+        outcome: str | None = None,
+        parent_request_id: str | None = None,
+        started_after: float | None = None,
+        started_before: float | None = None,
+        finished_before: float | None = None,
+    ) -> TransitionPage[LedgerEntry]:
+        """Return a stable page; durable backends override with server-side queries."""
+        decoded = decode_cursor(cursor)
+        entries = sorted(self.list_all(), key=entry_sort_key)
+        selected: list[LedgerEntry] = []
+        for entry in entries:
+            if decoded is not None and entry_sort_key(entry) <= decoded:
+                continue
+            if tool is not None and entry.tool != tool:
+                continue
+            if outcome is not None and entry.terminal_outcome != outcome:
+                continue
+            if parent_request_id is not None and entry.parent_request_id != parent_request_id:
+                continue
+            if started_after is not None and entry.started_at < started_after:
+                continue
+            if started_before is not None and entry.started_at >= started_before:
+                continue
+            if finished_before is not None and (
+                entry.finished_at is None or entry.finished_at >= finished_before
+            ):
+                continue
+            selected.append(entry)
+            if len(selected) > limit:
+                break
+        page_entries = selected[:limit]
+        next_cursor = None
+        if len(selected) > limit and page_entries:
+            next_cursor = encode_cursor(*entry_sort_key(page_entries[-1]))
+        return TransitionPage(page_entries, next_cursor)
+
+    def delete_entries(self, request_ids: list[str]) -> int:
+        """Delete entries by id. Backends supporting retention must override."""
+        raise NotImplementedError("this ledger backend does not support pruning")
+
     def resolve_request_id(self, effect_id: str) -> str | None:
         """Resolve ``effect_id`` to its canonical ``request_id``.
 
@@ -1117,6 +1194,19 @@ class InMemoryLedgerStorage(LedgerStorage):
     def list_all(self) -> list[LedgerEntry]:
         with self._lock:
             return list(self._entries.values())
+
+    def delete_entries(self, request_ids: list[str]) -> int:
+        with self._lock:
+            deleted = 0
+            for request_id in request_ids:
+                entry = self._entries.pop(request_id, None)
+                if entry is None:
+                    continue
+                deleted += 1
+                effect_id = self._effect_ref(entry)
+                if self._effect_index.get(effect_id) == request_id:
+                    self._effect_index.pop(effect_id, None)
+            return deleted
 
     def resolve_request_id(self, effect_id: str) -> str | None:
         with self._lock:
@@ -1360,6 +1450,27 @@ class FileLedgerStorage(LedgerStorage):
 
         with self._lock:
             return self._file.read_modify_write_no_save(read)
+
+    def delete_entries(self, request_ids: list[str]) -> int:
+        targets = set(request_ids)
+        deleted: list[int] = []
+
+        def mutate(data: dict[str, dict[str, Any]]) -> None:
+            count = 0
+            for request_id in targets:
+                if data.pop(request_id, None) is not None:
+                    count += 1
+            index = self._load_effect_index_unlocked()
+            stale = [effect_id for effect_id, request_id in index.items() if request_id in targets]
+            for effect_id in stale:
+                index.pop(effect_id, None)
+            if stale:
+                self._save_effect_index_unlocked(index)
+            deleted.append(count)
+
+        with self._lock:
+            self._file.read_modify_write(mutate)
+        return deleted[0]
 
     def resolve_request_id(self, effect_id: str) -> str | None:
         def read(data: dict[str, dict[str, Any]]) -> str | None:
@@ -1862,6 +1973,107 @@ class ActionLedger:
             entries.append(entry)
         entries.sort(key=lambda entry: entry.started_at)
         return entries
+
+    def list_transitions_page(
+        self,
+        *,
+        limit: int = 100,
+        cursor: str | None = None,
+        stuck: bool = False,
+        tool: str | None = None,
+        outcome: TerminalOutcome | None = None,
+        parent_request_id: str | None = None,
+        started_after: float | None = None,
+        started_before: float | None = None,
+        finished_before: float | None = None,
+        in_flight_stuck_after: float = DEFAULT_LEASE_TTL,
+    ) -> TransitionPage[LedgerEntry]:
+        """Return one bounded, cursor-addressable transition page.
+
+        Postgres and Redis apply status/time filters before transferring rows.
+        Lease-derived ``stuck`` classification remains local because it depends
+        on the caller's current clock.
+        """
+        with _storage_errors("list_page"):
+            list_page = getattr(self._storage, "list_page", None)
+            if list_page is None:
+                list_page = LedgerStorage.list_page.__get__(self._storage, type(self._storage))
+            page = list_page(
+                limit=limit,
+                cursor=cursor,
+                tool=tool,
+                outcome=(
+                    outcome.value
+                    if outcome is not None and outcome != TerminalOutcome.EXPIRED
+                    else None
+                ),
+                parent_request_id=parent_request_id,
+                started_after=started_after,
+                started_before=started_before,
+                finished_before=finished_before,
+            )
+        now = time.time()
+        entries: list[LedgerEntry] = []
+        for entry in page.entries:
+            resolved = entry.resolved_terminal_outcome(now=now)
+            if outcome is not None and resolved != outcome:
+                continue
+            if stuck and not _is_stuck_transition(
+                entry,
+                resolved,
+                now=now,
+                in_flight_stuck_after=in_flight_stuck_after,
+            ):
+                continue
+            entries.append(entry)
+        return TransitionPage(entries, page.next_cursor)
+
+    def prune_transitions(
+        self,
+        *,
+        before: float | None = None,
+        outcomes: frozenset[TerminalOutcome] | None = None,
+        dry_run: bool = True,
+        limit: int = 1000,
+    ) -> tuple[list[LedgerEntry], int]:
+        """Preview or delete retained terminal transitions.
+
+        By default only unambiguous terminal outcomes are eligible. Ambiguous,
+        blocked, expired, and in-flight records require an explicit outcome set.
+        """
+        if before is None:
+            retention_seconds = getattr(self._storage, "retention_seconds", None)
+            if retention_seconds is None:
+                raise ValueError("pruning requires --before or a storage retention policy")
+            before = time.time() - float(retention_seconds)
+        selected_outcomes = outcomes or frozenset(
+            {TerminalOutcome.COMPLETED, TerminalOutcome.FAILED_BEFORE_EFFECT}
+        )
+        candidates: list[LedgerEntry] = []
+        for selected in sorted(selected_outcomes, key=lambda item: item.value):
+            next_cursor: str | None = None
+            while True:
+                page = self.list_transitions_page(
+                    limit=limit,
+                    cursor=next_cursor,
+                    outcome=selected,
+                    finished_before=before,
+                )
+                candidates.extend(page.entries)
+                next_cursor = page.next_cursor
+                if next_cursor is None:
+                    break
+        candidates.sort(key=entry_sort_key)
+        if dry_run or not candidates:
+            return candidates, 0
+        with _storage_errors("delete_entries"):
+            deleted = self._storage.delete_entries([entry.request_id for entry in candidates])
+        return candidates, deleted
+
+    def delete_transitions(self, request_ids: list[str]) -> int:
+        """Delete an already reviewed/archive-written set of transition ids."""
+        with _storage_errors("delete_entries"):
+            return self._storage.delete_entries(request_ids)
 
     def wait_for_transition(
         self,
@@ -4780,6 +4992,12 @@ def _record_boundary_decision(
             expected_fence=fence,
         )
     except LedgerOutcomeAlreadySetError:
+        _emit_fence_rejection(
+            ledger,
+            request_id,
+            tool=tool,
+            error_class="LedgerOutcomeAlreadySetError",
+        )
         _logger.warning(
             "could not record decision for %s: transition superseded "
             "(stale fence/owner) — refusing to advance",
@@ -4787,7 +5005,34 @@ def _record_boundary_decision(
         )
         raise
     emit_policy_outcomes_after_decision(tool, request_id)
+    if not decision.allowed:
+        ledger._emit_outcome(
+            request_id=request_id,
+            tool=tool,
+            event="decision_denial",
+            gate="DENY",
+            error_class="LedgerHardBlockError",
+        )
     return decision
+
+
+def _emit_fence_rejection(
+    ledger: ActionLedger,
+    request_id: str,
+    *,
+    tool: str,
+    error_class: str,
+) -> None:
+    """Best-effort operational outcome for a refused stale transition write."""
+    try:
+        ledger._emit_outcome(
+            request_id=request_id,
+            tool=tool,
+            event="fence_rejection",
+            error_class=error_class,
+        )
+    except Exception:
+        _logger.exception("could not emit fence rejection for %s", request_id)
 
 
 def _boundary_denial_facts(
@@ -5151,6 +5396,7 @@ def _run_ledgered(
         with _lease_auto_renew(
             ledger,
             request_id,
+            tool=tool_name,
             owner=owner,
             fence=fence,
         ):
@@ -5237,6 +5483,12 @@ def _run_ledgered(
         ledger.complete(request_id, result, _expected_owner=owner, _expected_fence=fence)
         complete_ok = True
     except LedgerOutcomeAlreadySetError:
+        _emit_fence_rejection(
+            ledger,
+            request_id,
+            tool=tool_name,
+            error_class="LedgerOutcomeAlreadySetError",
+        )
         _logger.warning(
             "outcome already set for %s while completing "
             "(transition resolved elsewhere after tool started) — "
@@ -5528,6 +5780,7 @@ async def _run_ledgered_async(
         with _lease_auto_renew(
             ledger,
             request_id,
+            tool=tool_name,
             owner=owner,
             fence=fence,
         ):
@@ -5614,6 +5867,12 @@ async def _run_ledgered_async(
         ledger.complete(request_id, result, _expected_owner=owner, _expected_fence=fence)
         complete_ok = True
     except LedgerOutcomeAlreadySetError:
+        _emit_fence_rejection(
+            ledger,
+            request_id,
+            tool=tool_name,
+            error_class="LedgerOutcomeAlreadySetError",
+        )
         _logger.warning(
             "outcome already set for %s while completing "
             "(transition resolved elsewhere after tool started) — "
