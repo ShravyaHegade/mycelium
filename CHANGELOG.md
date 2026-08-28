@@ -195,6 +195,15 @@ Secret-in-args, destination policy, destructive confirm, authority-window
 expiry, and use-time currency ship together so decide-time authority
 cannot authorize a stale execute-time side effect.
 
+### Community contributions
+
+- **Contributor acknowledgement (added retroactively):** Thanks to
+  [@Mr-Neutr0n](https://github.com/Mr-Neutr0n) for improving release safety,
+  framework-support documentation, and allowed-path symlink handling in
+  [#88](https://github.com/mycelium-labs/mycelium/pull/88),
+  [#89](https://github.com/mycelium-labs/mycelium/pull/89), and
+  [#90](https://github.com/mycelium-labs/mycelium/pull/90).
+
 ### Added
 
 - **Use-time currency (AF-012):** decide-time facts (refundability, ownership,
