@@ -258,6 +258,20 @@ class SqliteEntryStorage:
                 rows = conn.execute(f"SELECT payload FROM {self._table}").fetchall()
         return [self._from_dict(_payload_dict(row["payload"])) for row in rows]
 
+    def delete_entries(self, request_ids: list[str]) -> int:
+        if not request_ids:
+            return 0
+        placeholders = ", ".join("?" for _ in request_ids)
+        with self._lock:
+            with self._connect() as conn:
+                self._ensure_schema(conn)
+                result = conn.execute(
+                    f"DELETE FROM {self._table} WHERE request_id IN ({placeholders})",
+                    request_ids,
+                )
+                conn.commit()
+                return int(result.rowcount)
+
     def resolve_request_id(self, effect_id: str) -> str | None:
         with self._lock:
             with self._connect() as conn:
@@ -327,6 +341,9 @@ class SqliteLedgerStorage:
 
     def list_all(self) -> list[Any]:
         return self._inner.list_all()
+
+    def delete_entries(self, request_ids: list[str]) -> int:
+        return self._inner.delete_entries(request_ids)
 
     def resolve_request_id(self, effect_id: str) -> str | None:
         return self._inner.resolve_request_id(effect_id)

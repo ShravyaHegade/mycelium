@@ -1994,6 +1994,34 @@ def send_payment(amount, recipient, *, idempotency_key):
 
 Checklist: durable Redis/Postgres ledger, stable request/transition identity, provider idempotency key, `record_external_operation()` before the provider call when possible, `side_effect()` around the external call, a read-only `Reconciler`, `unclassified_policy: strict`, and `reclaim_requires_death_signal: true`. Unresolved ambiguity stays fail-closed — hard-block or reconcile; never re-execute blindly.
 
+### Transition pagination and retention
+
+Postgres action ledgers use a bounded connection pool and status/start/finish
+indexes. Redis action ledgers maintain sorted status/time indexes (existing
+rows are indexed once on first use), so paginated transition reads no longer
+scan the full table or keyspace.
+
+```yaml
+action_ledger:
+  storage: postgres
+  dsn_env: MYCELIUM_POSTGRES_DSN
+  pool_min_size: 1
+  pool_max_size: 10
+  retention_seconds: 2592000  # 30 days; used when prune omits --older-than
+```
+
+```bash
+mycelium transitions list --postgres-dsn "$MYCELIUM_POSTGRES_DSN" --limit 100
+mycelium transitions export --postgres-dsn "$MYCELIUM_POSTGRES_DSN" --output transitions.ndjson
+mycelium transitions prune --postgres-dsn "$MYCELIUM_POSTGRES_DSN" --older-than 30d --dry-run
+mycelium transitions prune --postgres-dsn "$MYCELIUM_POSTGRES_DSN" --older-than 30d --archive transitions.ndjson --execute
+```
+
+Pruning is a dry-run unless `--execute` is supplied. Its safe default includes
+only `COMPLETED` and `FAILED_BEFORE_EFFECT`; ambiguous, blocked, expired, and
+in-flight records are retained unless explicitly selected with repeatable
+`--outcome` flags. Export and archive files are sanitized NDJSON.
+
 ## Quickstart: task-level idempotency
 
 Stop entire tasks from re-running on framework-level retries:

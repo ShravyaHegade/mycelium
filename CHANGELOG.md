@@ -5,6 +5,13 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
 
 ## Unreleased
 
+### Added
+
+- Bounded transition lifecycle operations: Postgres connection pooling and
+  server-side filtered keyset pagination, Redis status/start/finish sorted-set
+  indexes with legacy backfill, configurable retention age, sanitized NDJSON
+  export/archive, and safe-by-default `mycelium transitions prune --dry-run`.
+
 ## 1.36.0 (2026-08-27)
 
 MINOR: adds an opt-in deployment verification layer for teams that want to

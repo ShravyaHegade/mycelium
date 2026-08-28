@@ -1916,10 +1916,12 @@ class MyceliumConfig:
             except ValueError as exc:
                 raise ConfigError(str(exc)) from exc
             ttl = raw.get("in_flight_ttl", 604800)
+            retention = raw.get("retention_seconds")
             return RedisLedgerStorage(
                 url,
                 prefix=str(raw.get("prefix", "mycelium:action:")),
                 in_flight_ttl=float(ttl) if ttl is not None else None,
+                retention_seconds=float(retention) if retention is not None else None,
             )
         if storage_type == "postgres":
             from mycelium.storage._helpers import resolve_storage_url
@@ -1932,6 +1934,13 @@ class MyceliumConfig:
             return PostgresLedgerStorage(
                 dsn,
                 table=str(raw.get("table", "mycelium_action_ledger")),
+                pool_min_size=int(raw.get("pool_min_size", 1)),
+                pool_max_size=int(raw.get("pool_max_size", 10)),
+                retention_seconds=(
+                    float(raw["retention_seconds"])
+                    if raw.get("retention_seconds") is not None
+                    else None
+                ),
             )
         if storage_type == "sqlite":
             from mycelium.storage.sqlite_ledger import SqliteLedgerStorage
