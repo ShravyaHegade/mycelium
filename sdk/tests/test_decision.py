@@ -33,6 +33,7 @@ from mycelium import (
     LedgerEntry,
     LedgerHardBlockError,
     LedgerOutcomeAlreadySetError,
+    OutcomeEmitter,
     PredicateVerdict,
     SideEffectBoundary,
     SideEffectClass,
@@ -44,6 +45,7 @@ from mycelium import (
     register_decision_predicate,
     reset_decision_engine,
 )
+from mycelium.outcome_emit import EVENT_DECISION_DENIAL
 
 _BINDING = ToolTransitionBinding.for_tool(
     agent_id="test",
@@ -775,8 +777,13 @@ def test_plugin_denial_hard_blocks_with_decision_recorded(
         )
 
     register_decision_predicate("amount_policy", deny_over_100)
+    emitter = OutcomeEmitter(agent_id="test")
 
-    @ledger_sync(storage=storage, transition_binding=_BINDING)
+    @ledger_sync(
+        storage=storage,
+        transition_binding=_BINDING,
+        outcome_emitter=emitter,
+    )
     def charge(amount: int) -> dict[str, Any]:
         body_ran.append(amount)
         return {"charged": amount}
@@ -793,6 +800,9 @@ def test_plugin_denial_hard_blocks_with_decision_recorded(
     assert decision.allowed is False
     assert decision.predicate_results["amount_policy"] is False
     assert "amount too large" in decision.denied_reasons
+    assert any(
+        row.event == EVENT_DECISION_DENIAL for row in emitter.storage.list_all()
+    )
 
 
 def test_authority_denial_is_recorded_before_sync_abort(

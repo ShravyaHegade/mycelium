@@ -2487,6 +2487,13 @@ outcome_emit:
   table: mycelium_outcomes
   long_running_after: 3600      # seconds (default: lease_ttl)
   on_failure: error             # production default; development defaults to warn
+  exporters:                    # optional; Mycelium does not host a dashboard
+    - type: opentelemetry       # application's configured MeterProvider
+    - type: prometheus          # application's default CollectorRegistry
+    - type: webhook
+      url_env: OUTCOME_WEBHOOK_URL
+      secret_env: OUTCOME_WEBHOOK_SECRET
+      timeout: 5
   # storage: file               # durable, single-node only
   # path: ./mycelium-outcomes.jsonl
   # storage: redis              # Streams; not durable unless Redis persistence is on
@@ -2510,11 +2517,66 @@ def charge(amount):
 Rows are flat JSON objects (NDJSON for file storage), emitted only on
 resolution events — a dispatch resolving to a gate (`ALLOW` / `RETURN` /
 `HARD_BLOCK` / `SOFT_BLOCK`), the tool body starting / completing / failing,
-and operator releases. Poll ticks never emit. Development emission is
+operator releases, final-boundary decision denials, fence rejections, and
+lease-renewal failures. Poll ticks never emit. Development emission is
 fault-tolerant (storage failures are logged and swallowed). Production
 emission is fail-closed: a required durable write failure raises
 `OutcomeEmitError` on success paths, and never replaces an existing
 tool/provider exception.
+
+### Export outcomes — not a dashboard
+
+Mycelium does not host, query, or visualize these signals. It exports the
+same outcome rows to the telemetry system you already operate: OpenTelemetry,
+Prometheus, or any HTTP webhook receiver. Keep a durable outcome store as the
+fanout primary so DTTR remains replayable:
+
+```python
+from mycelium import (
+    FanoutOutcomeStorage,
+    FileOutcomeStorage,
+    OpenTelemetryOutcomeStorage,
+    OutcomeEmitter,
+    PrometheusOutcomeStorage,
+    WebhookOutcomeStorage,
+)
+
+storage = FanoutOutcomeStorage(
+    FileOutcomeStorage("outcomes.jsonl"),
+    OpenTelemetryOutcomeStorage(),       # uses the application's MeterProvider
+    PrometheusOutcomeStorage(),          # uses the application's registry
+    WebhookOutcomeStorage(
+        "https://events.example.com/mycelium",
+        secret="rotate-me",             # optional HMAC-SHA256 signature
+    ),
+)
+emitter = OutcomeEmitter(agent_id="acme", storage=storage)
+```
+
+Install exporter APIs with `mycelium[observability]`, or install only
+`mycelium[opentelemetry]` / `mycelium[prometheus]`. The application remains
+responsible for configuring its OTel reader/exporter and exposing its
+Prometheus registry. Webhooks receive a versioned `mycelium.outcome.v1`
+envelope containing the full sanitized row and the metric points derived from
+it; `X-Mycelium-Event-ID` supports dedupe and an optional
+`X-Mycelium-Signature: sha256=...` authenticates the raw body.
+
+The fixed metric contract deliberately excludes request IDs, run IDs,
+operators, and free-form reasons from metric labels:
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `mycelium.hard_blocks` | counter | transitions resolved to `HARD_BLOCK` |
+| `mycelium.ambiguity.age` | histogram (seconds) | ambiguity age whenever an ambiguous outcome is observed |
+| `mycelium.fence_rejections` | counter | superseded owner/fence writes refused |
+| `mycelium.lease_renewal_failures` | counter | failed execution-lease heartbeat attempts |
+| `mycelium.decision_denials` | counter | final-boundary decisions that denied execution |
+| `mycelium.recovery.time` | histogram (seconds) | first observed ambiguity through release or safe resolution |
+| `mycelium.operator_releases` | counter | recorded manual reconciliations |
+
+Prometheus exposes dotted names with underscores and adds `_total` to
+counters; the two duration histograms are suffixed `_seconds`. To export old
+rows after enabling a backend, call `export_rows(storage.list_all(), sink)`.
 
 Compute the metric with the CLI or the library:
 

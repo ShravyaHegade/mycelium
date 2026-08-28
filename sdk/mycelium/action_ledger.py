@@ -508,6 +508,7 @@ def _lease_auto_renew(
     ledger: ActionLedger,
     request_id: str,
     *,
+    tool: str | None = None,
     owner: str | None,
     fence: int,
 ) -> Iterator[None]:
@@ -526,6 +527,28 @@ def _lease_auto_renew(
 
     stop = threading.Event()
 
+    def _emit_renewal_failure(exc: Exception) -> None:
+        event_tool = tool
+        if event_tool is None:
+            try:
+                entry = ledger.get(request_id)
+                event_tool = entry.tool if entry is not None else "unknown"
+            except Exception:
+                event_tool = "unknown"
+        try:
+            ledger._emit_outcome(
+                request_id=request_id,
+                tool=event_tool,
+                event="lease_renewal_failure",
+                error_class=type(exc).__name__,
+                owner=owner,
+            )
+        except Exception:
+            _logger.exception(
+                "could not emit lease-renewal failure for %s",
+                request_id,
+            )
+
     def _loop() -> None:
         while not stop.wait(interval):
             try:
@@ -536,13 +559,15 @@ def _lease_auto_renew(
                     _expected_fence=fence,
                 )
             except LedgerError as exc:
+                _emit_renewal_failure(exc)
                 _logger.warning(
                     "lease auto-renew stopped for %s: %s",
                     request_id,
                     exc,
                 )
                 return
-            except Exception:
+            except Exception as exc:
+                _emit_renewal_failure(exc)
                 _logger.exception(
                     "lease auto-renew failed for %s; will retry",
                     request_id,
@@ -4780,6 +4805,12 @@ def _record_boundary_decision(
             expected_fence=fence,
         )
     except LedgerOutcomeAlreadySetError:
+        _emit_fence_rejection(
+            ledger,
+            request_id,
+            tool=tool,
+            error_class="LedgerOutcomeAlreadySetError",
+        )
         _logger.warning(
             "could not record decision for %s: transition superseded "
             "(stale fence/owner) — refusing to advance",
@@ -4787,7 +4818,34 @@ def _record_boundary_decision(
         )
         raise
     emit_policy_outcomes_after_decision(tool, request_id)
+    if not decision.allowed:
+        ledger._emit_outcome(
+            request_id=request_id,
+            tool=tool,
+            event="decision_denial",
+            gate="DENY",
+            error_class="LedgerHardBlockError",
+        )
     return decision
+
+
+def _emit_fence_rejection(
+    ledger: ActionLedger,
+    request_id: str,
+    *,
+    tool: str,
+    error_class: str,
+) -> None:
+    """Best-effort operational outcome for a refused stale transition write."""
+    try:
+        ledger._emit_outcome(
+            request_id=request_id,
+            tool=tool,
+            event="fence_rejection",
+            error_class=error_class,
+        )
+    except Exception:
+        _logger.exception("could not emit fence rejection for %s", request_id)
 
 
 def _boundary_denial_facts(
@@ -5151,6 +5209,7 @@ def _run_ledgered(
         with _lease_auto_renew(
             ledger,
             request_id,
+            tool=tool_name,
             owner=owner,
             fence=fence,
         ):
@@ -5237,6 +5296,12 @@ def _run_ledgered(
         ledger.complete(request_id, result, _expected_owner=owner, _expected_fence=fence)
         complete_ok = True
     except LedgerOutcomeAlreadySetError:
+        _emit_fence_rejection(
+            ledger,
+            request_id,
+            tool=tool_name,
+            error_class="LedgerOutcomeAlreadySetError",
+        )
         _logger.warning(
             "outcome already set for %s while completing "
             "(transition resolved elsewhere after tool started) — "
@@ -5528,6 +5593,7 @@ async def _run_ledgered_async(
         with _lease_auto_renew(
             ledger,
             request_id,
+            tool=tool_name,
             owner=owner,
             fence=fence,
         ):
@@ -5614,6 +5680,12 @@ async def _run_ledgered_async(
         ledger.complete(request_id, result, _expected_owner=owner, _expected_fence=fence)
         complete_ok = True
     except LedgerOutcomeAlreadySetError:
+        _emit_fence_rejection(
+            ledger,
+            request_id,
+            tool=tool_name,
+            error_class="LedgerOutcomeAlreadySetError",
+        )
         _logger.warning(
             "outcome already set for %s while completing "
             "(transition resolved elsewhere after tool started) — "
