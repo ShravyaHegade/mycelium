@@ -9,6 +9,7 @@ from mycelium.__main__ import main
 SKILL_FILES = {
     Path("SKILL.md"),
     Path("agents/openai.yaml"),
+    Path("references/dynamic-destination-authority.md"),
     Path("references/provider-reconciliation.md"),
     Path("references/tool-classification.md"),
 }
