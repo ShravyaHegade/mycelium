@@ -12,6 +12,15 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
 - Include the official `mycelium-setup` coding-agent skill in built wheels and
   add `mycelium skills install` for offline, idempotent installation into a
   project or user skill catalog.
+- Allow custom runtimes launched by `mycelium run` to declare a trusted,
+  idempotent completion adapter installer that runs before production terminal
+  protection is validated.
+- Make the setup skill classify features as enabled, deferred for host work,
+  deferred for operator input, or intentionally not applicable instead of
+  implying every feature belongs in every project.
+- Clarify that `budget.max_steps` counts protected tool calls and instrumented
+  LLM turns rather than business workflow outcomes, including the unit in the
+  typed schema, generated reference, template guidance, and Doctor output.
 
 ## 1.38.0 (2026-08-29)
 

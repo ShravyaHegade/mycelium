@@ -317,8 +317,9 @@ than the code makes.
   (LangGraph END) are wired automatically from YAML when
   `integrations.langgraph.enabled` is set. `profile: production`
   fails startup if `completion:` is enabled but no adapter was
-  explicitly selected. Custom runtimes still use `complete_run` /
-  `gate_graph_end` / `wrap_final_message`.
+  explicitly selected. Custom runtimes launched through `mycelium run` can
+  declare `completion.adapter_installer` to wire `complete_run` /
+  `gate_graph_end` / `wrap_final_message` before startup validation.
 - **Superseded state (without `state_authority:`).** A redispatch from a stale
   checkpoint that mints a new `tool_call_id` / changed args has no prior claim
   and PROCEEDs. Optional `state_authority:` compares a frozen `state_ref` to the

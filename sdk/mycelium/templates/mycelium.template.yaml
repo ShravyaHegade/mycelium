@@ -429,6 +429,9 @@ loop_guard:
 # missing_usage_policy: warn (default) | error (required in production
 #   when max_tokens / max_usd are set). Step/time-only budgets need no
 #   token metadata. max_usd needs register_llm_cost_resolver in production.
+# max_steps counts every budget-guarded tool call and instrumented LLM turn,
+# not business outcomes. Calibrate for worst-case success, failure/retry, and
+# cleanup paths; enforce candidate/attempt/success limits separately.
 # ---------------------------------------------------------------------------
 # budget:
 #   storage: file
@@ -449,11 +452,14 @@ loop_guard:
 # allow_with_warnings / refuse (not soft/hard).
 # profile: production verifies an explicitly selected adapter
 # (integrations.langgraph.enabled or register_terminal_adapter). Having
-# LangGraph installed is not enough. Custom runtimes: wrap_final_message
-# / gate_graph_end / register_terminal_adapter before load_config.
+# LangGraph installed is not enough. Custom runtimes launched with
+# `mycelium run` should declare an idempotent adapter installer below. The
+# installer wires the final-message boundary and calls
+# register_terminal_adapter("custom").
 # ---------------------------------------------------------------------------
 # completion:
 #   # storage omitted: inherits state_backend
+#   # adapter_installer: my_app.mycelium_completion:install
 #   required:
 #     - id: charge_customer
 #     - id: send_receipt

@@ -40,6 +40,42 @@ class StorageConfigModel(_ConfigModel):
     dsn_env: str | None = None
 
 
+class BudgetConfigModel(StorageConfigModel):
+    """Run-wide ceilings for protected calls, time, tokens, and cost."""
+
+    max_duration: float | str | None = Field(
+        default=None,
+        description="Wall-clock ceiling for the run, in seconds or with a duration suffix.",
+    )
+    max_steps: int | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Run-wide protected-call ceiling. Each budget-guarded tool invocation and "
+            "instrumented LLM turn reserves one step; business workflow counters are separate."
+        ),
+    )
+    max_tokens: int | None = Field(default=None, gt=0)
+    max_usd: int | float | None = Field(default=None, gt=0)
+    max_cost_usd: int | float | None = Field(default=None, gt=0)
+    missing_usage_policy: Literal["warn", "error"] | None = None
+    warn_at: int | float | None = Field(default=None, gt=0, le=1)
+    on_missing_meter: Literal["warn", "hard"] | None = None
+
+
+class CompletionConfigModel(StorageConfigModel):
+    """Completion storage and optional custom-runtime startup adapter."""
+
+    adapter_installer: str | None = Field(
+        default=None,
+        description=(
+            "Import path (package.module:function) called during runtime config "
+            "activation. It must wire the custom terminal boundary and call "
+            "register_terminal_adapter()."
+        ),
+    )
+
+
 class TransitionConfigModel(_ConfigModel):
     """Stable identity and retry timing for guarded transitions."""
 
@@ -265,10 +301,10 @@ class MyceliumConfigModel(_ConfigModel):
     message_validator: bool | MessageValidatorConfigModel = False
     integrations: IntegrationsConfigModel | None = None
     loop_guard: StorageConfigModel | None = None
-    budget: StorageConfigModel | None = None
+    budget: BudgetConfigModel | None = None
     scope_guard: StorageConfigModel | None = None
     state_authority: dict[str, Any] | None = None
-    completion: StorageConfigModel | None = None
+    completion: CompletionConfigModel | None = None
     deployment: DeploymentConfigModel | None = None
     verify: dict[str, Any] | None = None
     secret_args: SecretArgsConfigModel | None = None

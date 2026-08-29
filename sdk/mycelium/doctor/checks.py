@@ -831,6 +831,8 @@ def check_budget(ctx: DoctorContext) -> Iterable[DoctorCheck]:
         f"adapters={sorted(adapters) or 'none'}; "
         f"max_steps={ceilings.max_steps}; max_tokens={ceilings.max_tokens}; "
         f"max_usd={ceilings.max_usd}; max_duration={ceilings.max_duration}; "
+        "step_unit=one protected tool call or instrumented LLM turn; "
+        "business workflow counters are separate; "
         f"missing_usage_policy={missing_usage}; "
         f"measures_tokens={measures_tokens}; measures_cost={measures_cost}"
     )
@@ -911,7 +913,7 @@ def check_budget(ctx: DoctorContext) -> Iterable[DoctorCheck]:
             id="budget.adapter",
             category="Budget",
             status=DoctorStatus.PASS,
-            summary="Step/time budget configured (no token meter required)",
+            summary="Protected-call/time budget configured (no token meter required)",
             details=details,
             evidence=EVIDENCE_STATIC,
         )

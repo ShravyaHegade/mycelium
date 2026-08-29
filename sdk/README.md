@@ -1407,7 +1407,7 @@ usage.
 
 | Meter | What it limits | Needs usage metadata? |
 |-------|----------------|------------------------|
-| `max_steps` | LLM + tool turns | No |
+| `max_steps` | Protected tool invocations + instrumented LLM turns | No |
 | `max_duration` | Wall clock since run start | No |
 | `max_tokens` | Sum of input+output tokens | Yes (adapter) |
 | `max_usd` / `max_cost_usd` | Host-reported USD | Yes (cost resolver) |
@@ -1425,6 +1425,15 @@ budget:
   max_cost_usd: 10
   missing_usage_policy: error   # warn is the library default
 ```
+
+`max_steps` is a run-wide protected-call ceiling, not a count of business
+outcomes or high-level workflow stages. Each budget-guarded tool invocation and
+instrumented LLM turn reserves one step, including calls on failure, retry, and
+cleanup paths. Estimate the legitimate worst case across those paths and keep
+business limits—such as candidates processed, attempts, or successful
+submissions—in separate application counters. Doctor reports this counting unit
+but does not guess whether the ceiling is large enough because the tool list
+does not reveal the workflow's possible call paths.
 
 ```python
 from mycelium import load_config
@@ -1844,14 +1853,26 @@ cfg.mark_completion("charge_customer", "success", scope_key=run_id)
 
 `profile: production` verifies an **explicitly selected** terminal adapter
 at startup. Having LangGraph installed is not enough — set
-`integrations.langgraph.enabled: true` or call
-`register_terminal_adapter(...)` before `load_config`. If `completion:`
+`integrations.langgraph.enabled: true`. For a custom runtime launched with
+`mycelium run`, declare an idempotent installer in the configuration:
+
+```yaml
+completion:
+  adapter_installer: my_app.mycelium_completion:install
+  required:
+    - id: charge_customer
+```
+
+The installer runs in the application process after its import path is ready.
+It must wire the real final-message/terminal boundary and then call
+`register_terminal_adapter("custom")`. If `completion:`
 is enabled but no adapter was selected, load raises `ConfigError` so the
 app cannot look protected while checks are bypassed. Development mode
 warns and keeps the manual fallback.
 
 Custom runtimes only: `wrap_final_message`, `gate_graph_end`,
-`complete_run`, or `register_terminal_adapter(...)` before `load_config`.
+`complete_run`, or the configured `adapter_installer`. Applications that load
+configuration themselves may still register an adapter before `load_config`.
 Official LangGraph integrations do not need those calls.
 
 ```bash

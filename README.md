@@ -94,6 +94,11 @@ Use `record_usage()` for observed token/USD usage without `steps`; combining
 `record_usage(steps=...)` with the default step meter warns because it counts
 the step twice.
 
+`budget.max_steps` counts each budget-guarded tool invocation and instrumented
+LLM turn—not business outcomes or high-level workflow stages. Include normal
+failure, retry, and cleanup calls when sizing it, and enforce business limits
+such as candidates, attempts, or successful submissions separately.
+
 Implementation detail (envelope field stack, gate matrix, payment identity): [sdk/README.md](sdk/README.md#transition-envelope-fields). Failure & threat model: [sdk/docs/FAILURE_AND_THREAT_MODEL.md](sdk/docs/FAILURE_AND_THREAT_MODEL.md).
 
 Not Langfuse. Use both if you want traces and guards. Not an approvals inbox, hosted observability, on-chain audit trail, or agent framework — [What Mycelium does not do](sdk/README.md#what-mycelium-does-not-do).

@@ -33,10 +33,10 @@ JSON-Schema-aware editors and configuration agents.
 | `message_validator` | `boolean \| MessageValidator` | `false` | — |
 | `integrations` | `Integrations \| null` | `null` | — |
 | `loop_guard` | `Storage \| null` | `null` | — |
-| `budget` | `Storage \| null` | `null` | — |
+| `budget` | `Budget \| null` | `null` | — |
 | `scope_guard` | `Storage \| null` | `null` | — |
 | `state_authority` | `object \| null` | `null` | — |
-| `completion` | `Storage \| null` | `null` | — |
+| `completion` | `Completion \| null` | `null` | — |
 | `deployment` | `Deployment \| null` | `null` | — |
 | `verify` | `object \| null` | `null` | — |
 | `secret_args` | `SecretArgs \| null` | `null` | — |
@@ -44,6 +44,47 @@ JSON-Schema-aware editors and configuration agents.
 | `destructive_confirm` | `object \| null` | `null` | — |
 | `authority_window` | `object \| null` | `null` | — |
 | `use_time_currency` | `object \| null` | `null` | — |
+
+## Budget
+
+Run-wide ceilings for protected calls, time, tokens, and cost.
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `storage` | `"memory" \| "file" \| "sqlite" \| "redis" \| "postgres" \| "shared" \| null` | `null` | — |
+| `path` | `string \| null` | `null` | — |
+| `table` | `string \| null` | `null` | — |
+| `namespace` | `string \| null` | `null` | — |
+| `prefix` | `string \| null` | `null` | — |
+| `url` | `string \| null` | `null` | — |
+| `url_env` | `string \| null` | `null` | — |
+| `dsn` | `string \| null` | `null` | — |
+| `dsn_env` | `string \| null` | `null` | — |
+| `max_duration` | `number \| string \| null` | `null` | Wall-clock ceiling for the run, in seconds or with a duration suffix. |
+| `max_steps` | `integer \| null` | `null` | Run-wide protected-call ceiling. Each budget-guarded tool invocation and instrumented LLM turn reserves one step; business workflow counters are separate. |
+| `max_tokens` | `integer \| null` | `null` | — |
+| `max_usd` | `integer \| number \| null` | `null` | — |
+| `max_cost_usd` | `integer \| number \| null` | `null` | — |
+| `missing_usage_policy` | `"warn" \| "error" \| null` | `null` | — |
+| `warn_at` | `integer \| number \| null` | `null` | — |
+| `on_missing_meter` | `"warn" \| "hard" \| null` | `null` | — |
+
+## Completion
+
+Completion storage and optional custom-runtime startup adapter.
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `storage` | `"memory" \| "file" \| "sqlite" \| "redis" \| "postgres" \| "shared" \| null` | `null` | — |
+| `path` | `string \| null` | `null` | — |
+| `table` | `string \| null` | `null` | — |
+| `namespace` | `string \| null` | `null` | — |
+| `prefix` | `string \| null` | `null` | — |
+| `url` | `string \| null` | `null` | — |
+| `url_env` | `string \| null` | `null` | — |
+| `dsn` | `string \| null` | `null` | — |
+| `dsn_env` | `string \| null` | `null` | — |
+| `adapter_installer` | `string \| null` | `null` | Import path (package.module:function) called during runtime config activation. It must wire the custom terminal boundary and call register_terminal_adapter(). |
 
 ## Deployment
 
