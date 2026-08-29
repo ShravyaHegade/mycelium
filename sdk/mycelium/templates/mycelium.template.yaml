@@ -1,4 +1,5 @@
 # Mycelium configuration (full reference template).
+# IDE/agent schema: mycelium config schema -o mycelium.schema.json
 # Scaffold: mycelium init --full
 # On-ramp (default): mycelium init | smaller multi-guard: mycelium init --minimal
 #

@@ -282,7 +282,7 @@ class MyceliumConfigModel(_ConfigModel):
     def _supported_config_version(cls, value: Any) -> Any:
         if value != CONFIG_VERSION:
             raise ValueError(
-                f"unsupported configuration version {value!r}; this Mycelium "
+                f"unsupported config_version {value!r}; this Mycelium "
                 f"runtime supports version {CONFIG_VERSION}. Upgrade Mycelium "
                 "or migrate the file after reviewing the release notes"
             )

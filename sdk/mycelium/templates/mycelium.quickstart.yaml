@@ -1,4 +1,5 @@
 # Mycelium on-ramp: stop duplicate tool execution on LangGraph retry.
+# IDE/agent schema: mycelium config schema -o mycelium.schema.json
 #
 # Scaffolded with:  mycelium init   (default — start here)
 # Full reference:   mycelium init --full

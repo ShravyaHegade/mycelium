@@ -3911,7 +3911,7 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
     config_version = data.get("config_version", CONFIG_VERSION)
     if config_version != CONFIG_VERSION:
         raise ConfigError(
-            f"unsupported configuration version {config_version!r}; this Mycelium "
+            f"unsupported config_version {config_version!r}; this Mycelium "
             f"runtime supports version {CONFIG_VERSION}. Upgrade Mycelium or "
             "migrate the file after reviewing the release notes"
         )
