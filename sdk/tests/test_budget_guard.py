@@ -94,6 +94,21 @@ def test_max_steps_soft_warn_allows_then_hard() -> None:
         assert calls["n"] == 5
 
 
+def test_manual_max_steps_ceiling_blocks_at_n() -> None:
+    guard = BudgetGuard(
+        InMemoryBudgetGuardStorage(), max_steps=3, warn_at=1.0, on_missing_meter="off"
+    )
+
+    with execution_scope(_scope("manual-steps")):
+        for _ in range(3):
+            guard.check(KIND_TOOL, increment_steps=False)
+            with pytest.warns(UserWarning, match="adds host-reported steps"):
+                guard.record_usage(steps=1)
+
+        with pytest.raises(LedgerHardBlockError):
+            guard.check(KIND_TOOL, increment_steps=False)
+
+
 def test_warn_at_does_not_refuse_under_ceiling_usd() -> None:
     """Honey Mail 2: warn_at is permissive — $0.85 of $1.00 must not refuse."""
     guard = BudgetGuard(
