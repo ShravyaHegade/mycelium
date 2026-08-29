@@ -5,6 +5,8 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
 
 ## Unreleased
 
+## 1.38.0 (2026-08-29)
+
 ### Added
 
 - Stable public API organization through the recommended package root plus
