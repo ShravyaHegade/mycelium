@@ -125,6 +125,22 @@ def cmd_config_example(output: Path | None) -> int:
     return _write_or_print_config_artifact(render_config_example(), output)
 
 
+def cmd_skills_install(*, target: Path, force: bool) -> int:
+    """Install the bundled setup skill into an agent skill catalog."""
+    from mycelium._internal.skill_installer import SkillInstallError, install_setup_skill
+
+    try:
+        result = install_setup_skill(target, force=force)
+    except (OSError, SkillInstallError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if result.changed:
+        print(f"Installed mycelium-setup skill: {result.destination}")
+    else:
+        print(f"mycelium-setup skill is already current: {result.destination}")
+    return 0
+
+
 def cmd_demo(*, redis: bool = False, slow: bool = False) -> int:
     from mycelium.quickstart import run_demo
 
@@ -1745,6 +1761,33 @@ def main(argv: list[str] | None = None) -> int:
         help="Write YAML to a file instead of stdout",
     )
 
+    skills_parser = sub.add_parser(
+        "skills",
+        help="Install agent skills bundled with mycelium-runtime",
+        description=(
+            "Install bundled skills offline from the PyPI package. The default "
+            "project catalog is ./.agents/skills; use --target for a user or "
+            "agent-specific catalog such as ~/.codex/skills."
+        ),
+    )
+    skills_sub = skills_parser.add_subparsers(dest="skills_command", required=True)
+    skills_install_parser = skills_sub.add_parser(
+        "install",
+        help="Install the official mycelium-setup skill",
+    )
+    skills_install_parser.add_argument(
+        "--target",
+        type=Path,
+        default=Path(".agents/skills"),
+        metavar="CATALOG",
+        help="Skill catalog directory (default: ./.agents/skills)",
+    )
+    skills_install_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Replace a different existing mycelium-setup skill",
+    )
+
     demo_parser = sub.add_parser(
         "demo",
         help="Feature tour: without/with Mycelium + gates, repair, reconcile, release",
@@ -2343,6 +2386,9 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_config_docs(args.output)
         if args.config_command == "example":
             return cmd_config_example(args.output)
+    if args.command == "skills":
+        if args.skills_command == "install":
+            return cmd_skills_install(target=args.target, force=args.force)
     if args.command == "state":
         if args.state_command == "migrate":
             return cmd_state_migrate(args)

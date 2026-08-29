@@ -20,11 +20,13 @@ currency); SQLite + Redis/Postgres; DTTR; worker-death detection; and lease auto
 
 ## One painful bug → a few lines of config
 
-Prefer agent-assisted setup? The source repository includes the
-[`mycelium-setup`](../.agents/skills/mycelium-setup/SKILL.md) skill. A coding
-agent using it can inspect the application, fill/merge YAML, wire the real tool
-boundary, add tests, and run Doctor/Verify. It remains fail-closed for secrets,
-business identity, and provider authority that cannot be safely inferred.
+Prefer agent-assisted setup? The PyPI package includes the official
+[`mycelium-setup`](https://github.com/mycelium-labs/mycelium/tree/main/.agents/skills/mycelium-setup)
+skill. Run `mycelium skills install` after installing the package, then ask your
+coding agent to set up Mycelium. The agent can inspect the application,
+fill/merge YAML, wire the real tool boundary, add tests, and run Doctor/Verify.
+It remains fail-closed for secrets, business identity, and provider authority
+that cannot be safely inferred.
 
 **LangGraph Cloud redispatches a long tool call while the first is still running.** Both complete. You pay twice. Side effects run twice. [langgraph#7417](https://github.com/langchain-ai/langgraph/issues/7417) — catalog class **AF-002**.
 
@@ -131,6 +133,7 @@ Mycelium is an **embeddable transition envelope at the tool boundary** — class
 
 ```bash
 pip install mycelium-runtime
+mycelium skills install    # offline → ./.agents/skills/mycelium-setup
 pip install 'mycelium-runtime[langgraph]'  # optional automatic LangGraph IDs
 mycelium init              # on-ramp: duplicate-tool fix → ./mycelium.yaml
 mycelium init --detect     # inspect local dependencies/@tool functions and tailor a safe starter

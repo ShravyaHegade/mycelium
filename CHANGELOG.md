@@ -5,6 +5,14 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
 
 ## Unreleased
 
+### Fixed
+
+- Compare contention and concurrent-reconciliation worker results as structured
+  JSON so PostgreSQL JSONB key reordering cannot cause false verification failures.
+- Include the official `mycelium-setup` coding-agent skill in built wheels and
+  add `mycelium skills install` for offline, idempotent installation into a
+  project or user skill catalog.
+
 ## 1.38.0 (2026-08-29)
 
 ### Added

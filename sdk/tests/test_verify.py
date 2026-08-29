@@ -154,11 +154,16 @@ def test_contention_and_reconcile_helpers_reject_false_pass(tmp_path: Path) -> N
 
     clean = [SimpleNamespace(pid=1, exitcode=0), SimpleNamespace(pid=2, exitcode=0)]
     killed = [SimpleNamespace(pid=1, exitcode=0), SimpleNamespace(pid=2, exitcode=-9)]
-    matching = _lines("out.txt", "{'charged': True}\n{'charged': True}\n")
+    matching = _lines("out.txt", '{"charged":true}\n{"charged":true}\n')
+    reordered = _lines(
+        "reordered.txt",
+        '{"charged":true,"amount":1}\n{"amount":1,"charged":true}\n',
+    )
     empty = _lines("empty.txt", "")
     err = _lines("err.txt", "RuntimeError: boom\n")
-    mixed = _lines("mixed.txt", "{'a': 1}\n{'b': 2}\n")
-    one = _lines("one.txt", "{'charged': True}\n")
+    mixed = _lines("mixed.txt", '{"a":1}\n{"b":2}\n')
+    malformed = _lines("malformed.txt", "{'charged': True}\n{'charged': True}\n")
+    one = _lines("one.txt", '{"charged":true}\n')
     peer_err = _lines("peer.txt", "LedgerHardBlockError: blocked\n")
     ready = _lines("ready.txt", "ready\nready\n")
     partial_ready = _lines("partial-ready.txt", "ready\n")
@@ -183,6 +188,15 @@ def test_contention_and_reconcile_helpers_reject_false_pass(tmp_path: Path) -> N
     assert contention_round_failure(clean, executions=1, out_file=matching, err_file=err, workers=2)
     assert contention_round_failure(clean, executions=1, out_file=one, err_file=empty, workers=2)
     assert contention_round_failure(clean, executions=1, out_file=mixed, err_file=empty, workers=2)
+    assert (
+        contention_round_failure(
+            clean, executions=1, out_file=reordered, err_file=empty, workers=2
+        )
+        is None
+    )
+    assert contention_round_failure(
+        clean, executions=1, out_file=malformed, err_file=empty, workers=2
+    )
     assert contention_round_failure(
         clean,
         executions=1,
@@ -208,6 +222,12 @@ def test_contention_and_reconcile_helpers_reject_false_pass(tmp_path: Path) -> N
         killed, executions=1, out_file=one, err_file=peer_err, workers=2
     )
     assert concurrent_reconcile_failure(clean, executions=1, out_file=one, err_file=err, workers=2)
+    assert (
+        concurrent_reconcile_failure(
+            clean, executions=1, out_file=reordered, err_file=empty, workers=2
+        )
+        is None
+    )
 
 
 def test_cleanup_failure_is_reported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
