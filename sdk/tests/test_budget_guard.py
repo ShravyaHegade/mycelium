@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+import warnings
 
 import pytest
 
@@ -100,10 +101,12 @@ def test_manual_max_steps_ceiling_blocks_at_n() -> None:
     )
 
     with execution_scope(_scope("manual-steps")):
-        for _ in range(3):
-            guard.check(KIND_TOOL, increment_steps=False)
-            with pytest.warns(UserWarning, match="adds host-reported steps"):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            for _ in range(3):
+                guard.check(KIND_TOOL, increment_steps=False)
                 guard.record_usage(steps=1)
+        assert not caught
 
         with pytest.raises(LedgerHardBlockError):
             guard.check(KIND_TOOL, increment_steps=False)
