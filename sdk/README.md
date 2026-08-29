@@ -1844,14 +1844,26 @@ cfg.mark_completion("charge_customer", "success", scope_key=run_id)
 
 `profile: production` verifies an **explicitly selected** terminal adapter
 at startup. Having LangGraph installed is not enough — set
-`integrations.langgraph.enabled: true` or call
-`register_terminal_adapter(...)` before `load_config`. If `completion:`
+`integrations.langgraph.enabled: true`. For a custom runtime launched with
+`mycelium run`, declare an idempotent installer in the configuration:
+
+```yaml
+completion:
+  adapter_installer: my_app.mycelium_completion:install
+  required:
+    - id: charge_customer
+```
+
+The installer runs in the application process after its import path is ready.
+It must wire the real final-message/terminal boundary and then call
+`register_terminal_adapter("custom")`. If `completion:`
 is enabled but no adapter was selected, load raises `ConfigError` so the
 app cannot look protected while checks are bypassed. Development mode
 warns and keeps the manual fallback.
 
 Custom runtimes only: `wrap_final_message`, `gate_graph_end`,
-`complete_run`, or `register_terminal_adapter(...)` before `load_config`.
+`complete_run`, or the configured `adapter_installer`. Applications that load
+configuration themselves may still register an adapter before `load_config`.
 Official LangGraph integrations do not need those calls.
 
 ```bash

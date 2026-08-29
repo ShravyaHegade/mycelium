@@ -36,7 +36,7 @@ JSON-Schema-aware editors and configuration agents.
 | `budget` | `Storage \| null` | `null` | — |
 | `scope_guard` | `Storage \| null` | `null` | — |
 | `state_authority` | `object \| null` | `null` | — |
-| `completion` | `Storage \| null` | `null` | — |
+| `completion` | `Completion \| null` | `null` | — |
 | `deployment` | `Deployment \| null` | `null` | — |
 | `verify` | `object \| null` | `null` | — |
 | `secret_args` | `SecretArgs \| null` | `null` | — |
@@ -44,6 +44,23 @@ JSON-Schema-aware editors and configuration agents.
 | `destructive_confirm` | `object \| null` | `null` | — |
 | `authority_window` | `object \| null` | `null` | — |
 | `use_time_currency` | `object \| null` | `null` | — |
+
+## Completion
+
+Completion storage and optional custom-runtime startup adapter.
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `storage` | `"memory" \| "file" \| "sqlite" \| "redis" \| "postgres" \| "shared" \| null` | `null` | — |
+| `path` | `string \| null` | `null` | — |
+| `table` | `string \| null` | `null` | — |
+| `namespace` | `string \| null` | `null` | — |
+| `prefix` | `string \| null` | `null` | — |
+| `url` | `string \| null` | `null` | — |
+| `url_env` | `string \| null` | `null` | — |
+| `dsn` | `string \| null` | `null` | — |
+| `dsn_env` | `string \| null` | `null` | — |
+| `adapter_installer` | `string \| null` | `null` | Import path (package.module:function) called during runtime config activation. It must wire the custom terminal boundary and call register_terminal_adapter(). |
 
 ## Deployment
 

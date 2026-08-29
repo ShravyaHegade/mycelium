@@ -12,6 +12,9 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
 - Include the official `mycelium-setup` coding-agent skill in built wheels and
   add `mycelium skills install` for offline, idempotent installation into a
   project or user skill catalog.
+- Allow custom runtimes launched by `mycelium run` to declare a trusted,
+  idempotent completion adapter installer that runs before production terminal
+  protection is validated.
 
 ## 1.38.0 (2026-08-29)
 

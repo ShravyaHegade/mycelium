@@ -40,6 +40,19 @@ class StorageConfigModel(_ConfigModel):
     dsn_env: str | None = None
 
 
+class CompletionConfigModel(StorageConfigModel):
+    """Completion storage and optional custom-runtime startup adapter."""
+
+    adapter_installer: str | None = Field(
+        default=None,
+        description=(
+            "Import path (package.module:function) called during runtime config "
+            "activation. It must wire the custom terminal boundary and call "
+            "register_terminal_adapter()."
+        ),
+    )
+
+
 class TransitionConfigModel(_ConfigModel):
     """Stable identity and retry timing for guarded transitions."""
 
@@ -268,7 +281,7 @@ class MyceliumConfigModel(_ConfigModel):
     budget: StorageConfigModel | None = None
     scope_guard: StorageConfigModel | None = None
     state_authority: dict[str, Any] | None = None
-    completion: StorageConfigModel | None = None
+    completion: CompletionConfigModel | None = None
     deployment: DeploymentConfigModel | None = None
     verify: dict[str, Any] | None = None
     secret_args: SecretArgsConfigModel | None = None

@@ -262,11 +262,14 @@ def _validated_python_command(command: list[str]) -> list[str]:
 def cmd_run(config_path: Path, command: list[str]) -> int:
     """Replace this process with an auto-instrumented Python command."""
     from mycelium.auto_instrumentation import AUTO_CONFIG_ENV, AUTO_ENABLED_ENV
-    from mycelium.config import ConfigError, load_config
+    from mycelium.config import ConfigError, _load_config_for_preflight
 
     resolved_config = config_path.resolve()
     try:
-        config = load_config(resolved_config)
+        # Validate structure and instrumentation targets without activating
+        # application-owned runtime adapters in the launcher process. The
+        # child startup hook activates them after its import path is ready.
+        config = _load_config_for_preflight(resolved_config)
         config.auto_instrumentation_targets()
         child_command = _validated_python_command(command)
     except (ConfigError, OSError, ValueError) as exc:

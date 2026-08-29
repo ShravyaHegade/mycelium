@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+from types import ModuleType
 from typing import Any, TypedDict
 from unittest.mock import patch
 
@@ -23,6 +26,7 @@ from mycelium.completion_contract import (
     CompletionContract,
     get_active_completion_contract,
 )
+from mycelium.config import _load_config_for_preflight
 from mycelium.transition import TransitionScope, execution_scope
 
 
@@ -373,6 +377,61 @@ def test_production_accepts_registered_manual_adapter(
     assert cfg.completion_terminal_wired
     assert cfg.profile == PROFILE_PRODUCTION
     assert not cfg.langgraph_enabled
+
+
+def test_production_loads_configured_custom_adapter_installer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = ModuleType("test_mycelium_completion_adapter")
+    calls: list[str] = []
+
+    def install() -> None:
+        calls.append("install")
+        register_terminal_adapter("custom-final-message")
+
+    module.install = install  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+
+    cfg = load_config_from_string(
+        _completion_yaml(
+            production=True,
+            langgraph=False,
+            extra="  adapter_installer: test_mycelium_completion_adapter:install\n",
+        )
+    )
+
+    assert calls == ["install"]
+    assert cfg.completion_terminal_wired
+    assert cfg._terminal_adapters == frozenset({"custom-final-message"})
+
+
+def test_preflight_config_does_not_import_custom_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    module = ModuleType("test_mycelium_preflight_adapter")
+    calls: list[str] = []
+
+    def install() -> None:
+        calls.append("install")
+        register_terminal_adapter("custom-final-message")
+
+    module.install = install  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+
+    config_path = tmp_path / "mycelium.yaml"
+    config_path.write_text(
+        _completion_yaml(
+            production=True,
+            langgraph=False,
+            extra="  adapter_installer: test_mycelium_preflight_adapter:install\n",
+        ),
+        encoding="utf-8",
+    )
+    cfg = _load_config_for_preflight(config_path)
+
+    assert calls == []
+    assert not cfg.completion_terminal_wired
 
 
 def test_existing_config_without_completion_unchanged() -> None:

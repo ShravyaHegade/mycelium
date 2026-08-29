@@ -111,6 +111,7 @@ loop_guard:
 
 # completion:                         # AF-007 opt-in; LangGraph END auto-wired
 #   # storage omitted: inherits state_backend
+#   # adapter_installer: your_package.mycelium_completion:install  # custom runtimes
 #   required:
 #     - id: charge_customer
 #   optional:
