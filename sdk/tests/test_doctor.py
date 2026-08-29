@@ -349,6 +349,24 @@ tools: {}
     report = run_doctor_on_config(cfg, connectivity=False)
     check = next(c for c in report.checks if c.id == "budget.adapter")
     assert check.status == DoctorStatus.WARN
+    assert "one protected tool call or instrumented LLM turn" in check.details
+    assert "business workflow counters are separate" in check.details
+
+
+def test_step_only_budget_reports_protected_call_unit() -> None:
+    cfg = load_config_from_string(
+        """
+budget:
+  storage: memory
+  max_steps: 32
+tools: {}
+"""
+    )
+    report = run_doctor_on_config(cfg, connectivity=False)
+    check = next(c for c in report.checks if c.id == "budget.adapter")
+    assert check.status == DoctorStatus.PASS
+    assert "Protected-call/time budget" in check.summary
+    assert "one protected tool call or instrumented LLM turn" in check.details
 
 
 def test_cost_limit_without_resolver_warns_in_dev() -> None:

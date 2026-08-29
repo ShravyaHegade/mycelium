@@ -429,6 +429,9 @@ loop_guard:
 # missing_usage_policy: warn (default) | error (required in production
 #   when max_tokens / max_usd are set). Step/time-only budgets need no
 #   token metadata. max_usd needs register_llm_cost_resolver in production.
+# max_steps counts every budget-guarded tool call and instrumented LLM turn,
+# not business outcomes. Calibrate for worst-case success, failure/retry, and
+# cleanup paths; enforce candidate/attempt/success limits separately.
 # ---------------------------------------------------------------------------
 # budget:
 #   storage: file

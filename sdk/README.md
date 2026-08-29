@@ -1407,7 +1407,7 @@ usage.
 
 | Meter | What it limits | Needs usage metadata? |
 |-------|----------------|------------------------|
-| `max_steps` | LLM + tool turns | No |
+| `max_steps` | Protected tool invocations + instrumented LLM turns | No |
 | `max_duration` | Wall clock since run start | No |
 | `max_tokens` | Sum of input+output tokens | Yes (adapter) |
 | `max_usd` / `max_cost_usd` | Host-reported USD | Yes (cost resolver) |
@@ -1425,6 +1425,15 @@ budget:
   max_cost_usd: 10
   missing_usage_policy: error   # warn is the library default
 ```
+
+`max_steps` is a run-wide protected-call ceiling, not a count of business
+outcomes or high-level workflow stages. Each budget-guarded tool invocation and
+instrumented LLM turn reserves one step, including calls on failure, retry, and
+cleanup paths. Estimate the legitimate worst case across those paths and keep
+business limits—such as candidates processed, attempts, or successful
+submissions—in separate application counters. Doctor reports this counting unit
+but does not guess whether the ceiling is large enough because the tool list
+does not reveal the workflow's possible call paths.
 
 ```python
 from mycelium import load_config

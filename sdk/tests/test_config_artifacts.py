@@ -6,6 +6,7 @@ from pathlib import Path
 
 from mycelium import load_config
 from mycelium.config_artifacts import render_config_example, render_config_reference
+from mycelium.config_schema import config_json_schema
 
 SDK_ROOT = Path(__file__).resolve().parents[1]
 
@@ -25,3 +26,13 @@ def test_checked_in_config_artifacts_are_current(tmp_path: Path) -> None:
     config = load_config(path)
     assert config.transition is not None
     assert config.transition.agent_id == "example-agent"
+
+
+def test_budget_schema_explains_max_steps_unit() -> None:
+    schema = config_json_schema()
+    budget_schema = schema["$defs"]["BudgetConfigModel"]
+    description = budget_schema["properties"]["max_steps"]["description"]
+
+    assert "budget-guarded tool invocation" in description
+    assert "instrumented LLM turn" in description
+    assert "business workflow counters are separate" in description

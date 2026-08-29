@@ -18,6 +18,9 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
 - Make the setup skill classify features as enabled, deferred for host work,
   deferred for operator input, or intentionally not applicable instead of
   implying every feature belongs in every project.
+- Clarify that `budget.max_steps` counts protected tool calls and instrumented
+  LLM turns rather than business workflow outcomes, including the unit in the
+  typed schema, generated reference, template guidance, and Doctor output.
 
 ## 1.38.0 (2026-08-29)
 
