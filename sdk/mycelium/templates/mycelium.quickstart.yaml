@@ -12,6 +12,8 @@
 #        mycelium run --config mycelium.yaml -- python -m your_package.app
 #      Or keep explicit code-level control with @config.apply.
 
+config_version: 1
+
 integrations:
   langgraph:
     enabled: true

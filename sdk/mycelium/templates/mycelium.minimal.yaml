@@ -19,6 +19,8 @@
 # In side-effecting tools, wrap the external call in `with side_effect():` and
 #   call `record_external_operation(ref)` inside it for later reconciliation.
 
+config_version: 1
+
 transition:
   agent_id: "<TODO: fill with your agent id — used in transition keys and receipts>"
   policy_version: "<TODO: fill with your policy version string, e.g. 2026.07.1>"

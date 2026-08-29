@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -100,6 +101,19 @@ def test_init_force_overwrite(tmp_path: Path) -> None:
     out.write_text("existing", encoding="utf-8")
     assert main(["init", "-o", str(out), "--force"]) == 0
     assert "action_ledger:" in out.read_text(encoding="utf-8")
+
+
+def test_config_schema_prints_json(capsys) -> None:
+    assert main(["config", "schema"]) == 0
+    schema = json.loads(capsys.readouterr().out)
+    assert schema["properties"]["config_version"]["const"] == 1
+
+
+def test_config_schema_writes_file(tmp_path: Path) -> None:
+    out = tmp_path / "mycelium.schema.json"
+    assert main(["config", "schema", "--output", str(out)]) == 0
+    schema = json.loads(out.read_text(encoding="utf-8"))
+    assert schema["$id"].endswith("mycelium-config-v1.json")
 
 
 def test_run_rejects_missing_command_and_unsafe_python_flags(

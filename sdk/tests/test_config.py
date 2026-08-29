@@ -12,6 +12,7 @@ from mycelium import (
     ARGS_DRIFT_SOFT,
     ConfigError,
     ToolBoundaryError,
+    config_json_schema,
     get_ledger,
     ledger_sync,
     load_config,
@@ -244,11 +245,32 @@ tools:
 
 def test_empty_config_is_valid() -> None:
     config = load_config_from_string("")
+    assert config.config_version == 1
     assert config.tools == {}
     assert config.registry_allowed == []
     assert config.runner_settings == {}
     assert config.build_history_guard() is None
     assert config.build_message_validator() is None
+
+
+def test_config_version_one_is_loaded_explicitly() -> None:
+    config = load_config_from_string("config_version: 1\n")
+    assert config.config_version == 1
+
+
+def test_unknown_config_version_has_migration_diagnostic() -> None:
+    with pytest.raises(ConfigError, match=r"config_version.*1"):
+        load_config_from_string("config_version: 2\n")
+
+
+def test_config_json_schema_exposes_version_and_typed_sections() -> None:
+    schema = config_json_schema()
+
+    assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
+    assert schema["$id"].endswith("mycelium-config-v1.json")
+    assert schema["properties"]["config_version"]["const"] == 1
+    assert "ToolConfigModel" in schema["$defs"]
+    assert "TransitionConfigModel" in schema["$defs"]
 
 
 def test_callable_paths_parse_for_tools_and_tasks() -> None:

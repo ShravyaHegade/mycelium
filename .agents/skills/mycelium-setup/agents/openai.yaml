@@ -1,4 +1,4 @@
 interface:
   display_name: "Set Up Mycelium"
-  short_description: "Wire Mycelium safely into an agent project"
-  default_prompt: "Use $mycelium-setup to inspect this project and complete the Mycelium integration, configuration, and verification."
+  short_description: "Fill YAML and wire Mycelium into an agent project"
+  default_prompt: "Use $mycelium-setup to inspect this agent project, fill or merge mycelium.yaml from repository evidence, wire every real execution boundary, add behavioral tests, and run Mycelium Doctor and Verify. Infer everything safe to infer; leave only precise fail-closed placeholders for host-owned secrets, authority, production storage, or business identity."
