@@ -1130,7 +1130,10 @@ class BudgetGuard:
         c = self._ceilings
         if c.max_duration is not None and (now - state.started_at) >= c.max_duration:
             return "max_duration"
-        if c.max_steps is not None and (state.steps + pending_steps) > c.max_steps:
+        if c.max_steps is not None and (
+            state.steps + pending_steps > c.max_steps
+            or (pending_steps == 0 and state.steps >= c.max_steps)
+        ):
             return "max_steps"
         if c.max_tokens is not None and state.tokens >= c.max_tokens:
             return "max_tokens"
