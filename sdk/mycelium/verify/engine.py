@@ -393,7 +393,11 @@ def run_verify(
                             "at wall-clock deadline"
                         ),
                         artifacts=retained_artifacts,
-                        remediation="Increase --timeout or investigate the blocking operation.",
+                        remediation=(
+                            "Verification reached its wall-clock timeout. If this uses a "
+                            "remote production Redis/Postgres database, retry with at least "
+                            "--timeout 120; otherwise investigate the blocking operation."
+                        ),
                     )
                 )
                 continue
