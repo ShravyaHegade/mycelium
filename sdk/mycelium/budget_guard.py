@@ -1122,10 +1122,13 @@ class BudgetGuard:
         now: float,
         pending_steps: int,
     ) -> str | None:
-        """Return the ceiling that the next unit would exceed.
+        """Return the budget ceiling that blocks the next operation.
 
-        ``max_steps=N`` allows exactly N successful step reservations
-        (``pending_steps=1``): block only when ``steps + pending > N``.
+        With automatic accounting (``pending_steps=1``), ``max_steps=N``
+        allows exactly N reservations and blocks when the next reservation
+        would exceed N. With manual accounting (``pending_steps=0``), the
+        host records completed steps separately, so checks block once the
+        recorded count has reached N.
         """
         c = self._ceilings
         if c.max_duration is not None and (now - state.started_at) >= c.max_duration:
