@@ -57,6 +57,33 @@ jobs:
             exit 1
           fi
 
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build wheel
+        run: |
+          pip install build
+          python -m build --wheel sdk
+
+      - name: Verify bundled setup skill
+        run: python .github/scripts/check-wheel-contents.py sdk/dist/*.whl
+
+      - name: Verify offline skill installation from wheel
+        run: |
+          python -m venv /tmp/mycelium-wheel-test
+          /tmp/mycelium-wheel-test/bin/pip install sdk/dist/*.whl
+          mkdir /tmp/mycelium-empty-project
+          cd /tmp/mycelium-empty-project
+          /tmp/mycelium-wheel-test/bin/mycelium skills install
+          test -f .agents/skills/mycelium-setup/SKILL.md
+
   test:
     runs-on: ubuntu-latest
     strategy:

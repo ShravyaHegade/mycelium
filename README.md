@@ -102,12 +102,18 @@ Not Langfuse. Use both if you want traces and guards. Not an approvals inbox, ho
 
 ### Let your coding agent wire it
 
-This repository ships the discoverable
-[`mycelium-setup`](.agents/skills/mycelium-setup/SKILL.md) skill. Once the skill
-is available to the coding agent, the developer can simply ask: “Set up
-Mycelium in this project.” The agent inventories tools, classifies side effects,
-adds dependencies, creates or merges `mycelium.yaml`, wires the actual runtime
-boundary, adds tests, and runs Doctor/Verify.
+The PyPI package bundles the official
+[`mycelium-setup`](.agents/skills/mycelium-setup/SKILL.md) skill. Install it
+offline into the current project's agent catalog, then simply ask your coding
+agent: “Set up Mycelium in this project.” The agent inventories tools,
+classifies side effects, adds dependencies, creates or merges `mycelium.yaml`,
+wires the actual runtime boundary, adds tests, and runs Doctor/Verify.
+
+```bash
+pip install mycelium-runtime
+mycelium skills install                    # ./.agents/skills/mycelium-setup
+mycelium skills install --target ~/.codex/skills  # optional user catalog
+```
 
 The workflow is intentionally fail-closed: it will not invent production
 secrets, business request identities, provider permissions, or authorization.
