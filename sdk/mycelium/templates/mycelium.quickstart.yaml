@@ -1,4 +1,5 @@
 # Mycelium on-ramp: stop duplicate tool execution on LangGraph retry.
+# IDE/agent schema: mycelium config schema -o mycelium.schema.json
 #
 # Scaffolded with:  mycelium init   (default — start here)
 # Full reference:   mycelium init --full
@@ -11,6 +12,8 @@
 #   3. Put subagent_task at the callable path below, then launch:
 #        mycelium run --config mycelium.yaml -- python -m your_package.app
 #      Or keep explicit code-level control with @config.apply.
+
+config_version: 1
 
 integrations:
   langgraph:

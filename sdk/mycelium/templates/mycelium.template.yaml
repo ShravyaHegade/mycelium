@@ -1,4 +1,5 @@
 # Mycelium configuration (full reference template).
+# IDE/agent schema: mycelium config schema -o mycelium.schema.json
 # Scaffold: mycelium init --full
 # On-ramp (default): mycelium init | smaller multi-guard: mycelium init --minimal
 #
@@ -78,6 +79,8 @@
 #   Reconciler in code: `@ledger_sync(reconciler=...)` or
 #   `ActionLedger(reconciler=...)`. It returns COMPLETED / NOT_EXECUTED /
 #   UNKNOWN and is fail-closed (reconcilers can't be declared in YAML).
+
+config_version: 1
 
 # ---------------------------------------------------------------------------
 # profile  (omit for development; production tightens safety policies)

@@ -135,9 +135,11 @@ from mycelium.config import (
     ConfigError,
     MyceliumConfig,
     TransitionConfig,
+    config_json_schema,
     load_config,
     load_config_from_string,
 )
+from mycelium.config_schema import CONFIG_SCHEMA_ID, CONFIG_VERSION, MyceliumConfigModel
 from mycelium.decision import (
     PREDICATE_AUTHORITY,
     PREDICATE_DESTINATION_POLICY,
@@ -658,8 +660,12 @@ __all__ = [
     "task_ledger",
     "task_ledger_sync",
     "ConfigError",
+    "CONFIG_SCHEMA_ID",
+    "CONFIG_VERSION",
     "MyceliumConfig",
+    "MyceliumConfigModel",
     "TransitionConfig",
+    "config_json_schema",
     "DoctorCheck",
     "DoctorReport",
     "DoctorStatus",

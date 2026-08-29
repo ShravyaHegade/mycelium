@@ -5,12 +5,18 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
 
 ## Unreleased
 
+## 1.37.0 (2026-08-29)
+
 ### Added
 
 - Bounded transition lifecycle operations: Postgres connection pooling and
   server-side filtered keyset pagination, Redis status/start/finish sorted-set
   indexes with legacy backfill, configurable retention age, sanitized NDJSON
   export/archive, and safe-by-default `mycelium transitions prune --dry-run`.
+
+- Distributable setup skill and configuration contract improvements, including
+  CRM-aware discovery guidance, versioned config schema validation, a schema CLI,
+  richer templates, and stricter fail-closed verification.
 
 ## 1.36.0 (2026-08-27)
 

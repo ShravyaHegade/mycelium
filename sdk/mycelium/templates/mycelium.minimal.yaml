@@ -1,4 +1,5 @@
 # Mycelium configuration (minimal).
+# IDE/agent schema: mycelium config schema -o mycelium.schema.json
 #
 # Scaffolded with:  mycelium init --minimal
 #
@@ -18,6 +19,8 @@
 #   read | idempotent_mutate | keyed_mutate | non_idempotent_mutate | irreversible
 # In side-effecting tools, wrap the external call in `with side_effect():` and
 #   call `record_external_operation(ref)` inside it for later reconciliation.
+
+config_version: 1
 
 transition:
   agent_id: "<TODO: fill with your agent id — used in transition keys and receipts>"

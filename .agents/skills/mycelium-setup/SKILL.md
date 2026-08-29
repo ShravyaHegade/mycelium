@@ -1,6 +1,6 @@
 ---
 name: mycelium-setup
-description: Set up or repair Mycelium in an existing Python agent project, including dependency changes, mycelium.yaml, tool and framework wiring, safe side-effect classification, durable storage, and verification. Use when the user asks to install, configure, integrate, or fully wire Mycelium. Do not use for unrelated application work or ordinary Mycelium SDK development.
+description: Set up or repair Mycelium in an existing Python agent project, including CRM agents, by inspecting the application, filling or merging mycelium.yaml, wiring real tool boundaries, and verifying the integration. Use when the user asks to install, configure, integrate, or fully wire Mycelium. Do not use for unrelated application work or ordinary Mycelium SDK development.
 ---
 
 # Set Up Mycelium
@@ -21,13 +21,36 @@ CLI (`mycelium init --full`), and inspect `mycelium --help`, `mycelium doctor
 --help`, and `mycelium verify --help`. Never overwrite the application's current
 configuration merely to obtain a template.
 
+## Configuration completion contract
+
+Treat `mycelium.yaml` as an evidence-backed application configuration, not a
+generic scaffold. Fill every value that can be proven from source code,
+deployment files, existing configuration, and declared environment-variable
+names. Remove template examples and TODOs that do not describe a real callable.
+
+For CRM and similar business agents, explicitly look for customer/contact reads,
+record creation or updates, email/message sends, imports/exports, bulk actions,
+deletes, payments, webhooks, scheduled jobs, and external API mutations. Bind
+each reachable operation to its actual callable and classify its externally
+observable effect. Do not assume a function is safe because its name sounds
+read-only.
+
+Do not stop after generating YAML. Completion requires a loadable configuration,
+runtime wiring at the actual execution boundary, and behavioral verification.
+If a host-owned value cannot be inferred safely, leave one precise documented
+placeholder that fails closed and include it in the final questions list. Do not
+leave vague TODOs such as "configure this later."
+
 ## Workflow
 
 1. Inspect the dependency files, runtime entry points, framework, tool/task
    registration, existing retry behavior, provider clients, deployment files,
    environment-variable names, and current Mycelium configuration/wrappers.
 2. Inventory every callable reachable as an agent tool or durable task. Trace
-   aliases and decorators so the same callable is not wrapped twice.
+   aliases, registries, dynamic exports, and decorators so the same callable is
+   not omitted or wrapped twice. Record the inventory while working: tool name,
+   callable path, provider/effect, class, business identity source, and selected
+   guard/storage path.
 3. Classify each tool from code evidence. Read
    [references/tool-classification.md](references/tool-classification.md) before
    writing configuration.
@@ -37,7 +60,8 @@ configuration merely to obtain a template.
 5. Create or merge `mycelium.yaml`. Preserve deliberate existing settings.
    Prefer current template defaults, explicit callable paths, stable transition
    identity, strict policies for consequential tools, and durable storage that
-   matches the discovered deployment topology.
+   matches the discovered deployment topology. Load the completed file through
+   the installed Mycelium version before treating it as valid.
 6. Wire the real execution boundary. Prefer a supported framework integration
    or Mycelium's wrapper/config instrumentation path. For a custom loop, wrap the
    callable at the last boundary before execution. Ensure sync/async parity and
@@ -55,8 +79,24 @@ configuration merely to obtain a template.
    redispatch does not silently duplicate effects, missing identity fails as
    configured, and framework terminal/LLM hooks are active when selected.
 10. Run focused application tests, configuration import/load, `mycelium doctor`,
-    and appropriate synthetic `mycelium verify` scenarios. Run the project's
-    normal lint/test commands afterward. Fix integration failures before handoff.
+    `mycelium doctor --strict`, and appropriate synthetic `mycelium verify`
+    scenarios. Run the project's normal lint/test commands afterward. Fix
+    integration failures before handoff. If strict Doctor cannot pass because a
+    host-owned input is absent, preserve the fail-closed configuration and report
+    the exact missing input instead of weakening the policy.
+
+## Host-owned questions
+
+Infer first; ask only for decisions or authority the repository cannot prove.
+Group unresolved items into a short final list, such as:
+
+- the stable business operation ID used across retries;
+- production Redis/Postgres connection environment-variable name or topology;
+- provider idempotency-key and read-only reconciliation guarantees;
+- approved CRM destinations, destructive objects, or authority windows;
+- secret/signing-key environment-variable names and production permissions.
+
+Never ask the user to transcribe information already present in the repository.
 
 ## Safe autonomy
 
@@ -83,11 +123,12 @@ non-negotiable:
 
 Return a short handoff containing:
 
+- the completed `mycelium.yaml` path and any intentionally unresolved placeholders;
 - files and execution boundaries wired;
 - tool classifications and identity sources chosen;
 - storage/topology choice;
 - Doctor, Verify, and application-test results;
-- any fail-closed unresolved inputs the application owner must supply.
+- only the fail-closed host-owned inputs the application owner must supply.
 
 Do not describe the setup as complete if YAML exists but the runtime boundary is
 unwired, tests fail, or a consequential tool lacks trustworthy identity.

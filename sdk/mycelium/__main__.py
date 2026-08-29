@@ -64,6 +64,19 @@ def cmd_init(output: Path, *, full: bool, minimal: bool, force: bool) -> int:
     return 0
 
 
+def cmd_config_schema(output: Path | None) -> int:
+    """Print or write the JSON Schema for the current config version."""
+    from mycelium.config import config_json_schema
+
+    text = json.dumps(config_json_schema(), indent=2, sort_keys=True) + "\n"
+    if output is None:
+        print(text, end="")
+    else:
+        output.write_text(text, encoding="utf-8")
+        print(f"Wrote {output}")
+    return 0
+
+
 def cmd_demo(*, redis: bool = False, slow: bool = False) -> int:
     from mycelium.quickstart import run_demo
 
@@ -134,12 +147,9 @@ def cmd_providers_verify_report(args: argparse.Namespace) -> int:
         fixture = get_provider_conformance_fixture(report.adapter_name)
     except ValueError:
         fixture = None
-    source_matches = (
-        fixture is not None and adapter_report_matches_fixture(report, fixture)
-    )
-    verified = (
-        fixture is not None
-        and adapter_report_is_verified(report, signing_key, fixture=fixture)
+    source_matches = fixture is not None and adapter_report_matches_fixture(report, fixture)
+    verified = fixture is not None and adapter_report_is_verified(
+        report, signing_key, fixture=fixture
     )
     if args.json:
         print(
@@ -175,16 +185,13 @@ def _validated_python_command(command: list[str]) -> list[str]:
         raise ValueError(f"Python executable not found: {command[0]!r}")
     if Path(executable).resolve() != Path(sys.executable).resolve():
         raise ValueError(
-            "'mycelium run' requires the current Python interpreter; use "
-            f"{sys.executable!r}"
+            f"'mycelium run' requires the current Python interpreter; use {sys.executable!r}"
         )
     forbidden = {"-E", "-I", "-S"}
     present = forbidden.intersection(command[1:])
     if present:
         flags = ", ".join(sorted(present))
-        raise ValueError(
-            f"Python flag(s) {flags} disable safe Mycelium startup instrumentation"
-        )
+        raise ValueError(f"Python flag(s) {flags} disable safe Mycelium startup instrumentation")
     return [executable, *command[1:]]
 
 
@@ -202,11 +209,7 @@ def cmd_run(config_path: Path, command: list[str]) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    bootstrap_dir = (
-        Path(__file__).resolve().parent
-        / "auto_instrumentation"
-        / "site_bootstrap"
-    )
+    bootstrap_dir = Path(__file__).resolve().parent / "auto_instrumentation" / "site_bootstrap"
     env = dict(os.environ)
     # sitecustomize imports tools before the interpreter prepends CWD to
     # sys.path (``python -m`` / ``-c``). Keep CWD importable for fresh
@@ -518,9 +521,7 @@ def cmd_transitions_prune(args: argparse.Namespace) -> int:
         if args.older_than is not None:
             before = time.time() - parse_duration_seconds(args.older_than)
         outcomes = (
-            frozenset(TerminalOutcome(value) for value in args.outcome)
-            if args.outcome
-            else None
+            frozenset(TerminalOutcome(value) for value in args.outcome) if args.outcome else None
         )
         candidates: list[Any] = []
         plans: list[tuple[Any, list[Any]]] = []
@@ -549,9 +550,7 @@ def cmd_transitions_prune(args: argparse.Namespace) -> int:
         deleted = 0
         if args.execute:
             for ledger, selected in plans:
-                deleted += ledger.delete_transitions(
-                    [entry.request_id for entry in selected]
-                )
+                deleted += ledger.delete_transitions([entry.request_id for entry in selected])
         mode = "would prune" if not args.execute else "pruned"
         print(f"{mode} {len(candidates) if not args.execute else deleted} transitions")
         if args.archive is not None:
@@ -717,8 +716,7 @@ def cmd_migrate(args: argparse.Namespace) -> int:
         "mode": "plan" if args.plan else "apply",
         "target_version": args.target_version,
         "backends": [
-            {"backend": index, **plan.to_dict()}
-            for index, plan in enumerate(plans, start=1)
+            {"backend": index, **plan.to_dict()} for index, plan in enumerate(plans, start=1)
         ],
     }
     unsupported = any(not plan.can_apply for plan in plans)
@@ -729,10 +727,13 @@ def cmd_migrate(args: argparse.Namespace) -> int:
         else:
             print(f"Ledger migration plan: target schema {args.target_version}")
             for index, plan in enumerate(plans, start=1):
-                versions = ", ".join(
-                    f"v{version}={count}"
-                    for version, count in sorted(plan.version_counts.items())
-                ) or "empty"
+                versions = (
+                    ", ".join(
+                        f"v{version}={count}"
+                        for version, count in sorted(plan.version_counts.items())
+                    )
+                    or "empty"
+                )
                 print(
                     f"backend {index}: total={plan.total_entries} "
                     f"migrate={plan.pending_entries} current={plan.current_entries} "
@@ -761,8 +762,7 @@ def cmd_migrate(args: argparse.Namespace) -> int:
         return 1
 
     payload["backends"] = [
-        {"backend": index, **result.to_dict()}
-        for index, result in enumerate(results, start=1)
+        {"backend": index, **result.to_dict()} for index, result in enumerate(results, start=1)
     ]
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -869,9 +869,7 @@ def cmd_outcomes_dttr(args: argparse.Namespace) -> int:
         long_running_after = config_long_running
     report = compute_dttr(
         storage.list_all(),
-        long_running_after=(
-            float(long_running_after) if long_running_after is not None else None
-        ),
+        long_running_after=(float(long_running_after) if long_running_after is not None else None),
     )
     if args.json:
         print(json.dumps(report.to_dict(), indent=2, default=str))
@@ -891,8 +889,10 @@ def cmd_outcomes_dttr(args: argparse.Namespace) -> int:
             f"{marker}"
         )
     if report.long_running_or_redispatched == 0 and report.transitions > 0:
-        print("no long-running or redispatched transitions: DTTR is undefined "
-              "(denominator forced to 1)")
+        print(
+            "no long-running or redispatched transitions: DTTR is undefined "
+            "(denominator forced to 1)"
+        )
     return 0
 
 
@@ -933,9 +933,7 @@ def _scope_guard_from_args(args: argparse.Namespace) -> Any:
 
     if getattr(args, "file", None):
         allowed = [
-            s.strip()
-            for s in (getattr(args, "allowed_tools", None) or "").split(",")
-            if s.strip()
+            s.strip() for s in (getattr(args, "allowed_tools", None) or "").split(",") if s.strip()
         ]
         grant = ScopeGrant(allowed_tools=frozenset(allowed)) if allowed else None
         return ScopeGuard(FileScopeGuardStorage(args.file), default_grant=grant)
@@ -1000,9 +998,7 @@ def cmd_scope_bind(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    allowed = [
-        s.strip() for s in (args.allowed_tools or "").split(",") if s.strip()
-    ]
+    allowed = [s.strip() for s in (args.allowed_tools or "").split(",") if s.strip()]
     if allowed:
         grant = ScopeGrant(allowed_tools=frozenset(allowed))
     elif guard.default_grant is not None:
@@ -1037,14 +1033,10 @@ def _completion_from_args(args: argparse.Namespace) -> Any:
 
     if getattr(args, "file", None):
         required = [
-            s.strip()
-            for s in (getattr(args, "required", None) or "").split(",")
-            if s.strip()
+            s.strip() for s in (getattr(args, "required", None) or "").split(",") if s.strip()
         ]
         optional = [
-            s.strip()
-            for s in (getattr(args, "optional", None) or "").split(",")
-            if s.strip()
+            s.strip() for s in (getattr(args, "optional", None) or "").split(",") if s.strip()
         ]
         if not required and not optional:
             raise ConfigError(
@@ -1117,13 +1109,8 @@ def cmd_completion_status(args: argparse.Namespace) -> int:
         else:
             flags.append("ALLOW")
         flag_s = f" [{' '.join(flags)}]" if flags else ""
-        print(
-            f"{state.scope_key}  required={state.required}  "
-            f"optional={state.optional}{flag_s}"
-        )
-        for sid in state.required + [
-            x for x in state.optional if x not in state.required
-        ]:
+        print(f"{state.scope_key}  required={state.required}  optional={state.optional}{flag_s}")
+        for sid in state.required + [x for x in state.optional if x not in state.required]:
             mark = state.marks.get(sid)
             if mark is None:
                 kind = "required" if sid in state.required else "optional"
@@ -1132,10 +1119,7 @@ def cmd_completion_status(args: argparse.Namespace) -> int:
                 reason = f" reason={mark.reason!r}" if mark.reason else ""
                 print(f"  {sid}: {mark.status}{reason}")
         if pending_r:
-            print(
-                f"  → mark required ids then retry complete_run / END "
-                f"(pending: {pending_r})"
-            )
+            print(f"  → mark required ids then retry complete_run / END (pending: {pending_r})")
     return 0
 
 
@@ -1395,9 +1379,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
         signing_key = os.environ.get(key_env, "") if key_env else ""
         try:
             if not signing_key:
-                raise ValueError(
-                    "--attestation-key-env must name a non-empty environment variable"
-                )
+                raise ValueError("--attestation-key-env must name a non-empty environment variable")
             attestation = DeploymentAttestation.from_dict(
                 json.loads(args.verify_attestation.read_text(encoding="utf-8"))
             )
@@ -1443,8 +1425,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
             else:
                 try:
                     args.attestation_output.write_text(
-                        json.dumps(result.attestation.to_dict(), indent=2, sort_keys=True)
-                        + "\n",
+                        json.dumps(result.attestation.to_dict(), indent=2, sort_keys=True) + "\n",
                         encoding="utf-8",
                     )
                 except OSError as exc:
@@ -1656,6 +1637,22 @@ def main(argv: list[str] | None = None) -> int:
         help="Overwrite an existing file",
     )
 
+    config_parser = sub.add_parser(
+        "config",
+        help="Inspect the versioned mycelium.yaml configuration contract",
+    )
+    config_sub = config_parser.add_subparsers(dest="config_command", required=True)
+    config_schema_parser = config_sub.add_parser(
+        "schema",
+        help="Print JSON Schema for IDEs, agents, and CI",
+    )
+    config_schema_parser.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        help="Write the schema to a file instead of stdout",
+    )
+
     demo_parser = sub.add_parser(
         "demo",
         help="Feature tour: without/with Mycelium + gates, repair, reconcile, release",
@@ -1715,8 +1712,7 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=LEDGER_ENTRY_SCHEMA_VERSION,
         help=(
-            "Target ledger schema version "
-            f"(default: current schema {LEDGER_ENTRY_SCHEMA_VERSION})"
+            f"Target ledger schema version (default: current schema {LEDGER_ENTRY_SCHEMA_VERSION})"
         ),
     )
     migrate_parser.add_argument(
@@ -1771,9 +1767,7 @@ def main(argv: list[str] | None = None) -> int:
         "providers",
         help="Verify shipped read-only provider reconciliation adapters",
     )
-    providers_sub = providers_parser.add_subparsers(
-        dest="providers_command", required=True
-    )
+    providers_sub = providers_parser.add_subparsers(dest="providers_command", required=True)
     providers_verify_parser = providers_sub.add_parser(
         "verify",
         help="Run adversarial conformance tests and sign the report",
@@ -1829,9 +1823,7 @@ def main(argv: list[str] | None = None) -> int:
         "transitions",
         help="Operator triage and release of stuck (hard-blocked) transitions",
     )
-    transitions_sub = transitions_parser.add_subparsers(
-        dest="transitions_command", required=True
-    )
+    transitions_sub = transitions_parser.add_subparsers(dest="transitions_command", required=True)
 
     list_parser = transitions_sub.add_parser(
         "list", help="List ledger transitions (optionally only stuck ones)"
@@ -1857,9 +1849,7 @@ def main(argv: list[str] | None = None) -> int:
         metavar="REQUEST_ID",
         help="Only children of this handoff parent request_id",
     )
-    list_parser.add_argument(
-        "--json", action="store_true", help="Machine-readable JSON output"
-    )
+    list_parser.add_argument("--json", action="store_true", help="Machine-readable JSON output")
 
     export_parser = transitions_sub.add_parser(
         "export", help="Export transitions as sanitized newline-delimited JSON"
@@ -1867,9 +1857,7 @@ def main(argv: list[str] | None = None) -> int:
     _add_operator_storage_args(export_parser)
     export_parser.add_argument("--output", required=True)
     export_parser.add_argument("--tool", default=None)
-    export_parser.add_argument(
-        "--outcome", choices=[item.value for item in TerminalOutcome]
-    )
+    export_parser.add_argument("--outcome", choices=[item.value for item in TerminalOutcome])
     export_parser.add_argument("--page-size", type=int, default=500)
 
     prune_parser = transitions_sub.add_parser(
@@ -1923,12 +1911,8 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="JSON result recorded for --verified completed",
     )
-    release_parser.add_argument(
-        "--by", required=True, help="Operator identity (audit stamp)"
-    )
-    release_parser.add_argument(
-        "--reason", required=True, help="Why the release is justified"
-    )
+    release_parser.add_argument("--by", required=True, help="Operator identity (audit stamp)")
+    release_parser.add_argument("--reason", required=True, help="Why the release is justified")
 
     mark_dead_parser = transitions_sub.add_parser(
         "mark-dead",
@@ -1936,12 +1920,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     _add_operator_storage_args(mark_dead_parser)
     mark_dead_parser.add_argument("request_id")
-    mark_dead_parser.add_argument(
-        "--by", required=True, help="Operator identity (audit stamp)"
-    )
-    mark_dead_parser.add_argument(
-        "--reason", required=True, help="Why the worker is believed dead"
-    )
+    mark_dead_parser.add_argument("--by", required=True, help="Operator identity (audit stamp)")
+    mark_dead_parser.add_argument("--reason", required=True, help="Why the worker is believed dead")
     mark_dead_parser.add_argument(
         "--override-heartbeat",
         action="store_true",
@@ -1956,9 +1936,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     loops_sub = loops_parser.add_subparsers(dest="loops_command", required=True)
 
-    loops_status = loops_sub.add_parser(
-        "status", help="Show loop-guard state for runs"
-    )
+    loops_status = loops_sub.add_parser("status", help="Show loop-guard state for runs")
     loops_status.add_argument(
         "run_id",
         nargs="?",
@@ -1983,9 +1961,7 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Only hard-blocked runs",
     )
-    loops_status.add_argument(
-        "--json", action="store_true", help="Machine-readable JSON output"
-    )
+    loops_status.add_argument("--json", action="store_true", help="Machine-readable JSON output")
 
     loops_release = loops_sub.add_parser(
         "release",
@@ -2009,23 +1985,16 @@ def main(argv: list[str] | None = None) -> int:
         "--verified",
         required=True,
         choices=["clear", "allow-once", "abort-run"],
-        help="clear: wipe counters; allow-once: one matching action; "
-        "abort-run: keep frozen",
+        help="clear: wipe counters; allow-once: one matching action; abort-run: keep frozen",
     )
-    loops_release.add_argument(
-        "--by", required=True, help="Operator identity (audit stamp)"
-    )
-    loops_release.add_argument(
-        "--reason", required=True, help="Why the release is justified"
-    )
+    loops_release.add_argument("--by", required=True, help="Operator identity (audit stamp)")
+    loops_release.add_argument("--reason", required=True, help="Why the release is justified")
 
     completion_parser = sub.add_parser(
         "completion",
         help="AF-007 completion contract: status and mark subtasks before terminal",
     )
-    completion_sub = completion_parser.add_subparsers(
-        dest="completion_command", required=True
-    )
+    completion_sub = completion_parser.add_subparsers(dest="completion_command", required=True)
 
     completion_status = completion_sub.add_parser(
         "status", help="Show completion-contract checklist for runs"
@@ -2132,9 +2101,7 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Direct path to budget JSON file storage",
     )
-    budget_status.add_argument(
-        "--json", action="store_true", help="Machine-readable JSON output"
-    )
+    budget_status.add_argument("--json", action="store_true", help="Machine-readable JSON output")
 
     budget_release = budget_sub.add_parser(
         "release",
@@ -2177,9 +2144,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     scope_sub = scope_parser.add_subparsers(dest="scope_command", required=True)
 
-    scope_status = scope_sub.add_parser(
-        "status", help="Show frozen tool allowlists for runs"
-    )
+    scope_status = scope_sub.add_parser("status", help="Show frozen tool allowlists for runs")
     scope_status.add_argument(
         "run_id",
         nargs="?",
@@ -2204,9 +2169,7 @@ def main(argv: list[str] | None = None) -> int:
         default="",
         help="Comma-separated tools (with --file, optional default grant)",
     )
-    scope_status.add_argument(
-        "--json", action="store_true", help="Machine-readable JSON output"
-    )
+    scope_status.add_argument("--json", action="store_true", help="Machine-readable JSON output")
 
     scope_bind = scope_sub.add_parser(
         "bind", help="Freeze (or narrow) a tool allowlist for a run_id"
@@ -2235,22 +2198,18 @@ def main(argv: list[str] | None = None) -> int:
         "outcomes",
         help="Outcome telemetry: compute DTTR over emitted resolution rows",
     )
-    outcomes_sub = outcomes_parser.add_subparsers(
-        dest="outcomes_command", required=True
-    )
+    outcomes_sub = outcomes_parser.add_subparsers(dest="outcomes_command", required=True)
 
     dttr_parser = outcomes_sub.add_parser(
         "dttr",
-        help="Compute the Duplicate Tool Transition Rate (DTTR) over an "
-        "outcome log; target is 0.0",
+        help="Compute the Duplicate Tool Transition Rate (DTTR) over an outcome log; target is 0.0",
     )
     dttr_parser.add_argument(
         "-c",
         "--config",
         type=Path,
         default=None,
-        help="mycelium.yaml to read the outcome_emit storage from "
-        "(default: ./mycelium.yaml)",
+        help="mycelium.yaml to read the outcome_emit storage from (default: ./mycelium.yaml)",
     )
     dttr_parser.add_argument(
         "--file",
@@ -2267,9 +2226,7 @@ def main(argv: list[str] | None = None) -> int:
         help="seconds; transitions older than this count as long-running "
         "(default: outcome_emit.long_running_after, else disabled)",
     )
-    dttr_parser.add_argument(
-        "--json", action="store_true", help="Machine-readable JSON output"
-    )
+    dttr_parser.add_argument("--json", action="store_true", help="Machine-readable JSON output")
 
     args = parser.parse_args(argv)
     if args.command == "init":
@@ -2280,6 +2237,9 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_run(args.config, args.child_command)
     if args.command == "migrate":
         return cmd_migrate(args)
+    if args.command == "config":
+        if args.config_command == "schema":
+            return cmd_config_schema(args.output)
     if args.command == "state":
         if args.state_command == "migrate":
             return cmd_state_migrate(args)

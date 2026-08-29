@@ -67,6 +67,10 @@ from mycelium.completion_contract import (
     registered_terminal_adapters,
     set_active_completion_contract,
 )
+from mycelium.config_schema import (
+    CONFIG_VERSION,
+    config_json_schema,
+)
 from mycelium.decision import DecisionPolicyBundle, apply_decision_policy
 from mycelium.destructive_confirm import (
     MISSING_POLICIES as DESTRUCTIVE_MISSING_POLICIES,
@@ -236,9 +240,7 @@ class ConfigError(Exception):
 
 MEMORY_STORAGE_POLICY_WARN = "warn"
 MEMORY_STORAGE_POLICY_ERROR = "error"
-MEMORY_STORAGE_POLICIES = frozenset(
-    {MEMORY_STORAGE_POLICY_WARN, MEMORY_STORAGE_POLICY_ERROR}
-)
+MEMORY_STORAGE_POLICIES = frozenset({MEMORY_STORAGE_POLICY_WARN, MEMORY_STORAGE_POLICY_ERROR})
 
 PROFILE_DEVELOPMENT = "development"
 PROFILE_PRODUCTION = "production"
@@ -280,9 +282,7 @@ def _parse_callable_path(raw: Any, *, kind: str, name: str) -> str | None:
     if raw is None:
         return None
     if not isinstance(raw, str) or not _CALLABLE_PATH_RE.fullmatch(raw):
-        raise ConfigError(
-            f"{kind} {name!r}.callable must be 'package.module:function'"
-        )
+        raise ConfigError(f"{kind} {name!r}.callable must be 'package.module:function'")
     return raw
 
 
@@ -291,15 +291,11 @@ def _import_callable(callable_path: str, *, kind: str) -> Callable[..., Any]:
     try:
         module = importlib.import_module(module_name)
     except ImportError as exc:
-        raise ConfigError(
-            f"{kind} {callable_path!r} could not be imported: {exc}"
-        ) from exc
+        raise ConfigError(f"{kind} {callable_path!r} could not be imported: {exc}") from exc
     try:
         target = getattr(module, attribute)
     except AttributeError as exc:
-        raise ConfigError(
-            f"{kind} {callable_path!r} does not exist"
-        ) from exc
+        raise ConfigError(f"{kind} {callable_path!r} does not exist") from exc
     if not callable(target):
         raise ConfigError(f"{kind} {callable_path!r} is not callable")
     return target
@@ -315,10 +311,7 @@ def _check_existing_config_wrapper(
     if applied is not None:
         if applied == (kind, name):
             return True
-        raise ConfigError(
-            f"{kind} {name!r} is already configured as "
-            f"{applied[0]} {applied[1]!r}"
-        )
+        raise ConfigError(f"{kind} {name!r} is already configured as {applied[0]} {applied[1]!r}")
     if any(getattr(func, marker, False) for marker in _GUARD_MARKERS):
         raise ConfigError(
             f"{kind} {name!r} is already partially Mycelium-wrapped; "
@@ -448,6 +441,7 @@ class MyceliumConfig:
     tools: dict[str, ToolConfig]
     registry_allowed: list[str]
     runner_settings: dict[str, Any]
+    config_version: int = CONFIG_VERSION
     history_guard: dict[str, Any] | None = None
     message_validator: bool = False
     tasks: dict[str, TaskConfig] | None = None
@@ -517,9 +511,7 @@ class MyceliumConfig:
                 return False
         return True
 
-    def scope_guard_applies(
-        self, name: str, tool_config: ToolConfig | None = None
-    ) -> bool:
+    def scope_guard_applies(self, name: str, tool_config: ToolConfig | None = None) -> bool:
         """Whether AF-008 scope_guard should wrap this tool."""
         if self.scope_guard is None:
             return False
@@ -535,9 +527,7 @@ class MyceliumConfig:
                 return False
         return True
 
-    def budget_guard_applies(
-        self, name: str, tool_config: ToolConfig | None = None
-    ) -> bool:
+    def budget_guard_applies(self, name: str, tool_config: ToolConfig | None = None) -> bool:
         """Whether budget_guard should wrap this tool."""
         if self.budget is None:
             return False
@@ -553,9 +543,7 @@ class MyceliumConfig:
                 return False
         return True
 
-    def state_authority_applies(
-        self, name: str, tool_config: ToolConfig | None = None
-    ) -> bool:
+    def state_authority_applies(self, name: str, tool_config: ToolConfig | None = None) -> bool:
         """Whether the state-authority execution gate should wrap this tool."""
         if self.state_authority is None:
             return False
@@ -571,9 +559,7 @@ class MyceliumConfig:
                 return False
         return True
 
-    def secret_args_applies(
-        self, name: str, tool_config: ToolConfig | None = None
-    ) -> bool:
+    def secret_args_applies(self, name: str, tool_config: ToolConfig | None = None) -> bool:
         """Whether secret-in-args scanning should wrap this tool."""
         if self.secret_args is None:
             return False
@@ -587,9 +573,7 @@ class MyceliumConfig:
             return False
         return True
 
-    def entity_guard_applies(
-        self, name: str, tool_config: ToolConfig | None = None
-    ) -> bool:
+    def entity_guard_applies(self, name: str, tool_config: ToolConfig | None = None) -> bool:
         """Whether destination-policy checking should wrap this tool."""
         if self.entity_guard is None:
             return False
@@ -601,9 +585,7 @@ class MyceliumConfig:
             return False
         return name in policy.tools
 
-    def destructive_confirm_applies(
-        self, name: str, tool_config: ToolConfig | None = None
-    ) -> bool:
+    def destructive_confirm_applies(self, name: str, tool_config: ToolConfig | None = None) -> bool:
         """Whether destructive-confirm should wrap this tool."""
         if self.destructive_confirm is None:
             return False
@@ -615,9 +597,7 @@ class MyceliumConfig:
             return False
         return name in policy.tools
 
-    def use_time_currency_applies(
-        self, name: str, tool_config: ToolConfig | None = None
-    ) -> bool:
+    def use_time_currency_applies(self, name: str, tool_config: ToolConfig | None = None) -> bool:
         """Whether use-time currency should wrap this tool."""
         if self.use_time_currency is None:
             return False
@@ -901,17 +881,9 @@ class MyceliumConfig:
             from dataclasses import replace as _replace_policy
 
             policy = entity_guard_policy_from_mapping(self.entity_guard or {})
-            if (
-                policy.policy_version == "unspecified"
-                and self.transition is not None
-            ):
-                policy = _replace_policy(
-                    policy, policy_version=self.transition.policy_version
-                )
-            if (
-                self.profile == PROFILE_PRODUCTION
-                and policy.missing_policy != MISSING_POLICY_ERROR
-            ):
+            if policy.policy_version == "unspecified" and self.transition is not None:
+                policy = _replace_policy(policy, policy_version=self.transition.policy_version)
+            if self.profile == PROFILE_PRODUCTION and policy.missing_policy != MISSING_POLICY_ERROR:
                 raise ConfigError(
                     f"profile is {PROFILE_PRODUCTION!r} but "
                     f"entity_guard.missing_policy is {policy.missing_policy!r}; "
@@ -930,11 +902,7 @@ class MyceliumConfig:
         # Secret-in-args outside every other guard: scan before claim/fingerprint.
         if applies_secret:
             policy = secret_args_policy_from_mapping(self.secret_args or {})
-            if (
-                self.profile == PROFILE_PRODUCTION
-                and consequential
-                and policy.policy != "error"
-            ):
+            if self.profile == PROFILE_PRODUCTION and consequential and policy.policy != "error":
                 raise ConfigError(
                     f"profile is {PROFILE_PRODUCTION!r} but secret_args.policy "
                     f"is {policy.policy!r}; consequential tool {name!r} requires "
@@ -998,27 +966,19 @@ class MyceliumConfig:
             if tool.callable_path is None:
                 missing.append(f"tool {name!r}")
             else:
-                targets.append(
-                    AutoInstrumentationTarget("tool", name, tool.callable_path)
-                )
+                targets.append(AutoInstrumentationTarget("tool", name, tool.callable_path))
         for name, task in (self.tasks or {}).items():
             if task.is_noop():
                 continue
             if task.callable_path is None:
                 missing.append(f"task {name!r}")
             else:
-                targets.append(
-                    AutoInstrumentationTarget("task", name, task.callable_path)
-                )
+                targets.append(AutoInstrumentationTarget("task", name, task.callable_path))
         if missing:
             joined = ", ".join(missing)
-            raise ConfigError(
-                f"'mycelium run' requires callable paths for: {joined}"
-            )
+            raise ConfigError(f"'mycelium run' requires callable paths for: {joined}")
         if not targets:
-            raise ConfigError(
-                "'mycelium run' found no configured tool/task callable paths"
-            )
+            raise ConfigError("'mycelium run' found no configured tool/task callable paths")
         return targets
 
     def apply_task(self, func: Callable[..., Any]) -> Callable[..., Any]:
@@ -1046,9 +1006,7 @@ class MyceliumConfig:
         audit_emitter = self._task_audit_emitter(task_config)
 
         if task_config.ledger is None and task_config.audit_receipt:
-            raise ConfigError(
-                f"task '{name}' declares audit_receipt but has no ledger"
-            )
+            raise ConfigError(f"task '{name}' declares audit_receipt but has no ledger")
 
         if task_config.ledger is None:
             return func
@@ -1162,9 +1120,7 @@ class MyceliumConfig:
                 raise ConfigError("'loop_guard.consecutive_soft' must be a mapping")
             for key, value in consecutive_raw.items():
                 if not isinstance(value, int) or value < 1:
-                    raise ConfigError(
-                        f"'loop_guard.consecutive_soft.{key}' must be a positive int"
-                    )
+                    raise ConfigError(f"'loop_guard.consecutive_soft.{key}' must be a positive int")
                 consecutive[str(key)] = int(value)
         escalate = raw.get("escalate_after_soft", 1)
         if not isinstance(escalate, int) or escalate < 1:
@@ -1229,8 +1185,7 @@ class MyceliumConfig:
         on_missing = raw.get("on_missing_meter", ON_MISSING_HARD)
         if on_missing not in ON_MISSING_METER_MODES:
             raise ConfigError(
-                f"'budget.on_missing_meter' must be one of "
-                f"{sorted(ON_MISSING_METER_MODES)}"
+                f"'budget.on_missing_meter' must be one of {sorted(ON_MISSING_METER_MODES)}"
             )
         exclude = raw.get("exclude") or []
         if not isinstance(exclude, list):
@@ -1267,9 +1222,7 @@ class MyceliumConfig:
         """
         guard = self.build_budget_guard()
         if guard is None:
-            raise ConfigError(
-                "instrument_llm requires a 'budget:' block in the config"
-            )
+            raise ConfigError("instrument_llm requires a 'budget:' block in the config")
         from mycelium.budget_llm import (
             LlmBudgetAdapter,
             register_llm_budget_adapter,
@@ -1295,9 +1248,7 @@ class MyceliumConfig:
 
         budget_llm_mod = importlib.import_module("mycelium.budget_llm")
         install_langgraph_llm_budget = budget_llm_mod.install_langgraph_llm_budget
-        registered_llm_budget_adapters = (
-            budget_llm_mod.registered_llm_budget_adapters
-        )
+        registered_llm_budget_adapters = budget_llm_mod.registered_llm_budget_adapters
         set_active_budget_guard = budget_llm_mod.set_active_budget_guard
 
         if self.budget is None:
@@ -1320,9 +1271,7 @@ class MyceliumConfig:
             if installed:
                 adapters.add("langgraph")
         self._llm_adapters = frozenset(adapters)
-        self._verify_llm_budget_coverage(
-            adapters, install_error, budget_llm_mod
-        )
+        self._verify_llm_budget_coverage(adapters, install_error, budget_llm_mod)
 
     def _verify_llm_budget_coverage(
         self,
@@ -1349,8 +1298,7 @@ class MyceliumConfig:
             if not adapters:
                 if install_error:
                     detail = (
-                        "the LangGraph/LangChain LLM adapter was not installed "
-                        f"({install_error})"
+                        f"the LangGraph/LangChain LLM adapter was not installed ({install_error})"
                     )
                 elif not self.langgraph_enabled:
                     detail = (
@@ -1361,9 +1309,7 @@ class MyceliumConfig:
                         "Having LangGraph installed is not enough"
                     )
                 else:
-                    detail = (
-                        "the LangGraph/LangChain LLM adapter was not installed"
-                    )
+                    detail = "the LangGraph/LangChain LLM adapter was not installed"
                 raise ConfigError(
                     f"profile is {PROFILE_PRODUCTION!r} and 'budget:' sets "
                     f"token/cost limits, but {detail}. LLM calls would bypass "
@@ -1462,8 +1408,7 @@ class MyceliumConfig:
         on_violation = raw.get("on_violation", ON_VIOLATION_SOFT)
         if on_violation not in ON_VIOLATION_MODES:
             raise ConfigError(
-                f"'scope_guard.on_violation' must be one of "
-                f"{sorted(ON_VIOLATION_MODES)}"
+                f"'scope_guard.on_violation' must be one of {sorted(ON_VIOLATION_MODES)}"
             )
         exclude = raw.get("exclude") or []
         if not isinstance(exclude, list):
@@ -1531,16 +1476,12 @@ class MyceliumConfig:
             return
         self._reject_unwired_completion_terminal(install_error)
 
-    def _reject_unwired_completion_terminal(
-        self, install_error: str | None
-    ) -> None:
+    def _reject_unwired_completion_terminal(self, install_error: str | None) -> None:
         import mycelium.completion_contract as completion_mod
 
         framework = "LangGraph"
         if install_error:
-            detail = (
-                f"{framework} terminal adapter was not installed ({install_error})"
-            )
+            detail = f"{framework} terminal adapter was not installed ({install_error})"
         elif not self.langgraph_enabled:
             detail = (
                 f"no terminal adapter was explicitly selected. Set "
@@ -1622,12 +1563,8 @@ class MyceliumConfig:
         """Mark a completion-contract subtask (requires ``completion:`` in YAML)."""
         contract = self.build_completion_contract()
         if contract is None:
-            raise ConfigError(
-                "no completion: section in config; cannot mark_completion"
-            )
-        return contract.mark(
-            subtask_id, status, reason=reason, scope_key=scope_key
-        )
+            raise ConfigError("no completion: section in config; cannot mark_completion")
+        return contract.mark(subtask_id, status, reason=reason, scope_key=scope_key)
 
     def complete_run(
         self,
@@ -1637,9 +1574,7 @@ class MyceliumConfig:
         """Gate terminal output via AF-007 completion contract."""
         contract = self.build_completion_contract()
         if contract is None:
-            raise ConfigError(
-                "no completion: section in config; cannot complete_run"
-            )
+            raise ConfigError("no completion: section in config; cannot complete_run")
         return contract.complete_run(scope_key=scope_key)
 
     def build_state_authority(self) -> StateAuthority | None:
@@ -1665,13 +1600,11 @@ class MyceliumConfig:
         on_missing = str(raw.get("on_missing", ON_MISMATCH_HARD))
         if on_mismatch not in ON_MISMATCH_MODES:
             raise ConfigError(
-                f"'state_authority.on_mismatch' must be one of "
-                f"{sorted(ON_MISMATCH_MODES)}"
+                f"'state_authority.on_mismatch' must be one of {sorted(ON_MISMATCH_MODES)}"
             )
         if on_missing not in ON_MISMATCH_MODES:
             raise ConfigError(
-                f"'state_authority.on_missing' must be one of "
-                f"{sorted(ON_MISMATCH_MODES)}"
+                f"'state_authority.on_missing' must be one of {sorted(ON_MISMATCH_MODES)}"
             )
         exclude = raw.get("exclude") or []
         if not isinstance(exclude, list):
@@ -1732,8 +1665,7 @@ class MyceliumConfig:
             return self._audit_emitter
         if self.audit_receipt.get("agent_id"):
             raise ConfigError(
-                "'audit_receipt.agent_id' is no longer supported; "
-                "set 'transition.agent_id' instead"
+                "'audit_receipt.agent_id' is no longer supported; set 'transition.agent_id' instead"
             )
         if self.transition is None:
             raise ConfigError(
@@ -1746,9 +1678,7 @@ class MyceliumConfig:
         )
         shared = self._guard_atomic_backend(self.audit_receipt)
         storage = (
-            AtomicAuditReceiptStorage(
-                shared[0], namespace=f"{shared[1]}:audit_receipt"
-            )
+            AtomicAuditReceiptStorage(shared[0], namespace=f"{shared[1]}:audit_receipt")
             if shared is not None
             else self._build_audit_receipt_storage(self.audit_receipt)
         )
@@ -1772,9 +1702,7 @@ class MyceliumConfig:
         exporters = self._build_outcome_exporters(self.outcome_emit)
         if exporters:
             storage = FanoutOutcomeStorage(storage, *exporters)
-        on_failure = _outcome_on_failure(
-            self.outcome_emit, profile=self.profile
-        )
+        on_failure = _outcome_on_failure(self.outcome_emit, profile=self.profile)
         self._outcome_emitter = OutcomeEmitter(
             agent_id=str(agent_id),
             storage=storage,
@@ -1814,18 +1742,14 @@ class MyceliumConfig:
         state_flush = self.build_state_flush()
         scope = TransitionScope(thread_id=run_id, run_id=run_id)
         if state_flush is not None:
-            inner: AbstractContextManager[Any] = state_flush.run(
-                run_id, use_session=use_session
-            )
+            inner: AbstractContextManager[Any] = state_flush.run(run_id, use_session=use_session)
         elif use_session:
             inner = Session()
         else:
             inner = _NoopRun(run_id)
         return _ScopedRunContext(inner, scope)
 
-    def tool_transition_binding(
-        self, tool_config: ToolConfig
-    ) -> ToolTransitionBinding | None:
+    def tool_transition_binding(self, tool_config: ToolConfig) -> ToolTransitionBinding | None:
         """Build per-tool transition binding when transition config is present."""
         if self.transition is None or tool_config.side_effect_class is None:
             return None
@@ -1838,15 +1762,9 @@ class MyceliumConfig:
             side_effect_boundary=tool_config.side_effect_boundary,
             spendability=tool_config.spendability,
             capability=tool_config.capability,
-            provider_idempotency_key_param=(
-                tool_config.provider_idempotency_key_param
-            ),
-            provider_idempotency_key_ttl=(
-                tool_config.provider_idempotency_key_ttl
-            ),
-            propagate_effect_id_as_provider_key=(
-                tool_config.propagate_effect_id_as_provider_key
-            ),
+            provider_idempotency_key_param=(tool_config.provider_idempotency_key_param),
+            provider_idempotency_key_ttl=(tool_config.provider_idempotency_key_ttl),
+            propagate_effect_id_as_provider_key=(tool_config.propagate_effect_id_as_provider_key),
             request_id_from=tool_config.request_id_from,
         )
 
@@ -1873,18 +1791,14 @@ class MyceliumConfig:
         if not tool_config.audit_receipt:
             return None
         if tool_config.ledger is None:
-            raise ConfigError(
-                f"tool '{tool_config.name}' has audit_receipt enabled but no ledger"
-            )
+            raise ConfigError(f"tool '{tool_config.name}' has audit_receipt enabled but no ledger")
         return self._shared_audit_emitter()
 
     def _task_audit_emitter(self, task_config: TaskConfig) -> AuditReceiptEmitter | None:
         if not task_config.audit_receipt:
             return None
         if task_config.ledger is None:
-            raise ConfigError(
-                f"task '{task_config.name}' has audit_receipt enabled but no ledger"
-            )
+            raise ConfigError(f"task '{task_config.name}' has audit_receipt enabled but no ledger")
         return self._shared_audit_emitter()
 
     def _shared_audit_emitter(self) -> AuditReceiptEmitter:
@@ -2046,9 +1960,7 @@ class MyceliumConfig:
             try:
                 dsn = resolve_storage_url(raw, url_key="url", alt_keys=("dsn",))
             except ValueError as exc:
-                raise ConfigError(
-                    f"outcome_emit storage 'postgres' is incomplete: {exc}"
-                ) from exc
+                raise ConfigError(f"outcome_emit storage 'postgres' is incomplete: {exc}") from exc
             table = str(raw.get("table", "mycelium_outcomes"))
             try:
                 return PostgresOutcomeStorage(dsn, table=table)
@@ -2061,9 +1973,7 @@ class MyceliumConfig:
             try:
                 url = resolve_storage_url(raw, url_key="url")
             except ValueError as exc:
-                raise ConfigError(
-                    f"outcome_emit storage 'redis' is incomplete: {exc}"
-                ) from exc
+                raise ConfigError(f"outcome_emit storage 'redis' is incomplete: {exc}") from exc
             key_prefix = raw.get("key_prefix", raw.get("prefix", "mycelium:outcomes"))
             try:
                 return RedisOutcomeStorage(url, key_prefix=str(key_prefix))
@@ -2079,9 +1989,7 @@ class MyceliumConfig:
         exporters: list[OutcomeStorage] = []
         for index, item in enumerate(configured):
             if not isinstance(item, dict):
-                raise ConfigError(
-                    f"'outcome_emit.exporters[{index}]' must be a mapping"
-                )
+                raise ConfigError(f"'outcome_emit.exporters[{index}]' must be a mapping")
             exporter_type = item.get("type")
             try:
                 if exporter_type == "opentelemetry":
@@ -2102,9 +2010,7 @@ class MyceliumConfig:
                     if secret is None and secret_env:
                         secret = os.environ.get(str(secret_env))
                         if not secret:
-                            raise ConfigError(
-                                f"environment variable {secret_env!r} is not set"
-                            )
+                            raise ConfigError(f"environment variable {secret_env!r} is not set")
                     exporters.append(
                         WebhookOutcomeStorage(
                             url,
@@ -2114,13 +2020,9 @@ class MyceliumConfig:
                         )
                     )
                 else:
-                    raise ConfigError(
-                        f"unknown outcome exporter type: {exporter_type!r}"
-                    )
+                    raise ConfigError(f"unknown outcome exporter type: {exporter_type!r}")
             except (ImportError, TypeError, ValueError) as exc:
-                raise ConfigError(
-                    f"outcome exporter {exporter_type!r} is invalid: {exc}"
-                ) from exc
+                raise ConfigError(f"outcome exporter {exporter_type!r} is invalid: {exc}") from exc
         return exporters
 
     def wrap_module(self, module: Any) -> Any:
@@ -2239,13 +2141,9 @@ def _budget_ceilings_from_config(raw: dict[str, Any]) -> BudgetCeilings:
         try:
             parsed_cost = float(max_cost_raw)
         except (TypeError, ValueError) as exc:
-            raise ConfigError(
-                "'budget.max_cost_usd' must be a positive number"
-            ) from exc
+            raise ConfigError("'budget.max_cost_usd' must be a positive number") from exc
     if parsed_usd is not None and parsed_cost is not None and parsed_usd != parsed_cost:
-        raise ConfigError(
-            "'budget.max_usd' and 'budget.max_cost_usd' disagree; use one"
-        )
+        raise ConfigError("'budget.max_usd' and 'budget.max_cost_usd' disagree; use one")
     max_usd = parsed_usd if parsed_usd is not None else parsed_cost
     try:
         return BudgetCeilings(
@@ -2281,14 +2179,8 @@ def _missing_usage_policy(
                 f"{MISSING_USAGE_POLICY_WARN!r} or "
                 f"{MISSING_USAGE_POLICY_ERROR!r}, got {value!r}"
             )
-        if (
-            profile == PROFILE_PRODUCTION
-            and token_or_cost
-            and value == MISSING_USAGE_POLICY_WARN
-        ):
-            _reject_weaker_production_policy(
-                "budget.missing_usage_policy", str(value)
-            )
+        if profile == PROFILE_PRODUCTION and token_or_cost and value == MISSING_USAGE_POLICY_WARN:
+            _reject_weaker_production_policy("budget.missing_usage_policy", str(value))
         return str(value)
     if profile == PROFILE_PRODUCTION and token_or_cost:
         return MISSING_USAGE_POLICY_ERROR
@@ -2358,9 +2250,7 @@ def _parse_tool_config(
     side_effect_boundary: SideEffectBoundary | None = None
     if "side_effect_boundary" in raw:
         try:
-            side_effect_boundary = parse_side_effect_boundary(
-                raw["side_effect_boundary"]
-            )
+            side_effect_boundary = parse_side_effect_boundary(raw["side_effect_boundary"])
         except ValueError as exc:
             raise ConfigError(f"tool '{name}': {exc}") from exc
 
@@ -2382,9 +2272,7 @@ def _parse_tool_config(
     if "provider_idempotency_key_param" in raw:
         value = raw["provider_idempotency_key_param"]
         if not isinstance(value, str):
-            raise ConfigError(
-                f"tool '{name}': provider_idempotency_key_param must be a string"
-            )
+            raise ConfigError(f"tool '{name}': provider_idempotency_key_param must be a string")
         provider_idempotency_key_param = value
 
     provider_idempotency_key_ttl: float | None = None
@@ -2400,9 +2288,7 @@ def _parse_tool_config(
     if "propagate_effect_id_as_provider_key" in raw:
         value = raw["propagate_effect_id_as_provider_key"]
         if not isinstance(value, bool):
-            raise ConfigError(
-                f"tool '{name}': propagate_effect_id_as_provider_key must be a bool"
-            )
+            raise ConfigError(f"tool '{name}': propagate_effect_id_as_provider_key must be a bool")
         propagate_effect_id_as_provider_key = value
     if propagate_effect_id_as_provider_key and provider_idempotency_key_param is None:
         raise ConfigError(
@@ -2437,9 +2323,7 @@ def _parse_tool_config(
     elif isinstance(loop_guard_raw, dict):
         loop_guard_cfg = loop_guard_raw
     else:
-        raise ConfigError(
-            f"tool '{name}'.loop_guard must be a bool or a mapping"
-        )
+        raise ConfigError(f"tool '{name}'.loop_guard must be a bool or a mapping")
 
     budget_guard_raw = raw.get("budget_guard")
     budget_guard_cfg: bool | None
@@ -2461,9 +2345,7 @@ def _parse_tool_config(
     elif isinstance(scope_guard_raw, dict):
         scope_guard_cfg = scope_guard_raw
     else:
-        raise ConfigError(
-            f"tool '{name}'.scope_guard must be a bool or a mapping"
-        )
+        raise ConfigError(f"tool '{name}'.scope_guard must be a bool or a mapping")
 
     state_authority_raw = raw.get("state_authority")
     state_authority_cfg: dict[str, Any] | bool | None
@@ -2476,9 +2358,7 @@ def _parse_tool_config(
     elif isinstance(state_authority_raw, dict):
         state_authority_cfg = state_authority_raw
     else:
-        raise ConfigError(
-            f"tool '{name}'.state_authority must be a bool or a mapping"
-        )
+        raise ConfigError(f"tool '{name}'.state_authority must be a bool or a mapping")
 
     secret_fields_raw = raw.get("secret_fields")
     secret_fields: tuple[str, ...] = ()
@@ -2486,9 +2366,7 @@ def _parse_tool_config(
         if not isinstance(secret_fields_raw, list) or not all(
             isinstance(item, str) and item.strip() for item in secret_fields_raw
         ):
-            raise ConfigError(
-                f"tool '{name}'.secret_fields must be a list of non-empty strings"
-            )
+            raise ConfigError(f"tool '{name}'.secret_fields must be a list of non-empty strings")
         secret_fields = tuple(item.strip() for item in secret_fields_raw)
 
     secret_args_raw = raw.get("secret_args")
@@ -2767,22 +2645,14 @@ def _parse_transition_config(raw: Any) -> TransitionConfig | None:
         raise ConfigError("'transition.scope_from' must be a mapping")
     scope_from = {str(key): str(value) for key, value in scope_from_raw.items()}
 
-    lease_ttl = _parse_optional_positive_float(
-        raw, "lease_ttl", section="transition"
-    )
+    lease_ttl = _parse_optional_positive_float(raw, "lease_ttl", section="transition")
     lease_renew_interval = _parse_optional_non_negative_float(
         raw, "lease_renew_interval", section="transition"
     )
-    poll_interval = _parse_optional_positive_float(
-        raw, "poll_interval", section="transition"
-    )
-    poll_timeout = _parse_optional_positive_float(
-        raw, "poll_timeout", section="transition"
-    )
+    poll_interval = _parse_optional_positive_float(raw, "poll_interval", section="transition")
+    poll_timeout = _parse_optional_positive_float(raw, "poll_timeout", section="transition")
 
-    reclaim_requires_death_signal = bool(
-        raw.get("reclaim_requires_death_signal", True)
-    )
+    reclaim_requires_death_signal = bool(raw.get("reclaim_requires_death_signal", True))
     presumed_dead_after = _parse_optional_positive_float(
         raw, "presumed_dead_after", section="transition"
     )
@@ -2815,8 +2685,7 @@ def _parse_completion_id_lists(raw: dict[str, Any]) -> tuple[list[str], list[str
                 sid = str(item.get("id", "")).strip()
             else:
                 raise ConfigError(
-                    f"'completion.{key}[{i}]' must be a string id or "
-                    "{id: ...} mapping"
+                    f"'completion.{key}[{i}]' must be a string id or {{id: ...}} mapping"
                 )
             if not sid:
                 raise ConfigError(f"'completion.{key}[{i}]' missing id")
@@ -2827,14 +2696,9 @@ def _parse_completion_id_lists(raw: dict[str, Any]) -> tuple[list[str], list[str
     optional = _ids("optional")
     overlap = set(required) & set(optional)
     if overlap:
-        raise ConfigError(
-            "completion ids cannot be both required and optional: "
-            f"{sorted(overlap)}"
-        )
+        raise ConfigError(f"completion ids cannot be both required and optional: {sorted(overlap)}")
     if not required and not optional:
-        raise ConfigError(
-            "'completion' needs at least one id under required: or optional:"
-        )
+        raise ConfigError("'completion' needs at least one id under required: or optional:")
     return required, optional
 
 
@@ -2857,8 +2721,7 @@ def _scope_grant_from_config(
         allowed = [str(t) for t in allowed_raw]
     else:
         raise ConfigError(
-            "'scope_guard.allowed_tools' must be 'from_registry', 'all', "
-            "or a list of tool names"
+            "'scope_guard.allowed_tools' must be 'from_registry', 'all', or a list of tool names"
         )
     if not allowed:
         raise ConfigError(
@@ -2887,8 +2750,7 @@ def _parse_profile(data: dict[str, Any]) -> str:
     value = data.get("profile", PROFILE_DEVELOPMENT)
     if value not in PROFILES:
         raise ConfigError(
-            f"'profile' must be {PROFILE_DEVELOPMENT!r} or "
-            f"{PROFILE_PRODUCTION!r}, got {value!r}"
+            f"'profile' must be {PROFILE_DEVELOPMENT!r} or {PROFILE_PRODUCTION!r}, got {value!r}"
         )
     return str(value)
 
@@ -2978,10 +2840,7 @@ def _request_identity_policy(
                 f"{REQUEST_IDENTITY_POLICY_DERIVED!r} or "
                 f"{REQUEST_IDENTITY_POLICY_REQUIRE_EXPLICIT!r}, got {raw!r}"
             )
-        if (
-            profile == PROFILE_PRODUCTION
-            and raw == REQUEST_IDENTITY_POLICY_DERIVED
-        ):
+        if profile == PROFILE_PRODUCTION and raw == REQUEST_IDENTITY_POLICY_DERIVED:
             raise ConfigError(
                 f"profile is {PROFILE_PRODUCTION!r} but "
                 "'action_ledger.request_identity_policy' is "
@@ -3055,23 +2914,17 @@ def _enforce_production_outcome_emit(
         try:
             resolve_storage_url(outcome_emit, url_key="url", alt_keys=("dsn",))
         except ValueError as exc:
-            raise ConfigError(
-                f"outcome_emit storage 'postgres' is incomplete: {exc}"
-            ) from exc
+            raise ConfigError(f"outcome_emit storage 'postgres' is incomplete: {exc}") from exc
         table = outcome_emit.get("table", "mycelium_outcomes")
         if not isinstance(table, str) or not table:
-            raise ConfigError(
-                "outcome_emit storage 'postgres' table must be a non-empty string"
-            )
+            raise ConfigError("outcome_emit storage 'postgres' table must be a non-empty string")
     elif storage_type == "redis":
         from mycelium.storage._helpers import resolve_storage_url
 
         try:
             resolve_storage_url(outcome_emit, url_key="url")
         except ValueError as exc:
-            raise ConfigError(
-                f"outcome_emit storage 'redis' is incomplete: {exc}"
-            ) from exc
+            raise ConfigError(f"outcome_emit storage 'redis' is incomplete: {exc}") from exc
         persistence = outcome_emit.get("persistence")
         if persistence != "required":
             raise ConfigError(
@@ -3224,8 +3077,7 @@ def _parse_deployment(data: dict[str, Any]) -> dict[str, Any] | None:
     topology = raw["topology"]
     if topology not in _DEPLOYMENT_TOPOLOGIES:
         raise ConfigError(
-            "'deployment.topology' must be 'single_node' or 'multi_node', "
-            f"got {topology!r}"
+            f"'deployment.topology' must be 'single_node' or 'multi_node', got {topology!r}"
         )
     return {"topology": str(topology)}
 
@@ -3329,8 +3181,7 @@ def _parse_secret_args(
     policy = raw.get("policy", "error")
     if policy not in SECRET_ARGS_POLICIES:
         raise ConfigError(
-            "'secret_args.policy' must be one of "
-            f"{sorted(SECRET_ARGS_POLICIES)}, got {policy!r}"
+            f"'secret_args.policy' must be one of {sorted(SECRET_ARGS_POLICIES)}, got {policy!r}"
         )
     allow_fields = raw.get("allow_fields", [])
     if not isinstance(allow_fields, list) or not all(
@@ -3383,16 +3234,13 @@ def entity_guard_policy_from_mapping(raw: dict[str, Any]) -> EntityGuardPolicy:
                     dest_type=str(spec["type"]),
                     allow=DestinationAllow(
                         addresses=frozenset(
-                            str(item).strip().lower()
-                            for item in (allow_raw.get("addresses") or [])
+                            str(item).strip().lower() for item in (allow_raw.get("addresses") or [])
                         ),
                         domains=frozenset(
-                            str(item).strip().lower()
-                            for item in (allow_raw.get("domains") or [])
+                            str(item).strip().lower() for item in (allow_raw.get("domains") or [])
                         ),
                         hosts=frozenset(
-                            str(item).strip().lower()
-                            for item in (allow_raw.get("hosts") or [])
+                            str(item).strip().lower() for item in (allow_raw.get("hosts") or [])
                         ),
                         values=frozenset(
                             str(item).strip() for item in (allow_raw.get("values") or [])
@@ -3414,9 +3262,7 @@ def entity_guard_policy_from_mapping(raw: dict[str, Any]) -> EntityGuardPolicy:
 def _parse_string_list(raw: Any, *, field: str) -> list[str]:
     if raw is None:
         return []
-    if not isinstance(raw, list) or not all(
-        isinstance(item, str) and item.strip() for item in raw
-    ):
+    if not isinstance(raw, list) or not all(isinstance(item, str) and item.strip() for item in raw):
         raise ConfigError(f"'{field}' must be a list of non-empty strings")
     return [str(item).strip() for item in raw]
 
@@ -3428,9 +3274,7 @@ def _parse_destination_spec(raw: Any, *, tool: str) -> dict[str, Any]:
     unknown = set(raw) - allowed_keys
     if unknown:
         names = ", ".join(sorted(str(name) for name in unknown))
-        raise ConfigError(
-            f"unsupported entity_guard.tools.{tool} destination option(s): {names}"
-        )
+        raise ConfigError(f"unsupported entity_guard.tools.{tool} destination option(s): {names}")
     path = raw.get("path")
     if not isinstance(path, str) or not path.strip():
         raise ConfigError(f"entity_guard.tools.{tool} destination path is required")
@@ -3449,17 +3293,13 @@ def _parse_destination_spec(raw: Any, *, tool: str) -> dict[str, Any]:
     unknown_allow = set(allow_raw) - allow_keys
     if unknown_allow:
         names = ", ".join(sorted(str(name) for name in unknown_allow))
-        raise ConfigError(
-            f"unsupported entity_guard.tools.{tool} allow option(s): {names}"
-        )
+        raise ConfigError(f"unsupported entity_guard.tools.{tool} allow option(s): {names}")
     required = raw.get("required", True)
     if not isinstance(required, bool):
         raise ConfigError(f"entity_guard.tools.{tool} destination required must be a bool")
     reject_redirects = raw.get("reject_redirects", True)
     if not isinstance(reject_redirects, bool):
-        raise ConfigError(
-            f"entity_guard.tools.{tool} destination reject_redirects must be a bool"
-        )
+        raise ConfigError(f"entity_guard.tools.{tool} destination reject_redirects must be a bool")
     return {
         "path": path.strip(),
         "type": dest_type,
@@ -3484,18 +3324,14 @@ def _parse_destination_spec(raw: Any, *, tool: str) -> dict[str, Any]:
     }
 
 
-_AUTHORITY_WINDOW_KEYS = frozenset(
-    {"enabled", "use_time_check", "clock_skew_tolerance_seconds"}
-)
+_AUTHORITY_WINDOW_KEYS = frozenset({"enabled", "use_time_check", "clock_skew_tolerance_seconds"})
 
 
 def authority_window_policy_from_mapping(raw: dict[str, Any]) -> AuthorityWindowPolicy:
     return AuthorityWindowPolicy(
         enabled=bool(raw.get("enabled", True)),
         use_time_check=str(raw.get("use_time_check", USE_TIME_CHECK_REQUIRED)),
-        clock_skew_tolerance_seconds=float(
-            raw.get("clock_skew_tolerance_seconds", 0.0)
-        ),
+        clock_skew_tolerance_seconds=float(raw.get("clock_skew_tolerance_seconds", 0.0)),
     )
 
 
@@ -3520,14 +3356,11 @@ def _parse_authority_window(
     use_time = raw.get("use_time_check", USE_TIME_CHECK_REQUIRED)
     if use_time not in USE_TIME_CHECKS:
         raise ConfigError(
-            "'authority_window.use_time_check' must be one of "
-            f"{sorted(USE_TIME_CHECKS)}"
+            f"'authority_window.use_time_check' must be one of {sorted(USE_TIME_CHECKS)}"
         )
     skew = raw.get("clock_skew_tolerance_seconds", 0)
     if not isinstance(skew, (int, float)) or isinstance(skew, bool) or skew < 0:
-        raise ConfigError(
-            "'authority_window.clock_skew_tolerance_seconds' must be a number >= 0"
-        )
+        raise ConfigError("'authority_window.clock_skew_tolerance_seconds' must be a number >= 0")
     if profile == PROFILE_PRODUCTION and destructive_confirm is not None:
         if not enabled or use_time != USE_TIME_CHECK_REQUIRED:
             raise ConfigError(
@@ -3558,9 +3391,7 @@ _USE_TIME_FACT_KEYS = frozenset(
         "provider_precondition",
     }
 )
-_USE_TIME_SUBJECT_KEYS = frozenset(
-    {"type", "id_from", "tenant_from", "account_from"}
-)
+_USE_TIME_SUBJECT_KEYS = frozenset({"type", "id_from", "tenant_from", "account_from"})
 
 
 def use_time_currency_policy_from_mapping(raw: dict[str, Any]) -> UseTimeCurrencyPolicy:
@@ -3608,66 +3439,44 @@ def _parse_use_time_fact(raw: Any, *, tool: str) -> dict[str, Any]:
     extra = set(raw) - _USE_TIME_FACT_KEYS
     if extra:
         names = ", ".join(sorted(str(item) for item in extra))
-        raise ConfigError(
-            f"unsupported use_time_currency.tools.{tool}.facts option(s): {names}"
-        )
+        raise ConfigError(f"unsupported use_time_currency.tools.{tool}.facts option(s): {names}")
     name = raw.get("name")
     if not isinstance(name, str) or not name.strip():
-        raise ConfigError(
-            f"use_time_currency.tools.{tool}.facts[].name must be a non-empty string"
-        )
+        raise ConfigError(f"use_time_currency.tools.{tool}.facts[].name must be a non-empty string")
     subject = raw.get("subject")
     if not isinstance(subject, dict):
-        raise ConfigError(
-            f"use_time_currency.tools.{tool}.facts[].subject must be a mapping"
-        )
+        raise ConfigError(f"use_time_currency.tools.{tool}.facts[].subject must be a mapping")
     subject_extra = set(subject) - _USE_TIME_SUBJECT_KEYS
     if subject_extra:
         names = ", ".join(sorted(str(item) for item in subject_extra))
         raise ConfigError(
-            f"unsupported use_time_currency.tools.{tool}.facts[].subject "
-            f"option(s): {names}"
+            f"unsupported use_time_currency.tools.{tool}.facts[].subject option(s): {names}"
         )
     subject_type = subject.get("type")
     id_from = subject.get("id_from")
     if not isinstance(subject_type, str) or not subject_type.strip():
-        raise ConfigError(
-            f"use_time_currency.tools.{tool}.facts[].subject.type is required"
-        )
+        raise ConfigError(f"use_time_currency.tools.{tool}.facts[].subject.type is required")
     if not isinstance(id_from, str) or not id_from.strip():
-        raise ConfigError(
-            f"use_time_currency.tools.{tool}.facts[].subject.id_from is required"
-        )
+        raise ConfigError(f"use_time_currency.tools.{tool}.facts[].subject.id_from is required")
     validator = raw.get("validator")
     if not isinstance(validator, str) or not validator.strip():
-        raise ConfigError(
-            f"use_time_currency.tools.{tool}.facts[].validator is required"
-        )
+        raise ConfigError(f"use_time_currency.tools.{tool}.facts[].validator is required")
     max_age = raw.get("max_age_seconds")
     if max_age is not None and (
-        not isinstance(max_age, (int, float))
-        or isinstance(max_age, bool)
-        or max_age < 0
+        not isinstance(max_age, (int, float)) or isinstance(max_age, bool) or max_age < 0
     ):
-        raise ConfigError(
-            f"use_time_currency.tools.{tool}.facts[].max_age_seconds must be >= 0"
-        )
+        raise ConfigError(f"use_time_currency.tools.{tool}.facts[].max_age_seconds must be >= 0")
     require = raw.get("require")
     if require is not None and not isinstance(require, dict):
-        raise ConfigError(
-            f"use_time_currency.tools.{tool}.facts[].require must be a mapping"
-        )
+        raise ConfigError(f"use_time_currency.tools.{tool}.facts[].require must be a mapping")
     for key in ("bind_request_id", "bind_run_id", "bind_thread_id"):
         if key in raw and not isinstance(raw[key], bool):
-            raise ConfigError(
-                f"use_time_currency.tools.{tool}.facts[].{key} must be a bool"
-            )
+            raise ConfigError(f"use_time_currency.tools.{tool}.facts[].{key} must be a bool")
     for key in ("revision_from", "compare_to_arg", "provider_precondition"):
         if key in raw and raw[key] is not None:
             if not isinstance(raw[key], str) or not str(raw[key]).strip():
                 raise ConfigError(
-                    f"use_time_currency.tools.{tool}.facts[].{key} must be a "
-                    "non-empty string"
+                    f"use_time_currency.tools.{tool}.facts[].{key} must be a non-empty string"
                 )
     for key in ("tenant_from", "account_from"):
         if key in subject and subject[key] is not None:
@@ -3740,26 +3549,18 @@ def _parse_use_time_currency(
     parsed_tools: dict[str, Any] = {}
     for name, tool_raw in tools_raw.items():
         if not isinstance(name, str) or not name.strip():
-            raise ConfigError(
-                "'use_time_currency.tools' keys must be non-empty tool names"
-            )
+            raise ConfigError("'use_time_currency.tools' keys must be non-empty tool names")
         if not isinstance(tool_raw, dict):
             raise ConfigError(f"use_time_currency.tools.{name} must be a mapping")
         tool_extra = set(tool_raw) - {"facts"}
         if tool_extra:
             names = ", ".join(sorted(str(item) for item in tool_extra))
-            raise ConfigError(
-                f"unsupported use_time_currency.tools.{name} option(s): {names}"
-            )
+            raise ConfigError(f"unsupported use_time_currency.tools.{name} option(s): {names}")
         facts_raw = tool_raw.get("facts")
         if not isinstance(facts_raw, list) or not facts_raw:
-            raise ConfigError(
-                f"use_time_currency.tools.{name}.facts must be a non-empty list"
-            )
+            raise ConfigError(f"use_time_currency.tools.{name}.facts must be a non-empty list")
         parsed_tools[name.strip()] = {
-            "facts": [
-                _parse_use_time_fact(item, tool=name.strip()) for item in facts_raw
-            ]
+            "facts": [_parse_use_time_fact(item, tool=name.strip()) for item in facts_raw]
         }
 
     if enabled and profile == PROFILE_PRODUCTION:
@@ -3822,19 +3623,13 @@ def _parse_entity_guard(data: dict[str, Any], *, profile: str) -> dict[str, Any]
             raise ConfigError(f"entity_guard.tools.{name} must be a mapping")
         dests_raw = tool_raw.get("destinations")
         if not isinstance(dests_raw, list) or not dests_raw:
-            raise ConfigError(
-                f"entity_guard.tools.{name}.destinations must be a non-empty list"
-            )
+            raise ConfigError(f"entity_guard.tools.{name}.destinations must be a non-empty list")
         extra = set(tool_raw) - {"destinations"}
         if extra:
             names = ", ".join(sorted(str(item) for item in extra))
-            raise ConfigError(
-                f"unsupported entity_guard.tools.{name} option(s): {names}"
-            )
+            raise ConfigError(f"unsupported entity_guard.tools.{name} option(s): {names}")
         tools[name.strip()] = {
-            "destinations": [
-                _parse_destination_spec(item, tool=name.strip()) for item in dests_raw
-            ]
+            "destinations": [_parse_destination_spec(item, tool=name.strip()) for item in dests_raw]
         }
 
     if enabled and profile == PROFILE_PRODUCTION and missing_policy != MISSING_POLICY_ERROR:
@@ -3886,6 +3681,8 @@ _DESTRUCTIVE_GRANT_KEYS = frozenset(
         "ttl_seconds",
     }
 )
+
+
 def destructive_confirm_policy_from_mapping(raw: dict[str, Any]) -> DestructiveConfirmPolicy:
     tools: dict[str, DestructiveToolPolicy] = {}
     for name, tool_raw in (raw.get("tools") or {}).items():
@@ -3924,19 +3721,13 @@ def _parse_destructive_object(raw: Any, *, tool: str) -> dict[str, Any]:
     extra = set(raw) - _DESTRUCTIVE_OBJECT_KEYS
     if extra:
         names = ", ".join(sorted(str(item) for item in extra))
-        raise ConfigError(
-            f"unsupported destructive_confirm.tools.{tool}.object option(s): {names}"
-        )
+        raise ConfigError(f"unsupported destructive_confirm.tools.{tool}.object option(s): {names}")
     object_type = raw.get("type")
     id_from = raw.get("id_from")
     if not isinstance(object_type, str) or not object_type.strip():
-        raise ConfigError(
-            f"destructive_confirm.tools.{tool}.object.type is required"
-        )
+        raise ConfigError(f"destructive_confirm.tools.{tool}.object.type is required")
     if not isinstance(id_from, str) or not id_from.strip():
-        raise ConfigError(
-            f"destructive_confirm.tools.{tool}.object.id_from is required"
-        )
+        raise ConfigError(f"destructive_confirm.tools.{tool}.object.id_from is required")
     parsed: dict[str, Any] = {
         "type": object_type.strip(),
         "id_from": id_from.strip(),
@@ -3952,8 +3743,7 @@ def _parse_destructive_object(raw: Any, *, tool: str) -> dict[str, Any]:
     if "require_canonicalizer" in raw:
         if not isinstance(raw["require_canonicalizer"], bool):
             raise ConfigError(
-                f"destructive_confirm.tools.{tool}.object.require_canonicalizer "
-                "must be a bool"
+                f"destructive_confirm.tools.{tool}.object.require_canonicalizer must be a bool"
             )
         parsed["require_canonicalizer"] = raw["require_canonicalizer"]
     for key in ("tenant_from", "account_from"):
@@ -3976,9 +3766,7 @@ def _parse_destructive_grant(raw: Any, *, tool: str) -> dict[str, Any]:
     extra = set(raw) - _DESTRUCTIVE_GRANT_KEYS
     if extra:
         names = ", ".join(sorted(str(item) for item in extra))
-        raise ConfigError(
-            f"unsupported destructive_confirm.tools.{tool}.grant option(s): {names}"
-        )
+        raise ConfigError(f"unsupported destructive_confirm.tools.{tool}.grant option(s): {names}")
     parsed: dict[str, Any] = {
         "bind_request_id": False,
         "bind_run_id": False,
@@ -3990,9 +3778,7 @@ def _parse_destructive_grant(raw: Any, *, tool: str) -> dict[str, Any]:
         if key not in raw:
             continue
         if not isinstance(raw[key], bool):
-            raise ConfigError(
-                f"destructive_confirm.tools.{tool}.grant.{key} must be a bool"
-            )
+            raise ConfigError(f"destructive_confirm.tools.{tool}.grant.{key} must be a bool")
         parsed[key] = raw[key]
     if "max_uses" in raw:
         value = raw["max_uses"]
@@ -4004,9 +3790,7 @@ def _parse_destructive_grant(raw: Any, *, tool: str) -> dict[str, Any]:
     if "ttl_seconds" in raw:
         value = raw["ttl_seconds"]
         if not isinstance(value, (int, float)) or isinstance(value, bool) or value <= 0:
-            raise ConfigError(
-                f"destructive_confirm.tools.{tool}.grant.ttl_seconds must be > 0"
-            )
+            raise ConfigError(f"destructive_confirm.tools.{tool}.grant.ttl_seconds must be > 0")
         parsed["ttl_seconds"] = float(value)
     return parsed
 
@@ -4050,8 +3834,7 @@ def _parse_destructive_confirm(
         STORAGE_POSTGRES,
     }:
         raise ConfigError(
-            "'destructive_confirm.storage' must be one of "
-            "memory, file, sqlite, redis, postgres"
+            "'destructive_confirm.storage' must be one of memory, file, sqlite, redis, postgres"
         )
     tools_raw = raw.get("tools", {})
     if not isinstance(tools_raw, dict):
@@ -4059,22 +3842,16 @@ def _parse_destructive_confirm(
     parsed_tools: dict[str, Any] = {}
     for name, tool_raw in tools_raw.items():
         if not isinstance(name, str) or not name.strip():
-            raise ConfigError(
-                "'destructive_confirm.tools' keys must be non-empty tool names"
-            )
+            raise ConfigError("'destructive_confirm.tools' keys must be non-empty tool names")
         if not isinstance(tool_raw, dict):
             raise ConfigError(f"destructive_confirm.tools.{name} must be a mapping")
         extra_tool = set(tool_raw) - _DESTRUCTIVE_TOOL_KEYS
         if extra_tool:
             names = ", ".join(sorted(str(item) for item in extra_tool))
-            raise ConfigError(
-                f"unsupported destructive_confirm.tools.{name} option(s): {names}"
-            )
+            raise ConfigError(f"unsupported destructive_confirm.tools.{name} option(s): {names}")
         operation = tool_raw.get("operation")
         if not isinstance(operation, str) or not operation.strip():
-            raise ConfigError(
-                f"destructive_confirm.tools.{name}.operation is required"
-            )
+            raise ConfigError(f"destructive_confirm.tools.{name}.operation is required")
         object_spec = _parse_destructive_object(tool_raw.get("object"), tool=name.strip())
         grant_spec = _parse_destructive_grant(tool_raw.get("grant"), tool=name.strip())
         parsed_tools[name.strip()] = {
@@ -4131,6 +3908,14 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
     if not isinstance(data, dict):
         raise ConfigError("config root must be a mapping")
 
+    config_version = data.get("config_version", CONFIG_VERSION)
+    if config_version != CONFIG_VERSION:
+        raise ConfigError(
+            f"unsupported config_version {config_version!r}; this Mycelium "
+            f"runtime supports version {CONFIG_VERSION}. Upgrade Mycelium or "
+            "migrate the file after reviewing the release notes"
+        )
+
     profile = _parse_profile(data)
 
     state_backend_raw = data.get("state_backend")
@@ -4139,9 +3924,7 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
     if state_backend_raw is not None:
         storage_type = state_backend_raw.get("storage", "memory")
         if storage_type not in ("memory", "file", "redis", "postgres"):
-            raise ConfigError(
-                f"unknown state_backend storage type: {storage_type!r}"
-            )
+            raise ConfigError(f"unknown state_backend storage type: {storage_type!r}")
         if storage_type == "file" and not state_backend_raw.get("path"):
             raise ConfigError("state_backend storage 'file' requires a 'path'")
 
@@ -4161,8 +3944,7 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
         raise ConfigError("'audit_receipt' must be a mapping")
     if audit_receipt_raw and audit_receipt_raw.get("agent_id"):
         raise ConfigError(
-            "'audit_receipt.agent_id' is no longer supported; "
-            "set 'transition.agent_id' instead"
+            "'audit_receipt.agent_id' is no longer supported; set 'transition.agent_id' instead"
         )
     if audit_receipt_raw is not None:
         storage_type = audit_receipt_raw.get("storage")
@@ -4180,8 +3962,7 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
         raise ConfigError("'outcome_emit' must be a mapping")
     if outcome_emit_raw is not None and outcome_emit_raw.get("agent_id"):
         raise ConfigError(
-            "'outcome_emit.agent_id' is no longer supported; "
-            "set 'transition.agent_id' instead"
+            "'outcome_emit.agent_id' is no longer supported; set 'transition.agent_id' instead"
         )
 
     tools_raw = data.get("tools", {})
@@ -4202,9 +3983,7 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
         _apply_action_ledger_tools(tools, action_ledger_raw, audit_auto=audit_auto)
 
     _validate_transition_tools(tools, transition)
-    _enforce_memory_storage_policy(
-        tools, transition, action_ledger_raw, profile=profile
-    )
+    _enforce_memory_storage_policy(tools, transition, action_ledger_raw, profile=profile)
     _request_identity_policy(action_ledger_raw, profile=profile)
     _enforce_production_outcome_emit(outcome_emit_raw, profile=profile)
 
@@ -4252,9 +4031,7 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
         if storage_type == "file" and not loop_guard_raw.get("path"):
             raise ConfigError("loop_guard storage 'file' requires a 'path'")
         if storage_type not in ("memory", "file", "redis", "postgres", "shared"):
-            raise ConfigError(
-                f"unknown loop_guard storage type: {storage_type!r}"
-            )
+            raise ConfigError(f"unknown loop_guard storage type: {storage_type!r}")
         if storage_type == "shared" and state_backend_raw is None:
             raise ConfigError("loop_guard storage 'shared' requires state_backend")
         tools_sel = loop_guard_raw.get("tools", "all")
@@ -4297,8 +4074,7 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
         on_missing = budget_raw.get("on_missing_meter", ON_MISSING_HARD)
         if on_missing not in ON_MISSING_METER_MODES:
             raise ConfigError(
-                f"'budget.on_missing_meter' must be one of "
-                f"{sorted(ON_MISSING_METER_MODES)}"
+                f"'budget.on_missing_meter' must be one of {sorted(ON_MISSING_METER_MODES)}"
             )
         _missing_usage_policy(budget_raw, profile=profile)
 
@@ -4310,21 +4086,16 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
         if storage_type == "file" and not scope_guard_raw.get("path"):
             raise ConfigError("scope_guard storage 'file' requires a 'path'")
         if storage_type not in ("memory", "file", "redis", "postgres", "shared"):
-            raise ConfigError(
-                f"unknown scope_guard storage type: {storage_type!r}"
-            )
+            raise ConfigError(f"unknown scope_guard storage type: {storage_type!r}")
         if storage_type == "shared" and state_backend_raw is None:
             raise ConfigError("scope_guard storage 'shared' requires state_backend")
         tools_sel = scope_guard_raw.get("tools", "all")
         if tools_sel != "all" and not isinstance(tools_sel, list):
-            raise ConfigError(
-                "'scope_guard.tools' must be 'all' or a list of tool names"
-            )
+            raise ConfigError("'scope_guard.tools' must be 'all' or a list of tool names")
         on_violation = scope_guard_raw.get("on_violation", ON_VIOLATION_SOFT)
         if on_violation not in ON_VIOLATION_MODES:
             raise ConfigError(
-                f"'scope_guard.on_violation' must be one of "
-                f"{sorted(ON_VIOLATION_MODES)}"
+                f"'scope_guard.on_violation' must be one of {sorted(ON_VIOLATION_MODES)}"
             )
         _missing_run_id_policy(
             scope_guard_raw,
@@ -4345,9 +4116,7 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
         if storage_type == "file" and not completion_raw.get("path"):
             raise ConfigError("completion storage 'file' requires a 'path'")
         if storage_type not in ("memory", "file", "redis", "postgres", "shared"):
-            raise ConfigError(
-                f"unknown completion storage type: {storage_type!r}"
-            )
+            raise ConfigError(f"unknown completion storage type: {storage_type!r}")
         if storage_type == "shared" and state_backend_raw is None:
             raise ConfigError("completion storage 'shared' requires state_backend")
         _parse_completion_id_lists(completion_raw)
@@ -4362,25 +4131,19 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
                 "'state_authority.canonical_callable' is required "
                 "(format: 'package.module:function')"
             )
-        _parse_callable_path(
-            callable_path, kind="state_authority", name="canonical_callable"
-        )
+        _parse_callable_path(callable_path, kind="state_authority", name="canonical_callable")
         tools_sel = state_authority_raw.get("tools", "all")
         if tools_sel != "all" and not isinstance(tools_sel, list):
-            raise ConfigError(
-                "'state_authority.tools' must be 'all' or a list of tool names"
-            )
+            raise ConfigError("'state_authority.tools' must be 'all' or a list of tool names")
         on_mismatch = state_authority_raw.get("on_mismatch", ON_MISMATCH_HARD)
         if on_mismatch not in ON_MISMATCH_MODES:
             raise ConfigError(
-                f"'state_authority.on_mismatch' must be one of "
-                f"{sorted(ON_MISMATCH_MODES)}"
+                f"'state_authority.on_mismatch' must be one of {sorted(ON_MISMATCH_MODES)}"
             )
         on_missing = state_authority_raw.get("on_missing", ON_MISMATCH_HARD)
         if on_missing not in ON_MISMATCH_MODES:
             raise ConfigError(
-                f"'state_authority.on_missing' must be one of "
-                f"{sorted(ON_MISMATCH_MODES)}"
+                f"'state_authority.on_missing' must be one of {sorted(ON_MISMATCH_MODES)}"
             )
         if "require_state_ref" in state_authority_raw and not isinstance(
             state_authority_raw.get("require_state_ref"), bool
@@ -4421,15 +4184,14 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
     authority_window_raw = _parse_authority_window(
         data, profile=profile, destructive_confirm=destructive_confirm_raw
     )
-    use_time_currency_raw = _parse_use_time_currency(
-        data, profile=profile, tools=tools
-    )
+    use_time_currency_raw = _parse_use_time_currency(data, profile=profile, tools=tools)
 
     cfg = MyceliumConfig(
         tools=tools,
         tasks=tasks,
         registry_allowed=registry_allowed,
         runner_settings=runner_raw,
+        config_version=CONFIG_VERSION,
         history_guard=history_guard_raw,
         message_validator=message_validator,
         state_flush=state_flush_raw,
@@ -4501,6 +4263,7 @@ __all__ = [
     "MyceliumConfig",
     "ToolConfig",
     "TransitionConfig",
+    "config_json_schema",
     "load_config",
     "load_config_from_string",
 ]
