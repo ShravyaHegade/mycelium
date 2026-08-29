@@ -41,6 +41,28 @@ If a host-owned value cannot be inferred safely, leave one precise documented
 placeholder that fails closed and include it in the final questions list. Do not
 leave vague TODOs such as "configure this later."
 
+## Feature applicability
+
+Do not enable every available Mycelium feature. Enable every feature that
+applies and is genuinely wired. An omitted inapplicable feature is not an
+integration failure.
+
+Classify each feature before editing configuration:
+
+| Category | Typical features | Decision rule |
+| --- | --- | --- |
+| Production foundation | Action ledger, outcomes, durable storage, explicit request IDs, secret protection | Usually required for consequential production tools. |
+| Applicable guardrails | Loop, scope, budget | Enable when the runtime exposes stable run identity and the relevant protected boundaries. |
+| Capability-dependent | Destructive confirmation, authority windows | Enable only when destructive or time-authorized operations exist. |
+| Host-integrated | State authority, use-time currency, completion | Enable only when real validators, canonical state references, or terminal hooks can be wired. |
+| Operator-provisioned | Signed audit receipts | Enable only with a genuine operator-controlled signing key. |
+| Framework-specific | LangGraph integration, history and message guards | Enable only for a supported and observable framework path. |
+| Inapplicable | A refund guard when the agent has no refund operation | Leave disabled intentionally and explain why. |
+
+Do not call a host-integrated or operator-provisioned feature enabled merely
+because its YAML section exists. If its trusted callable, terminal boundary,
+authority, or secret is missing, classify it as deferred and keep it fail closed.
+
 ## Workflow
 
 1. Inspect the dependency files, runtime entry points, framework, tool/task
@@ -58,6 +80,8 @@ leave vague TODOs such as "configure this later."
    existing package manager. Preserve existing version policy. Do not bump the
    application's version.
 5. Create or merge `mycelium.yaml`. Preserve deliberate existing settings.
+   Record the applicability decision for each meaningful feature: enabled,
+   deferred for host work, deferred for operator input, or not applicable.
    Prefer current template defaults, explicit callable paths, stable transition
    identity, strict policies for consequential tools, and durable storage that
    matches the discovered deployment topology. Load the completed file through
@@ -129,6 +153,19 @@ Return a short handoff containing:
 - storage/topology choice;
 - Doctor, Verify, and application-test results;
 - only the fail-closed host-owned inputs the application owner must supply.
+
+Finish with an applicability report grouped as:
+
+- **Enabled** — configured, genuinely wired, and verified features;
+- **Deferred — host work required** — features needing application validators,
+  canonical state, stable identity, or terminal integration;
+- **Deferred — operator input required** — features needing operator-controlled
+  secrets, signing keys, permissions, or explicit authority;
+- **Not applicable** — features that do not match the agent's tools, framework,
+  deployment, or authority model.
+
+Give one short reason for every deferred or inapplicable item. Do not list a
+feature as enabled when only a template section or placeholder exists.
 
 Do not describe the setup as complete if YAML exists but the runtime boundary is
 unwired, tests fail, or a consequential tool lacks trustworthy identity.

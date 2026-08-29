@@ -15,6 +15,9 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
 - Allow custom runtimes launched by `mycelium run` to declare a trusted,
   idempotent completion adapter installer that runs before production terminal
   protection is validated.
+- Make the setup skill classify features as enabled, deferred for host work,
+  deferred for operator input, or intentionally not applicable instead of
+  implying every feature belongs in every project.
 
 ## 1.38.0 (2026-08-29)
 
