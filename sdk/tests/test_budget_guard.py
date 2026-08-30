@@ -16,6 +16,7 @@ from mycelium.budget_guard import (
     KIND_LLM,
     KIND_TOOL,
     ON_MISSING_HARD,
+    BudgetCeilings,
     BudgetGuard,
     FileBudgetGuardStorage,
     InMemoryBudgetGuardStorage,
@@ -41,7 +42,35 @@ def test_parse_duration_seconds() -> None:
     assert parse_duration_seconds("1h") == 3600.0
     with pytest.raises(ValueError):
         parse_duration_seconds("nope")
+        
 
+def test_budget_ceilings_rejects_nan_max_usd() -> None:
+    with pytest.raises(ValueError, match="finite"):
+        BudgetCeilings(max_usd=float("nan"))
+
+def test_budget_ceilings_rejects_infinite_max_usd() -> None:
+    with pytest.raises(ValueError, match="finite"):
+        BudgetCeilings(max_usd=float("inf"))
+
+def test_budget_ceilings_rejects_negative_infinite_max_usd() -> None:
+    with pytest.raises(ValueError, match="finite"):
+        BudgetCeilings(max_usd=float("-inf"))
+
+def test_budget_ceilings_rejects_bool_max_usd() -> None:
+    with pytest.raises(ValueError, match="boolean"):
+        BudgetCeilings(max_usd=True)
+
+def test_budget_ceilings_rejects_nan_max_duration() -> None:
+    with pytest.raises(ValueError, match="finite"):
+        BudgetCeilings(max_duration=float("nan"))
+
+def test_budget_ceilings_rejects_infinite_max_duration() -> None:
+    with pytest.raises(ValueError, match="finite"):
+        BudgetCeilings(max_duration=float("inf"))
+
+def test_budget_ceilings_rejects_bool_max_duration() -> None:
+    with pytest.raises(ValueError, match="boolean"):
+        BudgetCeilings(max_duration=True)        
 
 def test_max_steps_ceiling_allows_n() -> None:
     """Honey Mail 2: max_steps=N must run N bodies (warn_at must not steal one)."""
