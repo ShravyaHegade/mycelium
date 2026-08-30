@@ -180,10 +180,10 @@ class BudgetRunState:
     usage_unknown: bool = False
     last_model: str | None = None
     last_provider: str | None = None
+    updated_at: float = field(default_factory=time.time)
     # ``None`` means no check has run yet; otherwise this records whether the
     # most recent check reserved a step for automatic accounting.
     last_check_incremented_steps: bool | None = None
-    updated_at: float = field(default_factory=time.time)
 
     @property
     def tokens(self) -> int:
@@ -212,8 +212,8 @@ class BudgetRunState:
             "usage_unknown": self.usage_unknown,
             "last_model": self.last_model,
             "last_provider": self.last_provider,
-            "last_check_incremented_steps": self.last_check_incremented_steps,
             "updated_at": self.updated_at,
+            "last_check_incremented_steps": self.last_check_incremented_steps,
         }
 
     @classmethod

@@ -18,6 +18,7 @@ from mycelium.budget_guard import (
     KIND_TOOL,
     ON_MISSING_HARD,
     BudgetGuard,
+    BudgetRunState,
     FileBudgetGuardStorage,
     InMemoryBudgetGuardStorage,
     SqliteBudgetGuardStorage,
@@ -42,6 +43,32 @@ def test_parse_duration_seconds() -> None:
     assert parse_duration_seconds("1h") == 3600.0
     with pytest.raises(ValueError):
         parse_duration_seconds("nope")
+
+
+def test_budget_run_state_positional_constructor_preserves_updated_at() -> None:
+    state = BudgetRunState(
+        "compat",
+        1.0,
+        2,
+        3,
+        4,
+        5.0,
+        True,
+        {"max_steps": True},
+        True,
+        "max_steps",
+        "clear",
+        "ops@example.com",
+        "reset",
+        6.0,
+        True,
+        "model",
+        "provider",
+        7.0,
+    )
+
+    assert state.updated_at == 7.0
+    assert state.last_check_incremented_steps is None
 
 
 def test_max_steps_ceiling_allows_n() -> None:
