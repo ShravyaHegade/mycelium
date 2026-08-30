@@ -75,7 +75,10 @@ authority, or secret is missing, classify it as deferred and keep it fail closed
    guard/storage path.
 3. Classify each tool from code evidence. Read
    [references/tool-classification.md](references/tool-classification.md) before
-   writing configuration.
+   writing configuration. If the trusted host selects exact write destinations
+   per run, read
+   [references/dynamic-destination-authority.md](references/dynamic-destination-authority.md)
+   before declaring that no truthful static entity allowlist exists.
 4. Add the appropriate `mycelium-runtime` dependency/extras using the project's
    existing package manager. Preserve existing version policy. Do not bump the
    application's version.
@@ -85,7 +88,11 @@ authority, or secret is missing, classify it as deferred and keep it fail closed
    Prefer current template defaults, explicit callable paths, stable transition
    identity, strict policies for consequential tools, and durable storage that
    matches the discovered deployment topology. Load the completed file through
-   the installed Mycelium version before treating it as valid.
+   the installed Mycelium version before treating it as valid. Use YAML entity
+   allowlists only for destinations known ahead of time. For host-selected
+   destinations, construct one immutable `EntityGuardPolicy` from the trusted
+   selection for that run and compose it outside the ledgered tool with
+   `apply_decision_policy`; never let model output create or widen that policy.
 6. Wire the real execution boundary. Prefer a supported framework integration
    or Mycelium's wrapper/config instrumentation path. For a custom loop, wrap the
    callable at the last boundary before execution. Ensure sync/async parity and
@@ -117,7 +124,9 @@ Group unresolved items into a short final list, such as:
 - the stable business operation ID used across retries;
 - production Redis/Postgres connection environment-variable name or topology;
 - provider idempotency-key and read-only reconciliation guarantees;
-- approved CRM destinations, destructive objects, or authority windows;
+- approved CRM destinations, or the trusted host selection/approval path that
+  will issue exact per-run destination policy;
+- destructive objects or authority windows;
 - secret/signing-key environment-variable names and production permissions.
 
 Never ask the user to transcribe information already present in the repository.
@@ -150,6 +159,7 @@ Return a short handoff containing:
 - the completed `mycelium.yaml` path and any intentionally unresolved placeholders;
 - files and execution boundaries wired;
 - tool classifications and identity sources chosen;
+- destination authority source (static host allowlist or exact per-run host policy);
 - storage/topology choice;
 - Doctor, Verify, and application-test results;
 - only the fail-closed host-owned inputs the application owner must supply.

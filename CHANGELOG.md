@@ -21,6 +21,9 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
 - Clarify that `budget.max_steps` counts protected tool calls and instrumented
   LLM turns rather than business workflow outcomes, including the unit in the
   typed schema, generated reference, template guidance, and Doctor output.
+- Document and test host-owned, per-run entity policies for exact destinations
+  selected dynamically by a trusted orchestrator, and teach the bundled setup
+  skill not to replace them with model-controlled or wildcard allowlists.
 
 ## 1.38.0 (2026-08-29)
 

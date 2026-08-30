@@ -9,6 +9,7 @@ from zipfile import ZipFile
 REQUIRED = {
     "mycelium/skills/mycelium-setup/SKILL.md",
     "mycelium/skills/mycelium-setup/agents/openai.yaml",
+    "mycelium/skills/mycelium-setup/references/dynamic-destination-authority.md",
     "mycelium/skills/mycelium-setup/references/provider-reconciliation.md",
     "mycelium/skills/mycelium-setup/references/tool-classification.md",
 }

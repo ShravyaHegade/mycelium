@@ -10,8 +10,10 @@ import pytest
 from mycelium import (
     PAYLOAD_OMITTED,
     ConfigError,
+    DecisionPolicyBundle,
     EntityGuardError,
     InMemoryLedgerStorage,
+    apply_decision_policy,
     apply_entity_guard,
     canonicalize_email,
     canonicalize_https_url,
@@ -238,6 +240,76 @@ def test_blocks_before_ledger_claim() -> None:
         with pytest.raises(EntityGuardError):
             wrapped(recipient="exfil@evil.example", body="payroll", request_id="eg-1")
     assert events == []
+
+
+def test_host_created_per_run_policy_allows_only_selected_candidate() -> None:
+    selected_repository = "mycelium-labs/mycelium"
+    selected_page = "notion-page-approved"
+    executed: list[tuple[str, str]] = []
+    storage = InMemoryLedgerStorage()
+
+    def contribute(repository: str, page_id: str) -> tuple[str, str]:
+        executed.append((repository, page_id))
+        return repository, page_id
+
+    ledgered = ledger_sync(
+        storage=storage,
+        transition_binding=_binding(),
+    )(contribute)
+    policy = EntityGuardPolicy(
+        policy_version="candidate:approval-7",
+        tools={
+            "contribute": ToolDestinationPolicy(
+                destinations=(
+                    DestinationSpec(
+                        path="repository",
+                        dest_type=DEST_ENTITY_ID,
+                        allow=DestinationAllow(values=frozenset({selected_repository})),
+                    ),
+                    DestinationSpec(
+                        path="page_id",
+                        dest_type=DEST_ENTITY_ID,
+                        allow=DestinationAllow(values=frozenset({selected_page})),
+                    ),
+                )
+            )
+        },
+    )
+    guarded = apply_decision_policy(
+        ledgered,
+        DecisionPolicyBundle(entity_policy=policy, consequential=True),
+        tool_name="contribute",
+    )
+
+    with execution_scope(TransitionScope(run_id="candidate-7", thread_id="queue")):
+        assert guarded(
+            repository=selected_repository,
+            page_id=selected_page,
+            request_id="candidate-7-allowed",
+        ) == (selected_repository, selected_page)
+        with pytest.raises(EntityGuardError):
+            guarded(
+                repository="attacker/fork",
+                page_id=selected_page,
+                request_id="candidate-7-wrong-repository",
+            )
+        with pytest.raises(EntityGuardError):
+            guarded(
+                repository=selected_repository,
+                page_id="notion-page-other",
+                request_id="candidate-7-wrong-page",
+            )
+
+    assert executed == [(selected_repository, selected_page)]
+    allowed = storage.get("candidate-7-allowed")
+    wrong_repository = storage.get("candidate-7-wrong-repository")
+    wrong_page = storage.get("candidate-7-wrong-page")
+    assert allowed is not None and allowed.decision is not None
+    assert allowed.decision["allowed"] is True
+    for denied in (wrong_repository, wrong_page):
+        assert denied is not None and denied.decision is not None
+        assert denied.decision["allowed"] is False
+        assert denied.effect_phase == "ABORTED"
 
 
 def test_canonical_dest_bound_into_fingerprint() -> None:

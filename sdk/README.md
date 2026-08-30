@@ -1588,6 +1588,59 @@ consequential tools lack a declaration.
 `mycelium verify --scenario entity-guard` proves unauthorized destinations
 never claim.
 
+#### Host-selected destinations per run
+
+Static YAML is for destinations known when the application is configured. If a
+trusted orchestrator selects an approved repository, page, tenant, or other
+exact destination at run start, create an immutable `EntityGuardPolicy` from
+that trusted selection and compose it outside the already-ledgered tool with
+`apply_decision_policy`:
+
+```python
+from mycelium import DecisionPolicyBundle, apply_decision_policy
+from mycelium.entity_guard import (
+    DEST_ENTITY_ID,
+    DestinationAllow,
+    DestinationSpec,
+    EntityGuardPolicy,
+    ToolDestinationPolicy,
+)
+
+policy = EntityGuardPolicy(
+    policy_version=f"candidate:{candidate.id}:{candidate.approval_revision}",
+    tools={
+        "contribute": ToolDestinationPolicy(
+            destinations=(
+                DestinationSpec(
+                    path="repository",
+                    dest_type=DEST_ENTITY_ID,
+                    allow=DestinationAllow(values=frozenset({candidate.repository})),
+                ),
+                DestinationSpec(
+                    path="page_id",
+                    dest_type=DEST_ENTITY_ID,
+                    allow=DestinationAllow(values=frozenset({candidate.page_id})),
+                ),
+            )
+        )
+    },
+)
+safe_contribute = apply_decision_policy(
+    ledgered_contribute,
+    DecisionPolicyBundle(entity_policy=policy, consequential=True),
+    tool_name="contribute",
+)
+```
+
+The host must fetch and validate the candidate's approval and canonical IDs
+outside the agent. Raw queue content and model output are data, not authority;
+the model must never create, extend, or widen this policy. Issue a fresh policy
+for a different candidate. If approval can be revoked mid-run, combine this
+snapshot with use-time currency or an authority window so authorization is
+rechecked at the final boundary. If trusted selection or current approval cannot
+be proven, do not expose the write tool. This keeps dynamic routing exact without
+using a broad static allowlist.
+
 ### Destructive confirm (AF-011)
 
 Tool permission is not object authorization. A configured destructive
