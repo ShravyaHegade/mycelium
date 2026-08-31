@@ -515,6 +515,50 @@ outcome_emit:
     )
 
 
+@pytest.mark.parametrize("timeout", [".nan", ".inf", "-.inf", "true", "false", "0", "-1"])
+def test_config_rejects_invalid_webhook_timeout(tmp_path: Path, timeout: str) -> None:
+    config = load_config_from_string(
+        f"""
+transition:
+  agent_id: acme
+  policy_version: "1"
+outcome_emit:
+  storage: file
+  path: {tmp_path / "outcomes.jsonl"}
+  exporters:
+    - type: webhook
+      url: https://events.example.test/mycelium
+      timeout: {timeout}
+"""
+    )
+    with pytest.raises(ConfigError, match=r"outcome exporter 'webhook' is invalid"):
+        config.build_outcome_emitter()
+
+
+@pytest.mark.parametrize("timeout", [1, 2.5])
+def test_config_accepts_positive_finite_webhook_timeout(tmp_path: Path, timeout: float) -> None:
+    config = load_config_from_string(
+        f"""
+transition:
+  agent_id: acme
+  policy_version: "1"
+outcome_emit:
+  storage: file
+  path: {tmp_path / "outcomes.jsonl"}
+  exporters:
+    - type: webhook
+      url: https://events.example.test/mycelium
+      timeout: {timeout}
+"""
+    )
+    emitter = config.build_outcome_emitter()
+    assert emitter is not None
+    webhook = next(
+        sink for sink in emitter.storage._sinks if isinstance(sink, WebhookOutcomeStorage)
+    )
+    assert webhook._timeout == timeout
+
+
 def test_config_apply_tool_wires_outcome_emitter(tmp_path: Path) -> None:
     path = tmp_path / "mycelium.yaml"
     path.write_text(
