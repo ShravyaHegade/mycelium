@@ -12,7 +12,7 @@ from mycelium.storage.atomic_state import (
     RedisAtomicStateBackend,
 )
 from mycelium.storage.file_lock import PathFileLock
-from mycelium.storage.json_file import LockedJsonDictFile
+from mycelium.storage.json_file import LockedJsonDictFile, StorageCorruptionError
 from mycelium.storage.postgres_ledger import (
     PostgresLedgerStorage,
     PostgresTaskLedgerStorage,
@@ -48,4 +48,5 @@ __all__ = [
     "RedisTaskLedgerStorage",
     "SqliteLedgerStorage",
     "SqliteTaskLedgerStorage",
+    "StorageCorruptionError",
 ]
