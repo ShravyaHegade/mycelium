@@ -139,7 +139,12 @@ from mycelium.config import (
     load_config,
     load_config_from_string,
 )
-from mycelium.config_schema import CONFIG_SCHEMA_ID, CONFIG_VERSION, MyceliumConfigModel, ToolContractModel
+from mycelium.config_schema import (
+    CONFIG_SCHEMA_ID,
+    CONFIG_VERSION,
+    MyceliumConfigModel,
+    ToolContractModel,
+)
 from mycelium.contracts import ToolContract, validate_contract_call
 from mycelium.decision import (
     PREDICATE_AUTHORITY,
