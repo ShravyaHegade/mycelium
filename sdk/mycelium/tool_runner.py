@@ -49,7 +49,7 @@ class ToolRunner:
                 return await self._invoke(func, *args, **kwargs)
             except ToolBoundaryError as exc:
                 last_error = exc
-                if exc.violation not in _OUTPUT_VIOLATIONS:
+                if exc.violation not in _OUTPUT_VIOLATIONS or getattr(exc, "no_retry", False):
                     raise
                 if attempt >= self._max_tool_retries - 1:
                     raise
@@ -106,7 +106,7 @@ class ToolRunner:
                 return func(*args, **kwargs)
             except ToolBoundaryError as exc:
                 last_error = exc
-                if exc.violation not in _OUTPUT_VIOLATIONS:
+                if exc.violation not in _OUTPUT_VIOLATIONS or getattr(exc, "no_retry", False):
                     raise
                 if attempt >= self._max_tool_retries - 1:
                     raise

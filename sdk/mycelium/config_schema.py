@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 CONFIG_VERSION = 1
 CONFIG_SCHEMA_ID = "https://mycelium-labs.github.io/schema/mycelium-config-v1.json"
@@ -121,6 +121,68 @@ class TaskLedgerConfigModel(StorageConfigModel):
     tasks: Literal["all"] | list[str] | None = None
 
 
+class ToolContractModel(_ConfigModel):
+    """Optional deterministic developer contract for a tool.
+
+    Type names are the small v1 subset: string, integer, number, boolean,
+    array, object, and null. Schema values may be a type name or a mapping
+    with ``type`` (and for arrays, ``items``).
+    """
+
+    operations: list[str] = Field(default_factory=list)
+    required_args: list[str] = Field(default_factory=list)
+    optional_args: list[str] = Field(default_factory=list)
+    argument_types: dict[str, str | dict[str, Any]] = Field(default_factory=dict)
+    output_schema: dict[str, str | dict[str, Any]] | None = None
+    capabilities: list[str] = Field(default_factory=list)
+
+    @field_validator("operations", "required_args", "optional_args", "capabilities")
+    @classmethod
+    def _string_lists(cls, value: list[str]) -> list[str]:
+        if not isinstance(value, list) or any(
+            not isinstance(item, str) or not item.strip() for item in value
+        ):
+            raise ValueError("must be a list of non-empty strings")
+        return value
+
+    @field_validator("required_args", "optional_args")
+    @classmethod
+    def _identifiers(cls, value: list[str]) -> list[str]:
+        import keyword
+
+        if any(not item.isidentifier() or keyword.iskeyword(item) for item in value):
+            raise ValueError("must contain valid Python identifiers")
+        return value
+
+    @field_validator("optional_args")
+    @classmethod
+    def _no_overlap(cls, value: list[str], info: Any) -> list[str]:
+        required = info.data.get("required_args", [])
+        overlap = sorted(set(required) & set(value))
+        if overlap:
+            raise ValueError(f"overlaps required_args: {overlap}")
+        return value
+
+    @field_validator("argument_types")
+    @classmethod
+    def _argument_type_values(
+        cls, value: dict[str, str | dict[str, Any]]
+    ) -> dict[str, str | dict[str, Any]]:
+        if not isinstance(value, dict) or any(
+            not isinstance(key, str) or not key.isidentifier() for key in value
+        ):
+            raise ValueError("must be a mapping with identifier keys")
+        return value
+
+    @model_validator(mode="after")
+    def _declared_argument_types(self) -> ToolContractModel:
+        declared = set(self.required_args) | set(self.optional_args)
+        unknown = sorted(set(self.argument_types) - declared)
+        if unknown:
+            raise ValueError(f"argument_types contains undeclared arguments: {unknown}")
+        return self
+
+
 class ToolConfigModel(_ConfigModel):
     """Configuration for one application tool."""
 
@@ -196,6 +258,13 @@ class ToolConfigModel(_ConfigModel):
     entity_guard: bool | None = None
     destructive_confirm: bool | None = None
     use_time_currency: bool | None = None
+    # Standardized contract fields are accepted directly for ergonomic YAML.
+    operations: list[str] | None = None
+    required_args: list[str] | None = None
+    optional_args: list[str] | None = None
+    argument_types: dict[str, str | dict[str, Any]] | None = None
+    output_schema: dict[str, str | dict[str, Any]] | None = None
+    capabilities: list[str] | None = None
 
 
 class TaskConfigModel(_ConfigModel):
@@ -356,6 +425,7 @@ __all__ = [
     "CONFIG_SCHEMA_ID",
     "CONFIG_VERSION",
     "MyceliumConfigModel",
+    "ToolContractModel",
     "config_json_schema",
     "format_validation_error",
     "validate_config_shape",

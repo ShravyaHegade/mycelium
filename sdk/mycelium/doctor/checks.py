@@ -120,9 +120,10 @@ def _guard_storage_type(
 @doctor_check("configuration")
 def check_configuration(ctx: DoctorContext) -> Iterable[DoctorCheck]:
     cfg = ctx.config
+    contract_count = sum(1 for tool in cfg.tools.values() if tool.contract is not None)
     details = (
         f"profile={cfg.profile!r}; tools={len(cfg.tools)}; "
-        f"langgraph_enabled={cfg.langgraph_enabled}"
+        f"contracts={contract_count}; langgraph_enabled={cfg.langgraph_enabled}"
     )
     if cfg.profile == PROFILE_PRODUCTION:
         yield _check(
