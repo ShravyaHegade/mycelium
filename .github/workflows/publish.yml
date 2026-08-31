@@ -33,6 +33,11 @@ jobs:
       - name: Build sdist and wheel
         run: python -m build
 
+      - name: Inspect distribution skill payloads
+        run: >-
+          python ../.github/scripts/check-distribution-contents.py
+          dist/*.whl dist/*.tar.gz
+
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:

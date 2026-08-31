@@ -20,11 +20,13 @@ currency); SQLite + Redis/Postgres; DTTR; worker-death detection; and lease auto
 
 ## One painful bug → a few lines of config
 
-Prefer agent-assisted setup? The source repository includes the
-[`mycelium-setup`](../.agents/skills/mycelium-setup/SKILL.md) skill. A coding
-agent using it can inspect the application, fill/merge YAML, wire the real tool
-boundary, add tests, and run Doctor/Verify. It remains fail-closed for secrets,
-business identity, and provider authority that cannot be safely inferred.
+Prefer agent-assisted setup? The PyPI package includes the official
+[`mycelium-setup`](https://github.com/mycelium-labs/mycelium/tree/main/.agents/skills/mycelium-setup)
+skill. Run `mycelium skills install` after installing the package, then ask your
+coding agent to set up Mycelium. The agent can inspect the application,
+fill/merge YAML, wire the real tool boundary, add tests, and run Doctor/Verify.
+It remains fail-closed for secrets, business identity, and provider authority
+that cannot be safely inferred.
 
 **LangGraph Cloud redispatches a long tool call while the first is still running.** Both complete. You pay twice. Side effects run twice. [langgraph#7417](https://github.com/langchain-ai/langgraph/issues/7417) — catalog class **AF-002**.
 
@@ -131,10 +133,15 @@ Mycelium is an **embeddable transition envelope at the tool boundary** — class
 
 ```bash
 pip install mycelium-runtime
+mycelium skills install    # offline → ./.agents/skills/mycelium-setup
 pip install 'mycelium-runtime[langgraph]'  # optional automatic LangGraph IDs
 mycelium init              # on-ramp: duplicate-tool fix → ./mycelium.yaml
+mycelium init --detect     # inspect local dependencies/@tool functions and tailor a safe starter
 mycelium init --full       # reference: every guard section (not the default)
 mycelium init --minimal    # smaller multi-guard scaffold
+mycelium config schema -o mycelium.schema.json  # JSON Schema / IDE completion
+mycelium config docs       # reference generated from the typed model
+mycelium config example    # model-validated example YAML
 mycelium demo              # feature tour: unguarded vs ledgered + gates / hard-block / release
 mycelium demo --redis      # optional Cloud-style 2-worker Redis proof
 ```
@@ -613,21 +620,29 @@ schema cannot represent every newer record safely.
 canonical effect row. It preserves redispatch history; it does not create a new
 effect or grant permission.
 
-The public API is exported from `mycelium`:
+## Public API namespaces
+
+Existing imports from `mycelium` remain supported; this namespace change does
+not require an application migration. New code should use the package root for
+the recommended API, `mycelium.runtime` for stable low-level building blocks,
+and `mycelium.integrations` for optional framework adapters. APIs incubating
+without a full stability promise live under `mycelium.experimental`. Nothing
+under `mycelium._internal` is public.
 
 ```python
-from mycelium import (
-    Decision,
-    DecisionIntent,
-    DecisionSnapshot,
-    EffectState,
-    PredicateVerdict,
-    ToolCapability,
-    derive_effect_id_for_call,
-    register_decision_predicate,
-    resolve_effect_state,
-)
+from mycelium import ledger_sync, load_config
+from mycelium.integrations import instrument_langgraph_tool
+from mycelium.runtime import ActionLedger, TransitionScope
 ```
+
+The reviewed contract is stored in `api-snapshot.json` and checked by the test
+suite on every CI run. An intentional public API change must preserve existing
+imports or include deprecation metadata, compatibility tests, and a regenerated
+snapshot (`python scripts/update_api_snapshot.py`).
+
+The package root still re-exports historical low-level APIs for compatibility.
+Moving an import to `mycelium.runtime` is optional until a separately announced
+deprecation says otherwise.
 
 `EffectState` is the durable write-ahead intent:
 
@@ -1392,7 +1407,7 @@ usage.
 
 | Meter | What it limits | Needs usage metadata? |
 |-------|----------------|------------------------|
-| `max_steps` | LLM + tool turns | No |
+| `max_steps` | Protected tool invocations + instrumented LLM turns | No |
 | `max_duration` | Wall clock since run start | No |
 | `max_tokens` | Sum of input+output tokens | Yes (adapter) |
 | `max_usd` / `max_cost_usd` | Host-reported USD | Yes (cost resolver) |
@@ -1410,6 +1425,15 @@ budget:
   max_cost_usd: 10
   missing_usage_policy: error   # warn is the library default
 ```
+
+`max_steps` is a run-wide protected-call ceiling, not a count of business
+outcomes or high-level workflow stages. Each budget-guarded tool invocation and
+instrumented LLM turn reserves one step, including calls on failure, retry, and
+cleanup paths. Estimate the legitimate worst case across those paths and keep
+business limits—such as candidates processed, attempts, or successful
+submissions—in separate application counters. Doctor reports this counting unit
+but does not guess whether the ceiling is large enough because the tool list
+does not reveal the workflow's possible call paths.
 
 ```python
 from mycelium import load_config
@@ -1563,6 +1587,59 @@ behavior. Production requires `missing_policy: error`.
 consequential tools lack a declaration.
 `mycelium verify --scenario entity-guard` proves unauthorized destinations
 never claim.
+
+#### Host-selected destinations per run
+
+Static YAML is for destinations known when the application is configured. If a
+trusted orchestrator selects an approved repository, page, tenant, or other
+exact destination at run start, create an immutable `EntityGuardPolicy` from
+that trusted selection and compose it outside the already-ledgered tool with
+`apply_decision_policy`:
+
+```python
+from mycelium import DecisionPolicyBundle, apply_decision_policy
+from mycelium.entity_guard import (
+    DEST_ENTITY_ID,
+    DestinationAllow,
+    DestinationSpec,
+    EntityGuardPolicy,
+    ToolDestinationPolicy,
+)
+
+policy = EntityGuardPolicy(
+    policy_version=f"candidate:{candidate.id}:{candidate.approval_revision}",
+    tools={
+        "contribute": ToolDestinationPolicy(
+            destinations=(
+                DestinationSpec(
+                    path="repository",
+                    dest_type=DEST_ENTITY_ID,
+                    allow=DestinationAllow(values=frozenset({candidate.repository})),
+                ),
+                DestinationSpec(
+                    path="page_id",
+                    dest_type=DEST_ENTITY_ID,
+                    allow=DestinationAllow(values=frozenset({candidate.page_id})),
+                ),
+            )
+        )
+    },
+)
+safe_contribute = apply_decision_policy(
+    ledgered_contribute,
+    DecisionPolicyBundle(entity_policy=policy, consequential=True),
+    tool_name="contribute",
+)
+```
+
+The host must fetch and validate the candidate's approval and canonical IDs
+outside the agent. Raw queue content and model output are data, not authority;
+the model must never create, extend, or widen this policy. Issue a fresh policy
+for a different candidate. If approval can be revoked mid-run, combine this
+snapshot with use-time currency or an authority window so authorization is
+rechecked at the final boundary. If trusted selection or current approval cannot
+be proven, do not expose the write tool. This keeps dynamic routing exact without
+using a broad static allowlist.
 
 ### Destructive confirm (AF-011)
 
@@ -1829,14 +1906,26 @@ cfg.mark_completion("charge_customer", "success", scope_key=run_id)
 
 `profile: production` verifies an **explicitly selected** terminal adapter
 at startup. Having LangGraph installed is not enough — set
-`integrations.langgraph.enabled: true` or call
-`register_terminal_adapter(...)` before `load_config`. If `completion:`
+`integrations.langgraph.enabled: true`. For a custom runtime launched with
+`mycelium run`, declare an idempotent installer in the configuration:
+
+```yaml
+completion:
+  adapter_installer: my_app.mycelium_completion:install
+  required:
+    - id: charge_customer
+```
+
+The installer runs in the application process after its import path is ready.
+It must wire the real final-message/terminal boundary and then call
+`register_terminal_adapter("custom")`. If `completion:`
 is enabled but no adapter was selected, load raises `ConfigError` so the
 app cannot look protected while checks are bypassed. Development mode
 warns and keeps the manual fallback.
 
 Custom runtimes only: `wrap_final_message`, `gate_graph_end`,
-`complete_run`, or `register_terminal_adapter(...)` before `load_config`.
+`complete_run`, or the configured `adapter_installer`. Applications that load
+configuration themselves may still register an adapter before `load_config`.
 Official LangGraph integrations do not need those calls.
 
 ```bash
@@ -2220,10 +2309,11 @@ refuses conflicting destination records instead of guessing which copy wins.
 ### `mycelium doctor` (verify protection is real)
 
 Installing Mycelium does not prove a deployment is protected. `mycelium doctor`
-is a **read-only** verifier for configuration and detectable wiring:
+is a **read-only by default** verifier for configuration and detectable wiring:
 
 ```console
 $ mycelium doctor --config mycelium.yaml
+$ mycelium doctor --config mycelium.yaml --fix  # version/schema metadata only
 $ mycelium doctor --config mycelium.yaml --strict --json   # CI gate
 ```
 
@@ -2233,7 +2323,9 @@ budget adapter selection, secret-in-args scanning / fail-closed production,
 destination-policy coverage,
 and optional `deployment.topology`. It never executes
 application tools, never calls an LLM, never writes ledger/outcome rows, and
-never repairs config.
+does not repair runtime policy. The opt-in `--fix` mode only adds an explicit
+`config_version`, a YAML editor schema hint, and a local JSON Schema sidecar. It
+does not guess tool classifications, storage, credentials, or production policy.
 
 Evidence labels distinguish what Mycelium can prove (`statically_verified`,
 `runtime_registration_verified`, `connectivity_verified`) from what remains an

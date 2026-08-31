@@ -94,6 +94,11 @@ Use `record_usage()` for observed token/USD usage without `steps`; combining
 `record_usage(steps=...)` with the default step meter warns because it counts
 the step twice.
 
+`budget.max_steps` counts each budget-guarded tool invocation and instrumented
+LLM turn—not business outcomes or high-level workflow stages. Include normal
+failure, retry, and cleanup calls when sizing it, and enforce business limits
+such as candidates, attempts, or successful submissions separately.
+
 Implementation detail (envelope field stack, gate matrix, payment identity): [sdk/README.md](sdk/README.md#transition-envelope-fields). Failure & threat model: [sdk/docs/FAILURE_AND_THREAT_MODEL.md](sdk/docs/FAILURE_AND_THREAT_MODEL.md).
 
 Not Langfuse. Use both if you want traces and guards. Not an approvals inbox, hosted observability, on-chain audit trail, or agent framework — [What Mycelium does not do](sdk/README.md#what-mycelium-does-not-do).
@@ -102,12 +107,18 @@ Not Langfuse. Use both if you want traces and guards. Not an approvals inbox, ho
 
 ### Let your coding agent wire it
 
-This repository ships the discoverable
-[`mycelium-setup`](.agents/skills/mycelium-setup/SKILL.md) skill. Once the skill
-is available to the coding agent, the developer can simply ask: “Set up
-Mycelium in this project.” The agent inventories tools, classifies side effects,
-adds dependencies, creates or merges `mycelium.yaml`, wires the actual runtime
-boundary, adds tests, and runs Doctor/Verify.
+The PyPI package bundles the official
+[`mycelium-setup`](.agents/skills/mycelium-setup/SKILL.md) skill. Install it
+offline into the current project's agent catalog, then simply ask your coding
+agent: “Set up Mycelium in this project.” The agent inventories tools,
+classifies side effects, adds dependencies, creates or merges `mycelium.yaml`,
+wires the actual runtime boundary, adds tests, and runs Doctor/Verify.
+
+```bash
+pip install mycelium-runtime
+mycelium skills install                    # ./.agents/skills/mycelium-setup
+mycelium skills install --target ~/.codex/skills  # optional user catalog
+```
 
 The workflow is intentionally fail-closed: it will not invent production
 secrets, business request identities, provider permissions, or authorization.

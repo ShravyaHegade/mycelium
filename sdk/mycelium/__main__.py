@@ -42,14 +42,39 @@ def _load_template(*, full: bool, minimal: bool) -> tuple[str, str]:
     return path.read_text(encoding="utf-8"), label
 
 
-def cmd_init(output: Path, *, full: bool, minimal: bool, force: bool) -> int:
+def cmd_init(
+    output: Path,
+    *,
+    full: bool,
+    minimal: bool,
+    force: bool,
+    detect: bool = False,
+    project: Path = Path("."),
+) -> int:
     if output.exists() and not force:
         print(f"error: {output} already exists (use --force to overwrite)", file=sys.stderr)
         return 1
-    text, label = _load_template(full=full, minimal=minimal)
+    if detect:
+        from mycelium.config_detect import render_detected_config, write_schema_sidecar
+
+        text, detection = render_detected_config(project)
+        label = "detected"
+    else:
+        text, label = _load_template(full=full, minimal=minimal)
+        detection = None
     output.write_text(text, encoding="utf-8")
     print(f"Wrote {output} ({label} template)")
-    if label == "quickstart":
+    if detection is not None:
+        schema_path = write_schema_sidecar(output, force=force)
+        frameworks = ", ".join(detection.frameworks) or "none"
+        print(
+            f"Detected frameworks: {frameworks}; decorated tools: "
+            f"{len(detection.tools)}; scanned Python files: {detection.scanned_files}."
+        )
+        if schema_path is not None:
+            print(f"Wrote {schema_path} (IDE schema)")
+        print("Review detected tools before production use; mutation was assumed for safety.")
+    elif label == "quickstart":
         print(
             "Next: install mycelium-runtime[langgraph], fill the IDs/callable path, "
             "then use 'mycelium run -- python -m your_package.app'."
@@ -74,6 +99,45 @@ def cmd_config_schema(output: Path | None) -> int:
     else:
         output.write_text(text, encoding="utf-8")
         print(f"Wrote {output}")
+    return 0
+
+
+def _write_or_print_config_artifact(text: str, output: Path | None) -> int:
+    if output is None:
+        print(text, end="")
+    else:
+        output.write_text(text, encoding="utf-8")
+        print(f"Wrote {output}")
+    return 0
+
+
+def cmd_config_docs(output: Path | None) -> int:
+    """Print or write reference Markdown generated from JSON Schema."""
+    from mycelium.config_artifacts import render_config_reference
+
+    return _write_or_print_config_artifact(render_config_reference(), output)
+
+
+def cmd_config_example(output: Path | None) -> int:
+    """Print or write a model-validated starter configuration."""
+    from mycelium.config_artifacts import render_config_example
+
+    return _write_or_print_config_artifact(render_config_example(), output)
+
+
+def cmd_skills_install(*, target: Path, force: bool) -> int:
+    """Install the bundled setup skill into an agent skill catalog."""
+    from mycelium._internal.skill_installer import SkillInstallError, install_setup_skill
+
+    try:
+        result = install_setup_skill(target, force=force)
+    except (OSError, SkillInstallError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if result.changed:
+        print(f"Installed mycelium-setup skill: {result.destination}")
+    else:
+        print(f"mycelium-setup skill is already current: {result.destination}")
     return 0
 
 
@@ -198,11 +262,14 @@ def _validated_python_command(command: list[str]) -> list[str]:
 def cmd_run(config_path: Path, command: list[str]) -> int:
     """Replace this process with an auto-instrumented Python command."""
     from mycelium.auto_instrumentation import AUTO_CONFIG_ENV, AUTO_ENABLED_ENV
-    from mycelium.config import ConfigError, load_config
+    from mycelium.config import ConfigError, _load_config_for_preflight
 
     resolved_config = config_path.resolve()
     try:
-        config = load_config(resolved_config)
+        # Validate structure and instrumentation targets without activating
+        # application-owned runtime adapters in the launcher process. The
+        # child startup hook activates them after its import path is ready.
+        config = _load_config_for_preflight(resolved_config)
         config.auto_instrumentation_targets()
         child_command = _validated_python_command(command)
     except (ConfigError, OSError, ValueError) as exc:
@@ -1338,11 +1405,17 @@ def cmd_budget_release(args: argparse.Namespace) -> int:
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
-    """Read-only production-safety verification (never executes tools/LLMs)."""
+    """Production-safety verification with narrowly scoped opt-in fixes."""
     import sys
 
     from mycelium.doctor import exit_code_for_report, run_doctor
     from mycelium.doctor.render import write_report
+
+    if args.fix:
+        from mycelium.doctor.fixes import apply_conservative_fixes
+
+        for fix in apply_conservative_fixes(args.config):
+            print(f"fixed [{fix.id}] {fix.summary}: {fix.path}", file=sys.stderr)
 
     report = run_doctor(
         args.config,
@@ -1466,12 +1539,13 @@ def main(argv: list[str] | None = None) -> int:
 
     doctor_parser = sub.add_parser(
         "doctor",
-        help="Verify production safety configuration and wiring (read-only)",
+        help="Verify production safety configuration and wiring",
         description=(
-            "Read-only verification that Mycelium protections are actually "
+            "Verification that Mycelium protections are actually "
             "configured and detectably wired — not merely installed. Never "
             "executes application tools, never calls an LLM, never writes "
-            "ledger/outcome rows, and never repairs config. "
+            "ledger/outcome rows. It is read-only unless --fix is supplied; "
+            "fixes are limited to version/schema metadata. "
             "CI gate: mycelium doctor --config mycelium.yaml --strict --json"
         ),
     )
@@ -1501,6 +1575,11 @@ def main(argv: list[str] | None = None) -> int:
         "--no-connectivity",
         action="store_true",
         help="Skip safe backend connectivity probes",
+    )
+    doctor_parser.add_argument(
+        "--fix",
+        action="store_true",
+        help="Add only safe config-version and IDE-schema metadata, then verify",
     )
     doctor_parser.add_argument(
         "--timeout",
@@ -1621,15 +1700,27 @@ def main(argv: list[str] | None = None) -> int:
         default=Path("mycelium.yaml"),
         help="Output path (default: ./mycelium.yaml)",
     )
-    init_parser.add_argument(
+    init_mode = init_parser.add_mutually_exclusive_group()
+    init_mode.add_argument(
         "--full",
         action="store_true",
         help="Reference template with all guards (not the default on-ramp)",
     )
-    init_parser.add_argument(
+    init_mode.add_argument(
         "--minimal",
         action="store_true",
         help="Smaller multi-guard scaffold (not the default on-ramp)",
+    )
+    init_mode.add_argument(
+        "--detect",
+        action="store_true",
+        help="Inspect this project and create a conservative tailored starter",
+    )
+    init_parser.add_argument(
+        "--project",
+        type=Path,
+        default=Path("."),
+        help="Project directory scanned by --detect (default: current directory)",
     )
     init_parser.add_argument(
         "--force",
@@ -1651,6 +1742,53 @@ def main(argv: list[str] | None = None) -> int:
         "--output",
         type=Path,
         help="Write the schema to a file instead of stdout",
+    )
+    config_docs_parser = config_sub.add_parser(
+        "docs",
+        help="Print Markdown reference generated from the typed model",
+    )
+    config_docs_parser.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        help="Write Markdown to a file instead of stdout",
+    )
+    config_example_parser = config_sub.add_parser(
+        "example",
+        help="Print a model-validated example configuration",
+    )
+    config_example_parser.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        help="Write YAML to a file instead of stdout",
+    )
+
+    skills_parser = sub.add_parser(
+        "skills",
+        help="Install agent skills bundled with mycelium-runtime",
+        description=(
+            "Install bundled skills offline from the PyPI package. The default "
+            "project catalog is ./.agents/skills; use --target for a user or "
+            "agent-specific catalog such as ~/.codex/skills."
+        ),
+    )
+    skills_sub = skills_parser.add_subparsers(dest="skills_command", required=True)
+    skills_install_parser = skills_sub.add_parser(
+        "install",
+        help="Install the official mycelium-setup skill",
+    )
+    skills_install_parser.add_argument(
+        "--target",
+        type=Path,
+        default=Path(".agents/skills"),
+        metavar="CATALOG",
+        help="Skill catalog directory (default: ./.agents/skills)",
+    )
+    skills_install_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Replace a different existing mycelium-setup skill",
     )
 
     demo_parser = sub.add_parser(
@@ -2230,7 +2368,14 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     if args.command == "init":
-        return cmd_init(args.output, full=args.full, minimal=args.minimal, force=args.force)
+        return cmd_init(
+            args.output,
+            full=args.full,
+            minimal=args.minimal,
+            force=args.force,
+            detect=args.detect,
+            project=args.project,
+        )
     if args.command == "demo":
         return cmd_demo(redis=args.redis, slow=args.slow)
     if args.command == "run":
@@ -2240,6 +2385,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "config":
         if args.config_command == "schema":
             return cmd_config_schema(args.output)
+        if args.config_command == "docs":
+            return cmd_config_docs(args.output)
+        if args.config_command == "example":
+            return cmd_config_example(args.output)
+    if args.command == "skills":
+        if args.skills_command == "install":
+            return cmd_skills_install(target=args.target, force=args.force)
     if args.command == "state":
         if args.state_command == "migrate":
             return cmd_state_migrate(args)

@@ -1460,6 +1460,19 @@ class MyceliumConfig:
         contract = self.build_completion_contract()
         set_active_completion_contract(contract)
 
+        installer_path = self.completion.get("adapter_installer")
+        if installer_path is not None:
+            installer = _import_callable(
+                installer_path,
+                kind="completion adapter installer",
+            )
+            try:
+                installer()
+            except Exception as exc:
+                raise ConfigError(
+                    f"completion adapter installer {installer_path!r} failed: {exc}"
+                ) from exc
+
         adapters = set(registered_terminal_adapters())
         install_error: str | None = None
         if self.langgraph_enabled:
@@ -1497,9 +1510,10 @@ class MyceliumConfig:
                 f"so {framework} END is protected automatically"
             )
         manual = (
-            "Manual fallback for custom runtimes: wrap_final_message(...), "
-            "gate_graph_end(...), or register_terminal_adapter('custom') "
-            "before load_config()."
+            "Custom-runtime fallback: set "
+            "completion.adapter_installer='package.module:function' to wire "
+            "wrap_final_message(...) or gate_graph_end(...) during startup, "
+            "or register manually before load_config()."
         )
         if self.profile == PROFILE_PRODUCTION:
             raise ConfigError(
@@ -3904,7 +3918,11 @@ def _parse_destructive_confirm(
     return parsed
 
 
-def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
+def _parse_config(
+    data: dict[str, Any],
+    *,
+    activate_runtime: bool = True,
+) -> MyceliumConfig:
     if not isinstance(data, dict):
         raise ConfigError("config root must be a mapping")
 
@@ -4119,6 +4137,14 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
             raise ConfigError(f"unknown completion storage type: {storage_type!r}")
         if storage_type == "shared" and state_backend_raw is None:
             raise ConfigError("completion storage 'shared' requires state_backend")
+        installer_path = completion_raw.get("adapter_installer")
+        if installer_path is not None and (
+            not isinstance(installer_path, str)
+            or not _CALLABLE_PATH_RE.fullmatch(installer_path)
+        ):
+            raise ConfigError(
+                "'completion.adapter_installer' must be 'package.module:function'"
+            )
         _parse_completion_id_lists(completion_raw)
 
     state_authority_raw = data.get("state_authority")
@@ -4217,12 +4243,13 @@ def _parse_config(data: dict[str, Any]) -> MyceliumConfig:
         profile=profile,
         _audit_auto=audit_auto,
     )
-    cfg._activate_completion_terminal()
-    cfg._activate_llm_budget()
-    if authority_window_raw is not None or destructive_confirm_raw is not None:
-        cfg._activate_authority_window()
-    if use_time_currency_raw is not None:
-        cfg._activate_use_time_currency()
+    if activate_runtime:
+        cfg._activate_completion_terminal()
+        cfg._activate_llm_budget()
+        if authority_window_raw is not None or destructive_confirm_raw is not None:
+            cfg._activate_authority_window()
+        if use_time_currency_raw is not None:
+            cfg._activate_use_time_currency()
     return cfg
 
 
@@ -4247,6 +4274,18 @@ def load_config(path: str | Path) -> MyceliumConfig:
 
     text = path.read_text(encoding="utf-8")
     return load_config_from_string(text)
+
+
+def _load_config_for_preflight(path: str | Path) -> MyceliumConfig:
+    """Validate config without activating application-owned runtime hooks."""
+    path = Path(path)
+    if not path.is_file():
+        raise ConfigError(f"config file not found: {path}")
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise ConfigError(f"invalid YAML: {exc}") from exc
+    return _parse_config(data or {}, activate_runtime=False)
 
 
 __all__ = [

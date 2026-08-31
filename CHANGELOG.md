@@ -5,6 +5,38 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
 
 ## Unreleased
 
+### Fixed
+
+- Compare contention and concurrent-reconciliation worker results as structured
+  JSON so PostgreSQL JSONB key reordering cannot cause false verification failures.
+- Include the official `mycelium-setup` coding-agent skill in built wheels and
+  add `mycelium skills install` for offline, idempotent installation into a
+  project or user skill catalog.
+- Allow custom runtimes launched by `mycelium run` to declare a trusted,
+  idempotent completion adapter installer that runs before production terminal
+  protection is validated.
+- Make the setup skill classify features as enabled, deferred for host work,
+  deferred for operator input, or intentionally not applicable instead of
+  implying every feature belongs in every project.
+- Clarify that `budget.max_steps` counts protected tool calls and instrumented
+  LLM turns rather than business workflow outcomes, including the unit in the
+  typed schema, generated reference, template guidance, and Doctor output.
+- Document and test host-owned, per-run entity policies for exact destinations
+  selected dynamically by a trusted orchestrator, and teach the bundled setup
+  skill not to replace them with model-controlled or wildcard allowlists.
+
+## 1.38.0 (2026-08-29)
+
+### Added
+
+- Stable public API organization through the recommended package root plus
+  `mycelium.runtime`, `mycelium.integrations`, `mycelium.experimental`, and
+  private `mycelium._internal` namespaces. A reviewed API snapshot,
+  compatibility tests, and deprecation metadata now guard accidental breakage.
+- Generated configuration reference documentation and validated example YAML,
+  project-aware `mycelium init --detect`, and opt-in conservative
+  `mycelium doctor --fix` support limited to version and IDE-schema metadata.
+
 ## 1.37.0 (2026-08-29)
 
 ### Added

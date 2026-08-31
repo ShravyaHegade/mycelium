@@ -192,6 +192,9 @@ class BudgetRunState:
     last_model: str | None = None
     last_provider: str | None = None
     updated_at: float = field(default_factory=time.time)
+    # ``None`` means no check has run yet; otherwise this records whether the
+    # most recent check reserved a step for automatic accounting.
+    last_check_incremented_steps: bool | None = None
 
     @property
     def tokens(self) -> int:
@@ -221,6 +224,7 @@ class BudgetRunState:
             "last_model": self.last_model,
             "last_provider": self.last_provider,
             "updated_at": self.updated_at,
+            "last_check_incremented_steps": self.last_check_incremented_steps,
         }
 
     @classmethod
@@ -252,6 +256,11 @@ class BudgetRunState:
             last_provider=(
                 str(data["last_provider"])
                 if data.get("last_provider") is not None
+                else None
+            ),
+            last_check_incremented_steps=(
+                bool(data["last_check_incremented_steps"])
+                if data.get("last_check_incremented_steps") is not None
                 else None
             ),
             updated_at=float(data.get("updated_at") or time.time()),
@@ -872,6 +881,7 @@ class BudgetGuard:
 
             if increment_steps:
                 state.steps += 1
+            state.last_check_incremented_steps = increment_steps
             outcome["state"] = state
             return state
 
@@ -903,8 +913,9 @@ class BudgetGuard:
         Prefer ``check()`` to reserve steps before work; use ``record_usage``
         after the host observes token/USD spend. ``check()`` and the budget
         decorators auto-meter one step by default. Passing ``steps`` here is
-        supported for fully manual integrations, but warns because combining
-        it with the default check/decorator behavior double-counts steps.
+        supported for fully manual integrations; it warns unless the current
+        run's latest ``check()`` used ``increment_steps=False``, because
+        combining it with automatic accounting double-counts steps.
         """
         global _SCOPE_MISSING_WARNED
 
@@ -929,19 +940,17 @@ class BudgetGuard:
         add_steps = int(steps)
         if add_in < 0 or add_out < 0 or add_usd < 0 or add_steps < 0:
             raise ValueError("usage deltas must be non-negative")
-        if add_steps:
-            warnings.warn(
-                "BudgetGuard.record_usage(steps=...) adds host-reported steps, "
-                "but check() and @budget_guard auto-meter one step by default. "
-                "Use steps=0, or use check(increment_steps=False) in a fully "
-                "manual integration, to avoid double metering.",
-                UserWarning,
-                stacklevel=2,
-            )
 
-        outcome: dict[str, Any] = {"exc": None, "state": None}
+        outcome: dict[str, Any] = {"exc": None, "state": None, "warning": None}
 
         def apply(state: BudgetRunState) -> BudgetRunState:
+            if add_steps and state.last_check_incremented_steps is not False:
+                outcome["warning"] = (
+                    "BudgetGuard.record_usage(steps=...) adds host-reported steps, "
+                    "but check() and @budget_guard auto-meter one step by default. "
+                    "Use steps=0, or use check(increment_steps=False) in a fully "
+                    "manual integration, to avoid double metering."
+                )
             if state.hard_blocked and not state.allow_once:
                 outcome["exc"] = LedgerHardBlockError(
                     f"BudgetGuard: run {key!r} is hard-blocked"
@@ -981,6 +990,9 @@ class BudgetGuard:
             return state
 
         self._storage.update(key, apply)
+        warning = outcome["warning"]
+        if warning is not None:
+            warnings.warn(warning, UserWarning, stacklevel=2)
         exc = outcome["exc"]
         if exc is not None:
             raise exc
@@ -1034,6 +1046,7 @@ class BudgetGuard:
                 state.tokens_in = 0
                 state.tokens_out = 0
                 state.usd = 0.0
+                state.last_check_incremented_steps = None
                 state.started_at = now
             elif verified == VERIFIED_ALLOW_ONCE:
                 state.hard_blocked = False
@@ -1133,15 +1146,21 @@ class BudgetGuard:
         now: float,
         pending_steps: int,
     ) -> str | None:
-        """Return the ceiling that the next unit would exceed.
+        """Return the budget ceiling that blocks the next operation.
 
-        ``max_steps=N`` allows exactly N successful step reservations
-        (``pending_steps=1``): block only when ``steps + pending > N``.
+        With automatic accounting (``pending_steps=1``), ``max_steps=N``
+        allows exactly N reservations and blocks when the next reservation
+        would exceed N. With manual accounting (``pending_steps=0``), the
+        host records completed steps separately, so checks block once the
+        recorded count has reached N.
         """
         c = self._ceilings
         if c.max_duration is not None and (now - state.started_at) >= c.max_duration:
             return "max_duration"
-        if c.max_steps is not None and (state.steps + pending_steps) > c.max_steps:
+        if c.max_steps is not None and (
+            state.steps + pending_steps > c.max_steps
+            or (pending_steps == 0 and state.steps >= c.max_steps)
+        ):
             return "max_steps"
         if c.max_tokens is not None and state.tokens >= c.max_tokens:
             return "max_tokens"

@@ -57,6 +57,65 @@ jobs:
             exit 1
           fi
 
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build wheel and sdist
+        run: |
+          pip install build
+          python -m build sdk
+
+      - name: Inspect distribution skill payloads
+        run: >-
+          python .github/scripts/check-distribution-contents.py
+          sdk/dist/*.whl sdk/dist/*.tar.gz
+
+      - name: Save distributions for supported-Python install tests
+        uses: actions/upload-artifact@v4
+        with:
+          name: mycelium-distributions
+          path: sdk/dist/*
+
+  package-install:
+    needs: package
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: mycelium-distributions
+          path: dist
+
+      - name: Install and verify wheel and sdist
+        run: |
+          set -euo pipefail
+          index=0
+          for artifact in dist/*.whl dist/*.tar.gz; do
+            index=$((index + 1))
+            environment="${RUNNER_TEMP}/mycelium-dist-${index}"
+            python -m venv "${environment}"
+            "${environment}/bin/pip" install "${artifact}"
+            "${environment}/bin/python" .github/scripts/test-installed-skill.py
+          done
+
   test:
     runs-on: ubuntu-latest
     strategy:

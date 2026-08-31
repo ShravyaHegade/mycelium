@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import multiprocessing as mp
 import os
 import time
@@ -205,6 +206,19 @@ def unclean_worker_exits(procs: list[mp.Process]) -> list[str]:
     return [f"pid={proc.pid} exit={proc.exitcode}" for proc in procs if proc.exitcode != 0]
 
 
+def _terminal_result_failure(outputs: list[str]) -> str | None:
+    """Compare JSON worker results by value, independent of object key order."""
+    decoded: list[Any] = []
+    for output in outputs:
+        try:
+            decoded.append(json.loads(output))
+        except (json.JSONDecodeError, TypeError) as exc:
+            return f"invalid terminal result JSON: {exc}"
+    if any(result != decoded[0] for result in decoded[1:]):
+        return f"inconsistent terminal results: {decoded!r}"
+    return None
+
+
 def contention_round_failure(
     procs: list[mp.Process],
     *,
@@ -230,9 +244,7 @@ def contention_round_failure(
         return f"workers reported errors: {errors[:3]}"
     if len(outputs) != workers:
         return f"resolved workers={len(outputs)}/{workers}"
-    if len(set(outputs)) != 1:
-        return f"inconsistent terminal results: {outputs!r}"
-    return None
+    return _terminal_result_failure(outputs)
 
 
 def concurrent_reconcile_failure(
@@ -255,8 +267,9 @@ def concurrent_reconcile_failure(
     errors = read_lines(err_file)
     if not outputs:
         return "no worker recorded a successful resolution"
-    if len(set(outputs)) != 1:
-        return f"inconsistent terminal results: {outputs!r}"
+    result_failure = _terminal_result_failure(outputs)
+    if result_failure is not None:
+        return result_failure
     if len(outputs) + len(errors) < workers:
         return f"silent workers: resolved={len(outputs)} errors={len(errors)} expected {workers}"
     unexpected = [
@@ -388,7 +401,10 @@ def contention_worker(payload: dict[str, Any]) -> None:
     try:
         with execution_scope(TransitionScope(thread_id="verify", run_id="verify")):
             result = verify_charge(1, request_id=payload["request_id"])
-        _append_line(payload["out_file"], str(result))
+        _append_line(
+            payload["out_file"],
+            json.dumps(result, sort_keys=True, separators=(",", ":"), default=str),
+        )
     except Exception as exc:  # noqa: BLE001 — record for parent
         _append_line(payload["err_file"], f"{type(exc).__name__}: {exc}")
 
@@ -496,7 +512,10 @@ def reconcile_worker(payload: dict[str, Any]) -> None:
             if not payload.get("omit_op_id"):
                 call_kwargs["op_id"] = payload.get("op_id", "op")
             result = tool(1, **call_kwargs)
-        _append_line(payload["out_file"], str(result))
+        _append_line(
+            payload["out_file"],
+            json.dumps(result, sort_keys=True, separators=(",", ":"), default=str),
+        )
     except Exception as exc:  # noqa: BLE001
         _append_line(payload["err_file"], f"{type(exc).__name__}: {exc}")
     finally:
