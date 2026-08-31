@@ -5,6 +5,7 @@ from __future__ import annotations
 import functools
 import importlib
 import inspect
+import math
 import os
 import re
 import warnings
@@ -3433,8 +3434,15 @@ def _parse_authority_window(
             f"'authority_window.use_time_check' must be one of {sorted(USE_TIME_CHECKS)}"
         )
     skew = raw.get("clock_skew_tolerance_seconds", 0)
-    if not isinstance(skew, (int, float)) or isinstance(skew, bool) or skew < 0:
-        raise ConfigError("'authority_window.clock_skew_tolerance_seconds' must be a number >= 0")
+    if (
+        not isinstance(skew, (int, float))
+        or isinstance(skew, bool)
+        or not math.isfinite(skew)
+        or skew < 0
+    ):
+        raise ConfigError(
+            "'authority_window.clock_skew_tolerance_seconds' must be a finite number >= 0"
+        )
     if profile == PROFILE_PRODUCTION and destructive_confirm is not None:
         if not enabled or use_time != USE_TIME_CHECK_REQUIRED:
             raise ConfigError(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -493,6 +494,30 @@ authority_window:
   clock_skew_tolerance_seconds: -1
 """
         )
+
+
+@pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf, True, False])
+def test_authority_window_policy_rejects_invalid_clock_skew(value: float) -> None:
+    with pytest.raises(ValueError, match="clock_skew"):
+        AuthorityWindowPolicy(clock_skew_tolerance_seconds=value)
+
+
+@pytest.mark.parametrize("value", [".nan", ".inf", "-.inf", "true", "false"])
+def test_config_authority_window_rejects_invalid_clock_skew(value: str) -> None:
+    with pytest.raises(ConfigError, match="clock_skew"):
+        load_config_from_string(f"""
+authority_window:
+  clock_skew_tolerance_seconds: {value}
+""")
+
+
+def test_authority_window_accepts_zero_and_finite_clock_skew() -> None:
+    assert (
+        AuthorityWindowPolicy(clock_skew_tolerance_seconds=0).clock_skew_tolerance_seconds == 0
+    )
+    assert (
+        AuthorityWindowPolicy(clock_skew_tolerance_seconds=2.5).clock_skew_tolerance_seconds == 2.5
+    )
 
 
 def test_omitted_config_preserves_behavior_without_destructive() -> None:
