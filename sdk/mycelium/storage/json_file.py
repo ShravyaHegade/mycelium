@@ -13,6 +13,10 @@ from mycelium.storage.file_lock import PathFileLock
 T = TypeVar("T")
 
 
+class StorageCorruptionError(RuntimeError):
+    """Raised when a JSON-backed storage file is not a valid object."""
+
+
 class LockedJsonDictFile:
     """JSON object file with exclusive ``fcntl`` locking on read-modify-write."""
 
@@ -27,10 +31,12 @@ class LockedJsonDictFile:
         try:
             with self._path.open("r", encoding="utf-8") as handle:
                 data = json.load(handle)
-        except json.JSONDecodeError:
-            return {}
+        except json.JSONDecodeError as exc:
+            raise StorageCorruptionError(f"invalid JSON in storage file {self._path}") from exc
         if not isinstance(data, dict):
-            return {}
+            raise StorageCorruptionError(
+                f"storage file {self._path} must contain a JSON object"
+            )
         return data
 
     def save(self, data: dict[str, dict[str, Any]]) -> None:
