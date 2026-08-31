@@ -139,7 +139,8 @@ from mycelium.config import (
     load_config,
     load_config_from_string,
 )
-from mycelium.config_schema import CONFIG_SCHEMA_ID, CONFIG_VERSION, MyceliumConfigModel
+from mycelium.config_schema import CONFIG_SCHEMA_ID, CONFIG_VERSION, MyceliumConfigModel, ToolContractModel
+from mycelium.contracts import ToolContract, validate_contract_call
 from mycelium.decision import (
     PREDICATE_AUTHORITY,
     PREDICATE_DESTINATION_POLICY,
@@ -835,6 +836,9 @@ __all__ = [
     "bounded",
     "bounded_sync",
     "SchemaBuildError",
+    "ToolContract",
+    "ToolContractModel",
+    "validate_contract_call",
     "ToolBoundaryError",
     "ToolBoundaryExhaustedError",
     "tool_error_message",
