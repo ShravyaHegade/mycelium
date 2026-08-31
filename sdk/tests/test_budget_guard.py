@@ -42,7 +42,6 @@ def test_parse_duration_seconds() -> None:
     assert parse_duration_seconds("1h") == 3600.0
     with pytest.raises(ValueError):
         parse_duration_seconds("nope")
-        
 
 def test_budget_ceilings_rejects_nan_max_usd() -> None:
     with pytest.raises(ValueError, match="finite"):
@@ -67,6 +66,10 @@ def test_budget_ceilings_rejects_nan_max_duration() -> None:
 def test_budget_ceilings_rejects_infinite_max_duration() -> None:
     with pytest.raises(ValueError, match="finite"):
         BudgetCeilings(max_duration=float("inf"))
+
+def test_budget_ceilings_rejects_negative_infinite_max_duration() -> None:
+    with pytest.raises(ValueError, match="finite"):
+        BudgetCeilings(max_duration=float("-inf"))
 
 def test_budget_ceilings_rejects_bool_max_duration() -> None:
     with pytest.raises(ValueError, match="boolean"):

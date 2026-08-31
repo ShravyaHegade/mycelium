@@ -10,9 +10,9 @@ Not AF-010 yet — ship as ``budget:`` / ``@budget_guard``.
 from __future__ import annotations
 
 import functools
-import math
 import inspect
 import json
+import math
 import re
 import threading
 import time
