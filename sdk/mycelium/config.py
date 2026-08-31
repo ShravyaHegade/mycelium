@@ -69,8 +69,10 @@ from mycelium.completion_contract import (
 )
 from mycelium.config_schema import (
     CONFIG_VERSION,
+    ToolContractModel,
     config_json_schema,
 )
+from mycelium.contracts import apply_tool_contract, validate_contract_definition
 from mycelium.decision import DecisionPolicyBundle, apply_decision_policy
 from mycelium.destructive_confirm import (
     MISSING_POLICIES as DESTRUCTIVE_MISSING_POLICIES,
@@ -393,6 +395,7 @@ class ToolConfig:
     destructive_confirm: bool | None = None
     # Per-tool use_time_currency: None=inherit global, False=disable
     use_time_currency: bool | None = None
+    contract: ToolContractModel | None = None
 
     def is_noop(self) -> bool:
         return (
@@ -409,6 +412,7 @@ class ToolConfig:
             and self.entity_guard is None
             and self.destructive_confirm is None
             and self.use_time_currency is None
+            and self.contract is None
         )
 
 
@@ -719,6 +723,10 @@ class MyceliumConfig:
             return func
 
         func = _callable_with_name(func, name)
+        # Keep the contract inside the ledger wrapper: claims/decision flow remains
+        # authoritative, while validation still precedes the tool body.
+        if tool_config.contract is not None:
+            func = apply_tool_contract(func, tool_config.contract, tool_name=name)
         if tool_config.secret_fields:
             setattr(func, "_mycelium_secret_fields", tool_config.secret_fields)
         is_async = inspect.iscoroutinefunction(func)
@@ -2243,6 +2251,32 @@ def _parse_tool_config(
     if bounded is not None and not isinstance(bounded, dict):
         raise ConfigError(f"tool '{name}'.bounded must be a mapping")
 
+    contract_keys = (
+        "operations",
+        "required_args",
+        "optional_args",
+        "argument_types",
+        "output_schema",
+        "capabilities",
+    )
+    contract_raw = raw.get("contract")
+    direct_contract = {key: raw[key] for key in contract_keys if key in raw}
+    if contract_raw is not None and direct_contract:
+        raise ConfigError(
+            f"tool '{name}': use either contract: or direct contract fields, not both"
+        )
+    if contract_raw is not None and not isinstance(contract_raw, dict):
+        raise ConfigError(f"tool '{name}'.contract must be a mapping")
+    contract = None
+    if contract_raw is not None or direct_contract:
+        try:
+            contract = ToolContractModel.model_validate(
+                contract_raw if contract_raw is not None else direct_contract
+            )
+            validate_contract_definition(contract, tool_name=name)
+        except (ValueError, TypeError) as exc:
+            raise ConfigError(str(exc)) from exc
+
     ledger = _normalize_ledger_config(name, ledger_raw, action_ledger_global)
     if audit_auto and ledger is not None and raw.get("audit_receipt") is not False:
         audit_receipt = True
@@ -2444,6 +2478,7 @@ def _parse_tool_config(
         entity_guard=entity_guard_cfg,
         destructive_confirm=destructive_cfg,
         use_time_currency=use_time_cfg,
+        contract=contract,
     )
 
 
@@ -4139,12 +4174,9 @@ def _parse_config(
             raise ConfigError("completion storage 'shared' requires state_backend")
         installer_path = completion_raw.get("adapter_installer")
         if installer_path is not None and (
-            not isinstance(installer_path, str)
-            or not _CALLABLE_PATH_RE.fullmatch(installer_path)
+            not isinstance(installer_path, str) or not _CALLABLE_PATH_RE.fullmatch(installer_path)
         ):
-            raise ConfigError(
-                "'completion.adapter_installer' must be 'package.module:function'"
-            )
+            raise ConfigError("'completion.adapter_installer' must be 'package.module:function'")
         _parse_completion_id_lists(completion_raw)
 
     state_authority_raw = data.get("state_authority")

@@ -36,6 +36,15 @@
 #   redis | postgres). Enabled loop, scope, completion, state_flush, and
 #   audit_receipt sections without their own storage automatically inherit it.
 #
+# Tool Contracts (optional, per tool): operations/capabilities are lists;
+# required_args and optional_args are identifier lists and must not overlap;
+# argument_types and output_schema map fields to string, integer, number,
+# boolean, array, object, or null (array/object may use a type mapping).
+# A call may provide operation=... and capability=... metadata. Contracts check
+# declared shape/capability only; they do not establish authorization or business intent.
+# Contract validation runs after a ledger claim but before the tool body. Output
+# validation never automatically retries a mutating tool.
+#
 # side_effect_class (per ledgered tool): read | idempotent_mutate |
 #   keyed_mutate | non_idempotent_mutate | irreversible
 # spendability (optional override; defaults from side_effect_class):

@@ -103,6 +103,32 @@ def test_budget_run_state_positional_constructor_preserves_updated_at() -> None:
     assert state.last_check_incremented_steps is None
 
 
+def test_budget_run_state_positional_constructor_preserves_updated_at() -> None:
+    state = BudgetRunState(
+        "compat",
+        1.0,
+        2,
+        3,
+        4,
+        5.0,
+        True,
+        {"max_steps": True},
+        True,
+        "max_steps",
+        "clear",
+        "ops@example.com",
+        "reset",
+        6.0,
+        True,
+        "model",
+        "provider",
+        7.0,
+    )
+
+    assert state.updated_at == 7.0
+    assert state.last_check_incremented_steps is None
+
+
 def test_max_steps_ceiling_allows_n() -> None:
     """Honey Mail 2: max_steps=N must run N bodies (warn_at must not steal one)."""
     for warn_at in (1.0, 0.8):
