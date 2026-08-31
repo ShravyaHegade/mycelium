@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from datetime import datetime, timezone
 from typing import Any
 
@@ -1649,6 +1650,42 @@ use_time_currency:
           validator: payment_state
 """
         )
+
+
+@pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf, True, False])
+def test_use_time_facts_reject_invalid_max_age(value: float) -> None:
+    common = {
+        "name": "record.current",
+        "subject_type": "record",
+        "subject_id": "record-1",
+        "observed_at": datetime.now(timezone.utc),
+        "max_age_seconds": value,
+    }
+    with pytest.raises(ValueError, match="max_age_seconds"):
+        UseTimeFact(**common)
+    with pytest.raises(ValueError, match="max_age_seconds"):
+        UseTimeFactSpec(
+            name="record.current",
+            subject_type="record",
+            id_from="record_id",
+            validator="record_state",
+            max_age_seconds=value,
+        )
+
+
+@pytest.mark.parametrize("value", [".nan", ".inf", "-.inf", "true", "false"])
+def test_config_rejects_nonfinite_max_age(value: str) -> None:
+    with pytest.raises(ConfigError, match="max_age_seconds"):
+        load_config_from_string(f"""
+use_time_currency:
+  tools:
+    lookup_record:
+      facts:
+        - name: record.current
+          subject: {{type: record, id_from: record_id}}
+          validator: record_state
+          max_age_seconds: {value}
+""")
 
 
 def test_production_requires_missing_policy_error() -> None:
