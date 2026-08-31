@@ -35,3 +35,10 @@ tools:
   subagent_task:
     callable: your_package.tools:subagent_task
     side_effect_class: non_idempotent_mutate
+    # Optional Tool Contract (shape/capability only; not authorization):
+    # operations: [run]
+    # required_args: [prompt]
+    # optional_args: []
+    # argument_types: {prompt: string}
+    # output_schema: {result: string}
+    # capabilities: [subagent]

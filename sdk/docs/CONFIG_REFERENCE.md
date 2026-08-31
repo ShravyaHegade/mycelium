@@ -236,6 +236,12 @@ Configuration for one application tool.
 | `entity_guard` | `boolean \| null` | `null` | — |
 | `destructive_confirm` | `boolean \| null` | `null` | — |
 | `use_time_currency` | `boolean \| null` | `null` | — |
+| `operations` | `array[string] \| null` | `null` | — |
+| `required_args` | `array[string] \| null` | `null` | — |
+| `optional_args` | `array[string] \| null` | `null` | — |
+| `argument_types` | `object[string, string \| object] \| null` | `null` | — |
+| `output_schema` | `object[string, string \| object] \| null` | `null` | — |
+| `capabilities` | `array[string] \| null` | `null` | — |
 
 ## Transition
 
