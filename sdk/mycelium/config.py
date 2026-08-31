@@ -2669,11 +2669,13 @@ def _parse_optional_positive_float(
         if allow_null:
             return None
         raise ConfigError(f"'{section}.{key}' cannot be null")
+    if isinstance(value, bool):
+        raise ConfigError(f"'{section}.{key}' must be a number")
     try:
         parsed = float(value)
     except (TypeError, ValueError) as exc:
         raise ConfigError(f"'{section}.{key}' must be a number") from exc
-    if parsed <= 0:
+    if not math.isfinite(parsed) or parsed <= 0:
         raise ConfigError(f"'{section}.{key}' must be greater than zero")
     return parsed
 
@@ -2693,11 +2695,13 @@ def _parse_optional_non_negative_float(
         if allow_null:
             return None
         raise ConfigError(f"'{section}.{key}' cannot be null")
+    if isinstance(value, bool):
+        raise ConfigError(f"'{section}.{key}' must be a number")
     try:
         parsed = float(value)
     except (TypeError, ValueError) as exc:
         raise ConfigError(f"'{section}.{key}' must be a number") from exc
-    if parsed < 0:
+    if not math.isfinite(parsed) or parsed < 0:
         raise ConfigError(f"'{section}.{key}' must be greater than or equal to zero")
     return parsed
 
@@ -2710,10 +2714,10 @@ def _parse_transition_config(raw: Any) -> TransitionConfig | None:
 
     agent_id = raw.get("agent_id")
     policy_version = raw.get("policy_version")
-    if not agent_id:
-        raise ConfigError("'transition.agent_id' is required")
-    if not policy_version:
-        raise ConfigError("'transition.policy_version' is required")
+    if not isinstance(agent_id, str) or not agent_id.strip():
+        raise ConfigError("'transition.agent_id' must be a non-empty string")
+    if not isinstance(policy_version, str) or not policy_version.strip():
+        raise ConfigError("'transition.policy_version' must be a non-empty string")
 
     scope_from_raw = raw.get("scope_from", {})
     if not isinstance(scope_from_raw, dict):
@@ -2727,14 +2731,16 @@ def _parse_transition_config(raw: Any) -> TransitionConfig | None:
     poll_interval = _parse_optional_positive_float(raw, "poll_interval", section="transition")
     poll_timeout = _parse_optional_positive_float(raw, "poll_timeout", section="transition")
 
-    reclaim_requires_death_signal = bool(raw.get("reclaim_requires_death_signal", True))
+    reclaim_requires_death_signal = raw.get("reclaim_requires_death_signal", True)
+    if not isinstance(reclaim_requires_death_signal, bool):
+        raise ConfigError("'transition.reclaim_requires_death_signal' must be a boolean")
     presumed_dead_after = _parse_optional_positive_float(
         raw, "presumed_dead_after", section="transition"
     )
 
     return TransitionConfig(
-        agent_id=str(agent_id),
-        policy_version=str(policy_version),
+        agent_id=agent_id.strip(),
+        policy_version=policy_version.strip(),
         scope_from=scope_from,
         lease_ttl=lease_ttl,
         lease_renew_interval=lease_renew_interval,
