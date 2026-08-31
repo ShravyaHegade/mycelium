@@ -482,6 +482,72 @@ tools:
     assert len(audit.storage.list_all()) == 1
 
 
+@pytest.mark.parametrize("value", ['"false"', '"true"', "0", "1", "null", "[]", "{}"])
+def test_tool_audit_receipt_requires_boolean(value: str) -> None:
+    with pytest.raises(ConfigError, match=r"tool 'send_payment'\.audit_receipt must be a boolean"):
+        load_config_from_string(f"""
+tools:
+  send_payment:
+    audit_receipt: {value}
+""")
+
+
+@pytest.mark.parametrize("value", ['"false"', '"true"', "0", "1", "null", "[]", "{}"])
+def test_task_audit_receipt_requires_boolean(value: str) -> None:
+    with pytest.raises(ConfigError, match=r"task 'summarize'\.audit_receipt must be a boolean"):
+        load_config_from_string(f"""
+tasks:
+  summarize:
+    audit_receipt: {value}
+""")
+
+
+@pytest.mark.parametrize("value", ['"false"', '"true"', "0", "1", "null", "[]", "{}"])
+def test_global_audit_receipt_auto_requires_boolean(value: str) -> None:
+    with pytest.raises(ConfigError, match=r"'audit_receipt\.auto' must be a boolean"):
+        load_config_from_string(f"""
+audit_receipt:
+  auto: {value}
+""")
+
+
+def test_audit_receipt_boolean_values_and_omitted_defaults() -> None:
+    config = load_config_from_string("""
+audit_receipt:
+  signing_key: test-key
+  storage: memory
+  auto: false
+action_ledger:
+  storage: memory
+  tools: [send_payment]
+task_ledger:
+  storage: memory
+  tasks: [summarize]
+tools:
+  send_payment:
+    audit_receipt: true
+tasks:
+  summarize:
+    audit_receipt: false
+""")
+    assert config.tools["send_payment"].audit_receipt is True
+    assert config.tasks["summarize"].audit_receipt is False
+
+    defaulted = load_config_from_string("""
+audit_receipt:
+  signing_key: test-key
+  storage: memory
+action_ledger:
+  storage: memory
+  tools: [send_payment]
+task_ledger:
+  storage: memory
+  tasks: [summarize]
+""")
+    assert defaulted.tools["send_payment"].audit_receipt is True
+    assert defaulted.tasks["summarize"].audit_receipt is True
+
+
 def test_global_action_ledger_and_ledger_true() -> None:
     yaml_text = """
 action_ledger:
