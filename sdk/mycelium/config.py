@@ -3545,9 +3545,14 @@ def _parse_use_time_fact(raw: Any, *, tool: str) -> dict[str, Any]:
         raise ConfigError(f"use_time_currency.tools.{tool}.facts[].validator is required")
     max_age = raw.get("max_age_seconds")
     if max_age is not None and (
-        not isinstance(max_age, (int, float)) or isinstance(max_age, bool) or max_age < 0
+        not isinstance(max_age, (int, float))
+        or isinstance(max_age, bool)
+        or not math.isfinite(max_age)
+        or max_age < 0
     ):
-        raise ConfigError(f"use_time_currency.tools.{tool}.facts[].max_age_seconds must be >= 0")
+        raise ConfigError(
+            f"use_time_currency.tools.{tool}.facts[].max_age_seconds must be a finite number >= 0"
+        )
     require = raw.get("require")
     if require is not None and not isinstance(require, dict):
         raise ConfigError(f"use_time_currency.tools.{tool}.facts[].require must be a mapping")
