@@ -317,7 +317,7 @@ class SqliteLedgerStorage:
         *,
         table: str = "mycelium_action_ledger",
     ) -> None:
-        from mycelium.action_ledger import LedgerEntry
+        from mycelium.ledger_model import LedgerEntry
 
         self._inner = SqliteEntryStorage(
             path,

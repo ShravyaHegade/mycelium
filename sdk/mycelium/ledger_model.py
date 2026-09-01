@@ -168,6 +168,9 @@ _RESOLUTION_ACCEPTED_STORED_OUTCOMES: frozenset[str] = frozenset(
     }
 )
 
+# Expected terminal outcomes for a wrapper-path transition write.
+_IN_FLIGHT_OUTCOMES: frozenset[str] = frozenset({TerminalOutcome.IN_FLIGHT.value})
+
 # Stored terminal-outcome values that **the NOT_EXECUTED reset** accepts.
 # Excludes ``IN_FLIGHT`` so two reconcilers racing ``NOT_EXECUTED``
 # cannot both transition ``IN_FLIGHT → IN_FLIGHT`` — only the first

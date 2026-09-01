@@ -665,7 +665,7 @@ class RedisLedgerStorage:
         in_flight_ttl: float | None = 604800.0,
         retention_seconds: float | None = None,
     ) -> None:
-        from mycelium.action_ledger import LedgerEntry
+        from mycelium.ledger_model import LedgerEntry
 
         self._inner = RedisEntryStorage(
             url,

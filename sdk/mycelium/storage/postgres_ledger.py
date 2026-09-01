@@ -417,7 +417,7 @@ class PostgresLedgerStorage:
         pool_max_size: int = 10,
         retention_seconds: float | None = None,
     ) -> None:
-        from mycelium.action_ledger import LedgerEntry
+        from mycelium.ledger_model import LedgerEntry
 
         self._inner = PostgresEntryStorage(
             dsn,
