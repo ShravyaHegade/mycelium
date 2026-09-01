@@ -1,0 +1,22 @@
+name: Documentation request
+description: Request improvements or additions to the documentation.
+labels: ["documentation"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for helping us improve our documentation! Please provide details on what is missing, unclear, or incorrect.
+  - type: textarea
+    id: request
+    attributes:
+      label: Documentation Request
+      description: Describe the documentation you need or the issue you found with existing documentation.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Why is this documentation needed? (e.g., what task were you trying to accomplish?)
+    validations:
+      required: false

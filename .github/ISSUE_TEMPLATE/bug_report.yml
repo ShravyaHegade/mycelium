@@ -1,0 +1,51 @@
+name: Runtime bug
+description: Report a bug, crash, or unexpected behavior.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a bug! Please provide a minimal reproduction and fill out the details below.
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the bug or unexpected behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Provide the smallest possible code snippet or steps to reproduce the issue.
+    validations:
+      required: true
+  - type: input
+    id: mycelium_version
+    attributes:
+      label: Mycelium version
+      description: Which version of Mycelium are you using? (e.g., 1.34.0)
+    validations:
+      required: true
+  - type: input
+    id: backend
+    attributes:
+      label: Storage backend
+      description: Which storage backend are you using? (e.g., SQLite, Postgres, Redis, Memory)
+    validations:
+      required: true
+  - type: input
+    id: framework
+    attributes:
+      label: Framework
+      description: Which LLM framework are you using? (e.g., LangChain, LlamaIndex, Custom)
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and Traceback
+      description: Paste any relevant logs, stack traces, or errors.
+      render: shell
+    validations:
+      required: false
