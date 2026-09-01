@@ -1931,7 +1931,7 @@ class MyceliumConfig:
                             url,
                             headers={str(k): str(v) for k, v in (headers or {}).items()},
                             secret=str(secret) if secret is not None else None,
-                            timeout=float(item.get("timeout", 5.0)),
+                            timeout=item.get("timeout", 5.0),
                         )
                     )
                 else:

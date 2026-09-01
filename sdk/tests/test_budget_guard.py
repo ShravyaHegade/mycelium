@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+import warnings
 
 import pytest
 
@@ -16,7 +17,9 @@ from mycelium.budget_guard import (
     KIND_LLM,
     KIND_TOOL,
     ON_MISSING_HARD,
+    BudgetCeilings,
     BudgetGuard,
+    BudgetRunState,
     FileBudgetGuardStorage,
     InMemoryBudgetGuardStorage,
     SqliteBudgetGuardStorage,
@@ -42,7 +45,63 @@ def test_parse_duration_seconds() -> None:
     with pytest.raises(ValueError):
         parse_duration_seconds("nope")
 
+def test_budget_ceilings_rejects_nan_max_usd() -> None:
+    with pytest.raises(ValueError, match="finite"):
+        BudgetCeilings(max_usd=float("nan"))
 
+def test_budget_ceilings_rejects_infinite_max_usd() -> None:
+    with pytest.raises(ValueError, match="finite"):
+        BudgetCeilings(max_usd=float("inf"))
+
+def test_budget_ceilings_rejects_negative_infinite_max_usd() -> None:
+    with pytest.raises(ValueError, match="finite"):
+        BudgetCeilings(max_usd=float("-inf"))
+
+def test_budget_ceilings_rejects_bool_max_usd() -> None:
+    with pytest.raises(ValueError, match="boolean"):
+        BudgetCeilings(max_usd=True)
+
+def test_budget_ceilings_rejects_nan_max_duration() -> None:
+    with pytest.raises(ValueError, match="finite"):
+        BudgetCeilings(max_duration=float("nan"))
+
+def test_budget_ceilings_rejects_infinite_max_duration() -> None:
+    with pytest.raises(ValueError, match="finite"):
+        BudgetCeilings(max_duration=float("inf"))
+
+def test_budget_ceilings_rejects_negative_infinite_max_duration() -> None:
+    with pytest.raises(ValueError, match="finite"):
+        BudgetCeilings(max_duration=float("-inf"))
+
+def test_budget_ceilings_rejects_bool_max_duration() -> None:
+    with pytest.raises(ValueError, match="boolean"):
+        BudgetCeilings(max_duration=True)        
+
+def test_budget_run_state_positional_constructor_preserves_updated_at() -> None:
+    state = BudgetRunState(
+        "compat",
+        1.0,
+        2,
+        3,
+        4,
+        5.0,
+        True,
+        {"max_steps": True},
+        True,
+        "max_steps",
+        "clear",
+        "ops@example.com",
+        "reset",
+        6.0,
+        True,
+        "model",
+        "provider",
+        7.0,
+    )
+
+    assert state.updated_at == 7.0
+    assert state.last_check_incremented_steps is None
+    
 def test_max_steps_ceiling_allows_n() -> None:
     """Honey Mail 2: max_steps=N must run N bodies (warn_at must not steal one)."""
     for warn_at in (1.0, 0.8):
@@ -100,10 +159,12 @@ def test_manual_max_steps_ceiling_blocks_at_n() -> None:
     )
 
     with execution_scope(_scope("manual-steps")):
-        for _ in range(3):
-            guard.check(KIND_TOOL, increment_steps=False)
-            with pytest.warns(UserWarning, match="adds host-reported steps"):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            for _ in range(3):
+                guard.check(KIND_TOOL, increment_steps=False)
                 guard.record_usage(steps=1)
+        assert not caught
 
         with pytest.raises(LedgerHardBlockError):
             guard.check(KIND_TOOL, increment_steps=False)

@@ -132,6 +132,21 @@ _SIDE_EFFECTING_MEMORY_CLASSES = frozenset(
 )
 
 
+def _parse_bool_option(
+    raw: dict[str, Any],
+    key: str,
+    *,
+    field: str,
+    default: bool,
+) -> bool:
+    if key not in raw:
+        return default
+    value = raw[key]
+    if not isinstance(value, bool):
+        raise ConfigError(f"{field} must be a boolean")
+    return value
+
+
 def _parse_tool_config(
     name: str,
     raw: dict[str, Any] | None,
@@ -147,7 +162,12 @@ def _parse_tool_config(
     protect = raw.get("protect")
     bounded = raw.get("bounded")
     ledger_raw = raw.get("ledger")
-    audit_receipt = bool(raw.get("audit_receipt", False))
+    audit_receipt = _parse_bool_option(
+        raw,
+        "audit_receipt",
+        field=f"tool '{name}'.audit_receipt",
+        default=False,
+    )
 
     if protect is not None and not isinstance(protect, dict):
         raise ConfigError(f"tool '{name}'.protect must be a mapping")
@@ -406,7 +426,12 @@ def _parse_task_config(
             ledger_raw = {"id_from": id_from}
         elif isinstance(ledger_raw, dict):
             ledger_raw = {**ledger_raw, "id_from": id_from}
-    audit_receipt = bool(raw.get("audit_receipt", False))
+    audit_receipt = _parse_bool_option(
+        raw,
+        "audit_receipt",
+        field=f"task '{name}'.audit_receipt",
+        default=False,
+    )
     ledger = _normalize_ledger_config(name, ledger_raw, task_ledger_global)
     if audit_auto and ledger is not None and raw.get("audit_receipt") is not False:
         audit_receipt = True
@@ -1905,7 +1930,14 @@ def _parse_config(
         if storage_type == "shared" and state_backend_raw is None:
             raise ConfigError("audit_receipt storage 'shared' requires state_backend")
 
-    audit_auto = bool(audit_receipt_raw and audit_receipt_raw.get("auto", True))
+    audit_auto = False
+    if audit_receipt_raw is not None:
+        audit_auto = _parse_bool_option(
+            audit_receipt_raw,
+            "auto",
+            field="'audit_receipt.auto'",
+            default=bool(audit_receipt_raw),
+        )
 
     outcome_emit_raw = data.get("outcome_emit")
     if outcome_emit_raw is not None and not isinstance(outcome_emit_raw, dict):

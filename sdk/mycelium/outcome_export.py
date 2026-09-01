@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -288,8 +289,14 @@ class WebhookOutcomeStorage(OutcomeStorage):
     ) -> None:
         if not url:
             raise ValueError("webhook url must be non-empty")
-        if timeout <= 0:
-            raise ValueError("webhook timeout must be positive")
+        try:
+            valid_timeout = (
+                not isinstance(timeout, bool) and math.isfinite(timeout) and timeout > 0
+            )
+        except TypeError:
+            valid_timeout = False
+        if not valid_timeout:
+            raise ValueError("webhook timeout must be a finite positive number")
         self._url = url
         self._headers = dict(headers or {})
         self._secret = secret.encode() if isinstance(secret, str) else secret

@@ -5,9 +5,12 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 import sys
 from types import SimpleNamespace
 from typing import Any
+
+import pytest
 
 from mycelium.outcome_emit import (
     EVENT_DECISION_DENIAL,
@@ -192,6 +195,20 @@ def test_webhook_posts_versioned_signed_envelope(monkeypatch: Any) -> None:
     expected = hmac.new(b"signing-key", body, hashlib.sha256).hexdigest()
     assert request.headers["X-mycelium-signature"] == f"sha256={expected}"
     assert captured["timeout"] == 2.5
+
+
+@pytest.mark.parametrize(
+    "timeout", [None, "5", 0, -1, math.nan, math.inf, -math.inf, True, False]
+)
+def test_webhook_rejects_non_finite_non_positive_and_boolean_timeouts(timeout: Any) -> None:
+    with pytest.raises(ValueError, match="finite positive"):
+        WebhookOutcomeStorage("https://events.example.test/outcomes", timeout=timeout)
+
+
+@pytest.mark.parametrize("timeout", [0.001, 2, 2.5])
+def test_webhook_accepts_positive_finite_timeouts(timeout: float) -> None:
+    storage = WebhookOutcomeStorage("https://events.example.test/outcomes", timeout=timeout)
+    assert storage._timeout == timeout
 
 
 def test_fanout_writes_all_sinks_and_reads_primary() -> None:
