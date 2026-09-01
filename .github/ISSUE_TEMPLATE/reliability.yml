@@ -1,0 +1,37 @@
+name: Reliability guarantee or threat-model change
+description: Propose a change to atomicity, isolation, durability, or security threat models.
+labels: ["enhancement", "design decision needed"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Mycelium sits on the execution boundary for payments and external mutations. A small behavioral change can alter whether an operation runs, retries, or fails closed. 
+        Before proposing a change, ensure you have read the [CONTRIBUTING.md](https://github.com/mycelium-labs/mycelium/blob/main/CONTRIBUTING.md) guide on reliability guarantees.
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Describe the proposed change
+      description: What specific change are you proposing to the reliability guarantee or threat model?
+    validations:
+      required: true
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation
+      description: Why is this change necessary? What problem does it solve?
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact
+      description: What guarantees are weakened, strengthened, or altered? Are there any backward compatibility concerns?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Were there other ways to solve this problem? Why were they rejected?
+    validations:
+      required: false
