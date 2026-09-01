@@ -12,6 +12,7 @@ from __future__ import annotations
 import functools
 import inspect
 import json
+import math
 import re
 import threading
 import time
@@ -128,14 +129,24 @@ class BudgetCeilings:
                 "budget requires at least one of max_duration, max_steps, "
                 "max_tokens, max_usd"
             )
-        if self.max_duration is not None and self.max_duration <= 0:
-            raise ValueError("max_duration must be positive")
+        if self.max_duration is not None:
+            if isinstance(self.max_duration, bool):
+                raise ValueError("max_duration must be a number, not a boolean")
+            if not math.isfinite(self.max_duration):
+                raise ValueError("max_duration must be a finite number")
+            if self.max_duration <= 0:
+                raise ValueError("max_duration must be positive")
         if self.max_steps is not None and self.max_steps < 1:
             raise ValueError("max_steps must be >= 1")
         if self.max_tokens is not None and self.max_tokens < 1:
             raise ValueError("max_tokens must be >= 1")
-        if self.max_usd is not None and self.max_usd <= 0:
-            raise ValueError("max_usd must be positive")
+        if self.max_usd is not None:
+            if isinstance(self.max_usd, bool):
+                raise ValueError("max_usd must be a number, not a boolean")
+            if not math.isfinite(self.max_usd):
+                raise ValueError("max_usd must be a finite number")
+            if self.max_usd <= 0:
+                raise ValueError("max_usd must be positive")
 
     def requires_usage_meter(self) -> bool:
         return self.max_tokens is not None or self.max_usd is not None
