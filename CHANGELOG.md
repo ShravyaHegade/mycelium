@@ -7,6 +7,8 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
 
 ### Fixed
 
+- Require audit receipt flags in tool, task, and global configuration to be
+  YAML booleans instead of accepting truthy values such as quoted `false`.
 - Validate webhook exporter timeouts as finite, positive numbers and reject
   booleans in both direct construction and YAML configuration.
 - Compare contention and concurrent-reconciliation worker results as structured
