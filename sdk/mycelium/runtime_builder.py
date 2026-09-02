@@ -147,6 +147,12 @@ from mycelium.entity_guard import (
     entity_guard_policy_for_tool,
 )
 from mycelium.history_guard import HistoryGuard
+from mycelium.integrations.crewai import (
+    CrewAIIntegrationError,
+    _set_active_crewai_integration,
+    install_crewai_runtime,
+    instrument_crewai_tool,
+)
 from mycelium.integrations.langgraph import (
     LangGraphIntegrationError,
     instrument_langgraph_tool,
@@ -372,6 +378,7 @@ class MyceliumConfig:
     _audit_auto: bool = False
     _terminal_adapters: frozenset[str] = frozenset()
     _llm_adapters: frozenset[str] = frozenset()
+    _crewai_runtime_installed: bool = False
 
     def apply(self, func: Callable[..., Any]) -> Callable[..., Any]:
         """
@@ -843,6 +850,27 @@ class MyceliumConfig:
             except LangGraphIntegrationError as exc:
                 raise ConfigError(str(exc)) from exc
 
+        # CrewAI runtime hooks are process-scoped and preserve this callable's
+        # public signature. Installing here also catches an enabled integration
+        # whose optional dependency is absent before the tool can be registered.
+        if self.crewai_enabled and (
+            tool_config.ledger is not None
+            or applies_loop
+            or applies_scope
+            or applies_state
+            or applies_secret
+            or applies_entity
+            or applies_destructive
+            or applies_use_time
+        ):
+            try:
+                func = instrument_crewai_tool(
+                    func,
+                    run_id_from=self.crewai_run_id_from,
+                )
+            except CrewAIIntegrationError as exc:
+                raise ConfigError(str(exc)) from exc
+
         _mark_config_applied(func, kind="tool", name=name)
         return func
 
@@ -852,6 +880,37 @@ class MyceliumConfig:
         if self.integrations is None:
             return False
         return bool(self.integrations.get("langgraph", {}).get("enabled", False))
+
+    @property
+    def crewai_enabled(self) -> bool:
+        """Whether automatic CrewAI runtime identity is enabled."""
+        if self.integrations is None:
+            return False
+        return bool(self.integrations.get("crewai", {}).get("enabled", False))
+
+    @property
+    def crewai_run_id_from(self) -> str | None:
+        """Kickoff input field configured as CrewAI's stable run scope."""
+        if not self.crewai_enabled or self.integrations is None:
+            return None
+        value = self.integrations.get("crewai", {}).get("run_id_from")
+        return str(value) if value is not None else None
+
+    def _activate_framework_integrations(self) -> None:
+        """Activate process-scoped adapters requested by this config."""
+        _set_active_crewai_integration(
+            enabled=self.crewai_enabled,
+            run_id_from=self.crewai_run_id_from,
+        )
+        self._crewai_runtime_installed = False
+        if not self.crewai_enabled:
+            return
+        try:
+            self._crewai_runtime_installed = install_crewai_runtime(
+                run_id_from=self.crewai_run_id_from
+            )
+        except CrewAIIntegrationError as exc:
+            raise ConfigError(str(exc)) from exc
 
     def auto_instrumentation_targets(self) -> list[AutoInstrumentationTarget]:
         """Return callable targets, requiring paths for every configured entry."""
@@ -1347,7 +1406,10 @@ class MyceliumConfig:
 
     def _activate_completion_terminal(self) -> None:
         """Bind the contract and verify a terminal adapter is installed."""
-        from mycelium.completion_contract import TERMINAL_ADAPTER_LANGGRAPH
+        from mycelium.completion_contract import (
+            TERMINAL_ADAPTER_CREWAI,
+            TERMINAL_ADAPTER_LANGGRAPH,
+        )
 
         if self.completion is None:
             set_active_completion_contract(None)
@@ -1384,6 +1446,17 @@ class MyceliumConfig:
                 install_error = str(exc)
             if installed:
                 adapters.add(TERMINAL_ADAPTER_LANGGRAPH)
+        if self.crewai_enabled:
+            try:
+                installed = self._crewai_runtime_installed or install_crewai_runtime(
+                    run_id_from=self.crewai_run_id_from
+                )
+            except CrewAIIntegrationError as exc:
+                installed = False
+                install_error = str(exc)
+            if installed:
+                self._crewai_runtime_installed = True
+                adapters.add(TERMINAL_ADAPTER_CREWAI)
         self._terminal_adapters = frozenset(adapters)
 
         if adapters:
@@ -1393,22 +1466,31 @@ class MyceliumConfig:
     def _reject_unwired_completion_terminal(self, install_error: str | None) -> None:
         import mycelium.completion_contract as completion_mod
 
-        framework = "LangGraph"
+        selected = [
+            name
+            for enabled, name in (
+                (self.langgraph_enabled, "LangGraph"),
+                (self.crewai_enabled, "CrewAI"),
+            )
+            if enabled
+        ]
+        framework = " or ".join(selected) if selected else "a supported runtime"
         if install_error:
             detail = f"{framework} terminal adapter was not installed ({install_error})"
-        elif not self.langgraph_enabled:
+        elif not selected:
             detail = (
-                f"no terminal adapter was explicitly selected. Set "
-                f"integrations.langgraph.enabled: true (and install "
-                f"'mycelium-runtime[langgraph]') so {framework} END is "
-                f"protected automatically. Having LangGraph installed is "
-                f"not enough"
+                "no terminal adapter was explicitly selected. Set "
+                "integrations.langgraph.enabled: true or "
+                "integrations.crewai.enabled: true (and install that optional "
+                "framework extra) so its terminal is protected automatically. "
+                "Having LangGraph installed is not enough; neither is having "
+                "CrewAI installed"
             )
         else:
             detail = (
                 f"no supported terminal path is wired. Enable "
-                f"integrations.langgraph (install 'mycelium-runtime[langgraph]') "
-                f"so {framework} END is protected automatically"
+                f"the {framework} integration and install its optional dependency "
+                "so the framework terminal is protected automatically"
             )
         manual = (
             "Custom-runtime fallback: set "
@@ -1425,8 +1507,8 @@ class MyceliumConfig:
         if not completion_mod._unwired_completion_warned:
             warnings.warn(
                 "'completion:' is enabled but no terminal adapter is wired; "
-                f"{framework} END / final-message paths are not automatically "
-                "protected. Enable integrations.langgraph or use "
+                f"{framework} terminal / final-message paths are not automatically "
+                "protected. Enable integrations.langgraph or integrations.crewai, or use "
                 "wrap_final_message / gate_graph_end. Development mode allows "
                 "this fallback; profile: production fails startup.",
                 UserWarning,

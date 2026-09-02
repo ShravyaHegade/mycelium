@@ -183,6 +183,11 @@ from mycelium.entity_guard import (
     entity_guard_policy_for_tool,
 )
 from mycelium.history_guard import HistoryGuard
+from mycelium.integrations.crewai import (
+    CrewAIIntegrationError,
+    install_crewai_runtime,
+    instrument_crewai_tool,
+)
 from mycelium.integrations.langgraph import (
     LangGraphIntegrationError,
     install_langgraph_completion_terminal,

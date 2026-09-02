@@ -1004,27 +1004,64 @@ def _parse_integrations(data: dict[str, Any]) -> dict[str, dict[str, Any]] | Non
     if not isinstance(raw, dict):
         raise ConfigError("'integrations' must be a mapping")
 
-    unknown = set(raw) - {"langgraph"}
+    unknown = set(raw) - {"langgraph", "crewai"}
     if unknown:
         names = ", ".join(sorted(str(name) for name in unknown))
         raise ConfigError(f"unsupported integration(s): {names}")
 
+    parsed: dict[str, dict[str, Any]] = {}
     langgraph_raw = raw.get("langgraph")
-    if langgraph_raw is None:
-        return {}
-    if isinstance(langgraph_raw, bool):
-        return {"langgraph": {"enabled": langgraph_raw}}
-    if not isinstance(langgraph_raw, dict):
-        raise ConfigError("'integrations.langgraph' must be a mapping or boolean")
+    if langgraph_raw is not None:
+        if isinstance(langgraph_raw, bool):
+            parsed["langgraph"] = {"enabled": langgraph_raw}
+        else:
+            if not isinstance(langgraph_raw, dict):
+                raise ConfigError(
+                    "'integrations.langgraph' must be a mapping or boolean"
+                )
+            unknown_langgraph = set(langgraph_raw) - {"enabled"}
+            if unknown_langgraph:
+                names = ", ".join(sorted(str(name) for name in unknown_langgraph))
+                raise ConfigError(
+                    f"unsupported 'integrations.langgraph' option(s): {names}"
+                )
+            enabled = langgraph_raw.get("enabled", True)
+            if not isinstance(enabled, bool):
+                raise ConfigError("'integrations.langgraph.enabled' must be a boolean")
+            parsed["langgraph"] = {"enabled": enabled}
 
-    unknown_langgraph = set(langgraph_raw) - {"enabled"}
-    if unknown_langgraph:
-        names = ", ".join(sorted(str(name) for name in unknown_langgraph))
-        raise ConfigError(f"unsupported 'integrations.langgraph' option(s): {names}")
-    enabled = langgraph_raw.get("enabled", True)
-    if not isinstance(enabled, bool):
-        raise ConfigError("'integrations.langgraph.enabled' must be a boolean")
-    return {"langgraph": {"enabled": enabled}}
+    crewai_raw = raw.get("crewai")
+    if crewai_raw is not None:
+        if isinstance(crewai_raw, bool):
+            parsed["crewai"] = {"enabled": crewai_raw}
+        else:
+            if not isinstance(crewai_raw, dict):
+                raise ConfigError("'integrations.crewai' must be a mapping or boolean")
+            unknown_crewai = set(crewai_raw) - {"enabled", "run_id_from"}
+            if unknown_crewai:
+                names = ", ".join(sorted(str(name) for name in unknown_crewai))
+                raise ConfigError(
+                    f"unsupported 'integrations.crewai' option(s): {names}"
+                )
+            enabled = crewai_raw.get("enabled", True)
+            if not isinstance(enabled, bool):
+                raise ConfigError("'integrations.crewai.enabled' must be a boolean")
+            run_id_from = crewai_raw.get("run_id_from")
+            if run_id_from is not None and (
+                not isinstance(run_id_from, str) or not run_id_from.strip()
+            ):
+                raise ConfigError(
+                    "'integrations.crewai.run_id_from' must be a non-empty string"
+                )
+            parsed["crewai"] = {
+                "enabled": enabled,
+                **(
+                    {"run_id_from": run_id_from.strip()}
+                    if isinstance(run_id_from, str)
+                    else {}
+                ),
+            }
+    return parsed
 
 
 _DEPLOYMENT_TOPOLOGIES = frozenset({"single_node", "multi_node"})
@@ -2163,6 +2200,17 @@ def _parse_config(
             raise ConfigError("state_flush storage 'shared' requires state_backend")
 
     integrations = _parse_integrations(data)
+    crewai_integration = (integrations or {}).get("crewai", {})
+    if (
+        profile == PROFILE_PRODUCTION
+        and crewai_integration.get("enabled", False)
+        and not crewai_integration.get("run_id_from")
+    ):
+        raise ConfigError(
+            "profile is 'production' and integrations.crewai is enabled, but "
+            "'integrations.crewai.run_id_from' is missing. Bind it to a stable, "
+            "host-owned Crew.kickoff input field"
+        )
     deployment = _parse_deployment(data)
     verify = _parse_verify(data)
     destructive_confirm_raw = _parse_destructive_confirm(
@@ -2205,6 +2253,7 @@ def _parse_config(
         _audit_auto=audit_auto,
     )
     if activate_runtime:
+        cfg._activate_framework_integrations()
         cfg._activate_completion_terminal()
         cfg._activate_llm_budget()
         if authority_window_raw is not None or destructive_confirm_raw is not None:

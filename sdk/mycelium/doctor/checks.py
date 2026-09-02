@@ -123,7 +123,8 @@ def check_configuration(ctx: DoctorContext) -> Iterable[DoctorCheck]:
     contract_count = sum(1 for tool in cfg.tools.values() if tool.contract is not None)
     details = (
         f"profile={cfg.profile!r}; tools={len(cfg.tools)}; "
-        f"contracts={contract_count}; langgraph_enabled={cfg.langgraph_enabled}"
+        f"contracts={contract_count}; langgraph_enabled={cfg.langgraph_enabled}; "
+        f"crewai_enabled={cfg.crewai_enabled}"
     )
     if cfg.profile == PROFILE_PRODUCTION:
         yield _check(
@@ -663,16 +664,27 @@ def check_run_identity(ctx: DoctorContext) -> Iterable[DoctorCheck]:
         return
 
     # Can the selected integration supply run_id?
-    if cfg.langgraph_enabled:
+    if cfg.langgraph_enabled or cfg.crewai_enabled:
+        integrations: list[str] = []
+        if cfg.langgraph_enabled:
+            integrations.append("integrations.langgraph.enabled=true")
+        if cfg.crewai_enabled:
+            integrations.append(
+                "integrations.crewai.enabled=true"
+                + (
+                    f"; run_id_from={cfg.crewai_run_id_from!r}"
+                    if cfg.crewai_run_id_from
+                    else "; deterministic development run scope"
+                )
+            )
         yield _check(
             id="run_identity.policy",
             category="Run identity",
             status=DoctorStatus.PASS,
             summary="Missing run IDs fail closed",
             details=(
-                "; ".join(details)
-                + "; integrations.langgraph.enabled=true (host must still "
-                "bind TransitionScope.run_id / configurable_thread_id)."
+                "; ".join(details + integrations)
+                + "; the host must still supply the selected stable run input."
             ),
             evidence=EVIDENCE_STATIC,
         )
@@ -682,13 +694,13 @@ def check_run_identity(ctx: DoctorContext) -> Iterable[DoctorCheck]:
             status=DoctorStatus.WARN,
             summary="Host must supply a stable run_id at runtime",
             details=(
-                "Doctor cannot prove every graph invocation sets run_id. "
-                "thread_id alone is not accepted as a substitute under "
-                "missing_run_id_policy: error."
+                "Doctor cannot prove every framework invocation supplies its "
+                "configured stable run identifier. thread_id alone is not "
+                "accepted as a substitute under missing_run_id_policy: error."
             ),
             remediation=(
-                "Ensure execution_scope / LangGraph configurable fields "
-                "provide a host-owned run_id on every guarded call."
+                "Ensure LangGraph configurable fields or the configured CrewAI "
+                "kickoff input provide a host-owned run_id on every guarded call."
             ),
             evidence=EVIDENCE_NOT_VERIFIABLE,
             blocking=False,
@@ -703,7 +715,7 @@ def check_run_identity(ctx: DoctorContext) -> Iterable[DoctorCheck]:
             summary="Missing run IDs fail closed, but no integration selected",
             details="; ".join(details),
             remediation=(
-                "Set integrations.langgraph.enabled: true if using LangGraph, "
+                "Enable the matching LangGraph or CrewAI integration, "
                 "or ensure your host always enters execution_scope with run_id."
             ),
             evidence=EVIDENCE_NOT_VERIFIABLE,
@@ -748,18 +760,21 @@ def check_completion(ctx: DoctorContext) -> Iterable[DoctorCheck]:
             summary="Completion configured but terminal adapter unwired",
             details=(
                 f"langgraph_enabled={cfg.langgraph_enabled}; "
-                "importable LangGraph alone is not enough"
+                f"crewai_enabled={cfg.crewai_enabled}; "
+                "an importable framework alone is not enough"
             ),
             remediation=(
-                "Set integrations.langgraph.enabled: true and install "
-                "mycelium-runtime[langgraph], or register_terminal_adapter(...) "
-                "before load_config()."
+                "An importable framework is not enough. Set "
+                "integrations.langgraph.enabled: true or "
+                "integrations.crewai.enabled: true and install the matching "
+                "extra, or register_terminal_adapter(...) before load_config()."
             ),
             evidence=EVIDENCE_RUNTIME,
         )
         return
 
-    custom = adapters - {"langgraph"}
+    framework_adapters = {"langgraph", "crewai"}
+    custom = adapters - framework_adapters
     evidence = EVIDENCE_RUNTIME
     details = f"adapters={sorted(adapters)}; checks run at verified graph END only"
     if "langgraph" in adapters and not cfg.langgraph_enabled:
@@ -774,13 +789,25 @@ def check_completion(ctx: DoctorContext) -> Iterable[DoctorCheck]:
             evidence=EVIDENCE_RUNTIME,
         )
         return
+    if "crewai" in adapters and not cfg.crewai_enabled:
+        yield _check(
+            id="completion.adapter",
+            category="Completion",
+            status=DoctorStatus.FAIL,
+            summary="CrewAI terminal present without explicit selection",
+            details=details,
+            remediation="Set integrations.crewai.enabled: true",
+            evidence=EVIDENCE_RUNTIME,
+        )
+        return
 
+    selected_frameworks = sorted(adapters & framework_adapters)
     summary = (
-        "LangGraph terminal adapter verified"
-        if "langgraph" in adapters
+        f"Framework terminal adapter(s) verified: {selected_frameworks}"
+        if selected_frameworks
         else f"Terminal adapter(s) verified: {sorted(adapters)}"
     )
-    if custom and "langgraph" not in adapters:
+    if custom and not selected_frameworks:
         details += (
             "; custom adapters are verified only via registration metadata "
             "(wrap_final_message/gate_graph_end still required in your runtime)"

@@ -307,8 +307,21 @@ class LangGraphIntegrationConfigModel(_ConfigModel):
     enabled: bool = True
 
 
+class CrewAIIntegrationConfigModel(_ConfigModel):
+    enabled: bool = True
+    run_id_from: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Stable Crew.kickoff inputs key used as the run scope. If omitted, "
+            "development identity is derived from the crew and full input mapping."
+        ),
+    )
+
+
 class IntegrationsConfigModel(_ConfigModel):
     langgraph: bool | LangGraphIntegrationConfigModel | None = None
+    crewai: bool | CrewAIIntegrationConfigModel | None = None
 
 
 class DeploymentConfigModel(_ConfigModel):
