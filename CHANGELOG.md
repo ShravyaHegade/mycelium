@@ -3,22 +3,35 @@
 Release policy: **batch; calm over velocity.** Prefer one coherent cut over many
 small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEASE.md).
 
-## Unreleased
+## 1.38.1 (2026-09-02)
 
-### Fixed
+This release batches reliability fixes, standardized tool contracts, agent
+setup improvements, and a structural decomposition of the core runtime while
+preserving the existing public API and fail-closed execution guarantees.
 
-- Require audit receipt flags in tool, task, and global configuration to be
-  YAML booleans instead of accepting truthy values such as quoted `false`.
-- Validate webhook exporter timeouts as finite, positive numbers and reject
-  booleans in both direct construction and YAML configuration.
-- Compare contention and concurrent-reconciliation worker results as structured
-  JSON so PostgreSQL JSONB key reordering cannot cause false verification failures.
+### Added
+
+- Add standardized tool contracts for supported operations, capabilities,
+  required and optional arguments, argument types, and output schemas. Contracts
+  are available through configuration, schema generation, Doctor validation,
+  templates, and the public API.
 - Include the official `mycelium-setup` coding-agent skill in built wheels and
   add `mycelium skills install` for offline, idempotent installation into a
   project or user skill catalog.
 - Allow custom runtimes launched by `mycelium run` to declare a trusted,
   idempotent completion adapter installer that runs before production terminal
   protection is validated.
+
+### Changed
+
+- Refactor the ledger into separate domain-model, storage, identity, context,
+  execution, recovery, and lifecycle modules while retaining the stable
+  `action_ledger.py` compatibility surface.
+- Refactor configuration parsing, policy handling, validation, and runtime
+  composition into focused modules while retaining the public `config.py`
+  surface.
+- Separate CLI parsing and command handlers, including migration and
+  transition operations, while retaining `mycelium.__main__` as the entrypoint.
 - Make the setup skill classify features as enabled, deferred for host work,
   deferred for operator input, or intentionally not applicable instead of
   implying every feature belongs in every project.
@@ -28,6 +41,42 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
 - Document and test host-owned, per-run entity policies for exact destinations
   selected dynamically by a trusted orchestrator, and teach the bundled setup
   skill not to replace them with model-controlled or wildcard allowlists.
+
+### Fixed
+
+- Fail closed on malformed or non-object JSON storage state instead of silently
+  resetting the file to `{}`; corrupted bytes are preserved and surfaced as
+  `StorageCorruptionError`.
+- Require audit receipt flags in tool, task, and global configuration to be
+  YAML booleans instead of accepting truthy values such as quoted `false`.
+- Validate webhook exporter timeouts as finite, positive numbers and reject
+  booleans in both direct construction and YAML configuration.
+- Reject non-finite and boolean budget ceiling values, including manual
+  `max_steps` configurations.
+- Compare contention and concurrent-reconciliation worker results as structured
+  JSON so PostgreSQL JSONB key reordering cannot cause false verification
+  failures.
+- Preserve positional compatibility for `BudgetRunState` and improve public API
+  import formatting.
+
+### Documentation and distribution
+
+- Add contribution guidelines, architecture and guarantee documentation,
+  configuration reference updates, distribution-content checks, installed-skill
+  verification, and CI coverage for packaged agent skills.
+
+### Contributors
+
+Thanks to all contributors included in this release:
+
+- [@nandanadileep](https://github.com/nandanadileep) — runtime decomposition,
+  tool contracts, setup skill, documentation, packaging, and integration work.
+- [@saivamsi415](https://github.com/saivamsi415) — budget validation,
+  verification fixes, compatibility fixes, and test-quality improvements.
+- [@dlowzzxx](https://github.com/dlowzzxx) — corrupt-storage handling,
+  budget-state compatibility, and manual budget fixes.
+- [@mikemikimike](https://github.com/mikemikimike) — audit-receipt boolean and
+  webhook-timeout validation fixes.
 
 ## 1.38.0 (2026-08-29)
 
