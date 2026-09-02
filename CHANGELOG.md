@@ -15,6 +15,8 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
   booleans in both direct construction and YAML configuration.
 - Reject non-finite and boolean use-time currency freshness windows during
   fact construction and YAML configuration loading.
+- Reject invalid transition identity, boolean, and non-finite timing values
+  during YAML configuration loading.
 - Compare contention and concurrent-reconciliation worker results as structured
   JSON so PostgreSQL JSONB key reordering cannot cause false verification failures.
 - Include the official `mycelium-setup` coding-agent skill in built wheels and
