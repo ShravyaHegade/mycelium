@@ -2001,6 +2001,11 @@ Storage backends:
 | `redis` | Multi-worker coordination | `redis` + `url` or `url_env` |
 | `postgres` | Durable multi-worker / audit-oriented deployment | `postgres` + `dsn` or `dsn_env` |
 
+The action ledger also stores call/result evidence. Read the [ledger payload
+storage guide](docs/LEDGER_PAYLOAD_STORAGE.md) before selecting a durable
+backend; it lists every serialized field, the backend-specific layout, and the
+current redaction and pruning limits.
+
 ```python
 from mycelium import ActionLedger, FileLedgerStorage, InMemoryLedgerStorage
 from mycelium import RedisLedgerStorage, PostgresLedgerStorage, SqliteLedgerStorage
