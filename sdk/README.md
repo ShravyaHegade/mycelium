@@ -102,7 +102,7 @@ integration path explicitly:
 | Runtime | Tool identity | Ledger integration | Additional integration |
 |---|---|---|---|
 | LangGraph `ToolNode` / `create_agent` | Automatic from injected `ToolRuntime` when `integrations.langgraph` is enabled | YAML, `@config.apply`, or ledger decorators | Automatic budget and completion adapters when configured |
-| CrewAI | Host-supplied `request_id` (required in production); derived identity is development-only | Generic sync/async decorators | `instrument_crewai_llm` provides budget accounting only |
+| CrewAI | Automatic logical dispatch identity from crew/run/task/agent metadata when `integrations.crewai` is enabled; host-supplied `request_id` remains required for consequential production tools | YAML, `@config.apply`, or ledger decorators | Automatic completion terminal; `instrument_crewai_llm` provides budget accounting |
 | Plain Python or another Python framework | Host-supplied identity is recommended | Decorators or [manual claim/complete](#manual-integration-claim--execute--complete) | Host calls completion, budget, and scope hooks explicitly |
 | TypeScript or another non-Python runtime | No native identity adapter | No native SDK; place the guarded operation behind a Python service boundary or implement the transition protocol in the host | Host-owned |
 
@@ -367,6 +367,29 @@ argument (not an LLM-visible tool input), while the original function remains
 unchanged. Calls outside LangGraph still work. This requires
 `mycelium-runtime[langgraph]` and LangGraph's `ToolNode` or `create_agent`;
 custom executors must pass IDs themselves.
+
+CrewAI uses scoped lifecycle hooks, so tool functions do not need a new
+parameter:
+
+```yaml
+integrations:
+  crewai:
+    enabled: true
+    run_id_from: ticket_id
+```
+
+Install `mycelium-runtime[crewai]`, then pass the stable field through the
+existing `Crew.kickoff(inputs=...)` mapping. Mycelium combines that run value
+with CrewAI's crew, task, agent, tool, and canonical tool arguments before a
+configured tool executes. If `run_id_from` is omitted, development mode derives
+a deterministic run scope from the crew and full kickoff inputs.
+
+CrewAI's public tool hooks do not expose the model provider's tool-call ID, so
+the adapter deliberately uses this conservative logical identity. Repeating an
+identical tool call in the same task maps to the same dispatch. If two identical
+calls are genuinely different business actions, give them distinct stable
+host-owned `request_id` values. Framework identity never replaces that
+production business-identity requirement.
 
 For zero-touch instrumentation, launch with:
 
@@ -1397,9 +1420,9 @@ Wrapper order: `@secret_args` → `@entity_guard` → `@destructive_confirm` →
 Loop guard stops *identical* action thrash. Budget stops **total burn** when
 every call is different — including pure LLM chat loops with no tools.
 
-Supported frameworks are wired automatically. Configure limits in YAML; do
-not call `BudgetGuard.check("llm")` or `record_usage()` on LangGraph /
-LangChain chat models. Mycelium checks step / token / cost / time **before**
+LangGraph budget instrumentation is wired automatically. For CrewAI, wrap the
+LLM once with `instrument_crewai_llm`; do not call
+`BudgetGuard.check("llm")` or `record_usage()` yourself. Mycelium checks step / token / cost / time **before**
 the provider call and records usage **once** from response metadata
 (`extract_token_usage`). Streaming aggregates chunks and records when the
 stream completes or closes — an incomplete stream is never treated as zero
@@ -1875,9 +1898,10 @@ contract.
 Resolved marks: `success` | `failed` | `abandoned` (abandoned needs a reason).
 Scope: `run_id` (fallback `thread_id`); missing scope → warn and skip.
 
-Supported frameworks are wired automatically. Configure the checklist in
-YAML; do not call `complete_run()` on LangGraph `invoke` / `ainvoke` /
-`stream`. Intermediate stream chunks are yielded as they arrive. The
+Supported framework terminals are wired automatically. Configure the checklist
+in YAML; do not call `complete_run()` on LangGraph `invoke` / `ainvoke` /
+`stream` or CrewAI `kickoff` / `kickoff_async` / `akickoff`. LangGraph
+intermediate stream chunks are yielded as they arrive. The
 **last** (terminal) chunk is withheld until the contract passes.
 Unmarked **required** items refuse (`CompletionRefusedError`, the
 terminal chunk is never emitted); unmarked **optional** items warn and
@@ -1904,9 +1928,24 @@ cfg = load_config("mycelium.yaml")
 cfg.mark_completion("charge_customer", "success", scope_key=run_id)
 ```
 
+For CrewAI, select its integration and optionally bind the completion scope to
+an existing kickoff input:
+
+```yaml
+integrations:
+  crewai:
+    enabled: true
+    run_id_from: workflow_id
+```
+
+On a successful CrewAI execution, Mycelium checks the active completion
+contract before the result returns. A refusal becomes CrewAI's fail-closed
+`HookAborted` signal, with the Mycelium completion error preserved as its cause.
+Failed executions do not attempt to report successful completion.
+
 `profile: production` verifies an **explicitly selected** terminal adapter
-at startup. Having LangGraph installed is not enough — set
-`integrations.langgraph.enabled: true`. For a custom runtime launched with
+at startup. Having LangGraph or CrewAI installed is not enough; enable the
+matching integration explicitly. For a custom runtime launched with
 `mycelium run`, declare an idempotent installer in the configuration:
 
 ```yaml

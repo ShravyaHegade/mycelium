@@ -3,6 +3,19 @@
 Release policy: **batch; calm over velocity.** Prefer one coherent cut over many
 small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEASE.md).
 
+## Unreleased
+
+### Added
+
+- Add first-class CrewAI runtime integration through scoped framework hooks.
+  Configured tools now receive deterministic crew/run/task/agent dispatch
+  identity without signature changes, and successful CrewAI terminals enforce
+  the active completion contract for sync, thread-backed async, native async,
+  and streaming execution paths.
+- Add `integrations.crewai`, an optional `run_id_from` kickoff-input binding,
+  the `mycelium-runtime[crewai]` package extra, and stable integration APIs for
+  explicit CrewAI setup.
+
 ## 1.38.1 (2026-09-02)
 
 This release batches reliability fixes, standardized tool contracts, agent

@@ -86,6 +86,13 @@ Completion storage and optional custom-runtime startup adapter.
 | `dsn_env` | `string \| null` | `null` | — |
 | `adapter_installer` | `string \| null` | `null` | Import path (package.module:function) called during runtime config activation. It must wire the custom terminal boundary and call register_terminal_adapter(). |
 
+## CrewAIIntegration
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `enabled` | `boolean` | `true` | — |
+| `run_id_from` | `string \| null` | `null` | Stable Crew.kickoff inputs key used as the run scope. If omitted, development identity is derived from the crew and full input mapping. |
+
 ## Deployment
 
 | Field | Type | Default | Description |
@@ -104,6 +111,7 @@ Completion storage and optional custom-runtime startup adapter.
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `langgraph` | `boolean \| LangGraphIntegration \| null` | `null` | — |
+| `crewai` | `boolean \| CrewAIIntegration \| null` | `null` | — |
 
 ## LangGraphIntegration
 
