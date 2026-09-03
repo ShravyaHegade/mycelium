@@ -450,6 +450,42 @@ transition:
         load_config_from_string(yaml_text)
 
 
+@pytest.mark.parametrize(
+    "field",
+    ["lease_ttl", "lease_renew_interval", "poll_interval", "poll_timeout", "presumed_dead_after"],
+)
+@pytest.mark.parametrize("value", [".nan", ".inf", "-.inf", "true", "false"])
+def test_transition_rejects_nonfinite_and_boolean_timing(field: str, value: str) -> None:
+    with pytest.raises(ConfigError, match=field):
+        load_config_from_string(f"""
+transition:
+  agent_id: payment-agent
+  policy_version: test
+  {field}: {value}
+""")
+
+
+@pytest.mark.parametrize("value", ['"false"', "0", "1", "null", "[]", "{}"])
+def test_transition_reclaim_requires_boolean(value: str) -> None:
+    with pytest.raises(ConfigError, match="reclaim_requires_death_signal"):
+        load_config_from_string(f"""
+transition:
+  agent_id: payment-agent
+  policy_version: test
+  reclaim_requires_death_signal: {value}
+""")
+
+
+@pytest.mark.parametrize("field", ["agent_id", "policy_version"])
+def test_transition_identity_requires_nonempty_string(field: str) -> None:
+    with pytest.raises(ConfigError, match=field):
+        load_config_from_string(f"""
+transition:
+  agent_id: {"true" if field == "agent_id" else "payment-agent"}
+  policy_version: {"123" if field == "policy_version" else "test"}
+""")
+
+
 def test_apply_tool_with_audit_receipt_from_yaml() -> None:
     yaml_text = """
 transition:

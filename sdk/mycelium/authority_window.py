@@ -12,6 +12,7 @@ currency by itself — policy/state freshness beyond expiry lands in item 5.
 from __future__ import annotations
 
 import hashlib
+import math
 from collections.abc import Callable, Mapping
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
@@ -167,9 +168,14 @@ class AuthorityWindowPolicy:
                 "authority_window.use_time_check must be one of "
                 f"{sorted(USE_TIME_CHECKS)}, got {self.use_time_check!r}"
             )
-        if self.clock_skew_tolerance_seconds < 0:
+        if (
+            not isinstance(self.clock_skew_tolerance_seconds, (int, float))
+            or isinstance(self.clock_skew_tolerance_seconds, bool)
+            or not math.isfinite(self.clock_skew_tolerance_seconds)
+            or self.clock_skew_tolerance_seconds < 0
+        ):
             raise ValueError(
-                "authority_window.clock_skew_tolerance_seconds must be >= 0"
+                "authority_window.clock_skew_tolerance_seconds must be a finite number >= 0"
             )
 
 

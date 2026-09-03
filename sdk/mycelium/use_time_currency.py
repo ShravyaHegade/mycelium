@@ -14,6 +14,7 @@ import asyncio
 import functools
 import hashlib
 import inspect
+import math
 from collections.abc import Awaitable, Callable, Mapping
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
@@ -137,8 +138,13 @@ class UseTimeFact:
             raise ValueError("use-time fact subject_type must be non-empty")
         if not self.subject_id or not str(self.subject_id).strip():
             raise ValueError("use-time fact subject_id must be non-empty")
-        if self.max_age_seconds is not None and self.max_age_seconds < 0:
-            raise ValueError("max_age_seconds must be >= 0")
+        if self.max_age_seconds is not None and (
+            not isinstance(self.max_age_seconds, (int, float))
+            or isinstance(self.max_age_seconds, bool)
+            or not math.isfinite(self.max_age_seconds)
+            or self.max_age_seconds < 0
+        ):
+            raise ValueError("max_age_seconds must be a finite number >= 0")
 
     @property
     def subject_ref(self) -> str:
@@ -239,8 +245,13 @@ class UseTimeFactSpec:
             raise ValueError("subject.id_from must be non-empty")
         if not self.validator or not str(self.validator).strip():
             raise ValueError("validator must be non-empty")
-        if self.max_age_seconds is not None and self.max_age_seconds < 0:
-            raise ValueError("max_age_seconds must be >= 0")
+        if self.max_age_seconds is not None and (
+            not isinstance(self.max_age_seconds, (int, float))
+            or isinstance(self.max_age_seconds, bool)
+            or not math.isfinite(self.max_age_seconds)
+            or self.max_age_seconds < 0
+        ):
+            raise ValueError("max_age_seconds must be a finite number >= 0")
 
 
 @dataclass(frozen=True)

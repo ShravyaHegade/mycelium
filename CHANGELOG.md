@@ -16,6 +16,27 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
   the `mycelium-runtime[crewai]` package extra, and stable integration APIs for
   explicit CrewAI setup.
 
+### Fixed
+
+- Reject non-finite and boolean authority-window clock-skew tolerances during
+  policy construction and YAML configuration loading.
+- Require audit receipt flags in tool, task, and global configuration to be
+  YAML booleans instead of accepting truthy values such as quoted `false`.
+- Validate webhook exporter timeouts as finite, positive numbers and reject
+  booleans in both direct construction and YAML configuration.
+- Reject non-finite and boolean use-time currency freshness windows during
+  fact construction and YAML configuration loading.
+- Reject invalid transition identity, boolean, and non-finite timing values
+  during YAML configuration loading.
+- Compare contention and concurrent-reconciliation worker results as structured
+  JSON so PostgreSQL JSONB key reordering cannot cause false verification failures.
+- Include the official `mycelium-setup` coding-agent skill in built wheels and
+  add `mycelium skills install` for offline, idempotent installation into a
+  project or user skill catalog.
+- Allow custom runtimes launched by `mycelium run` to declare a trusted,
+  idempotent completion adapter installer that runs before production terminal
+  protection is validated.
+
 ## 1.38.1 (2026-09-02)
 
 This release batches reliability fixes, standardized tool contracts, agent
@@ -28,12 +49,6 @@ preserving the existing public API and fail-closed execution guarantees.
   required and optional arguments, argument types, and output schemas. Contracts
   are available through configuration, schema generation, Doctor validation,
   templates, and the public API.
-- Include the official `mycelium-setup` coding-agent skill in built wheels and
-  add `mycelium skills install` for offline, idempotent installation into a
-  project or user skill catalog.
-- Allow custom runtimes launched by `mycelium run` to declare a trusted,
-  idempotent completion adapter installer that runs before production terminal
-  protection is validated.
 
 ### Changed
 
