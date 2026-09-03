@@ -298,3 +298,14 @@ If you find Mycelium useful, please consider giving the
 [repository a GitHub star](https://github.com/mycelium-labs/mycelium). It helps
 others discover the project—no pressure, and it is never a condition of issue
 triage, review, or merge.
+
+### Markdown link checks
+
+Before opening a documentation-related pull request, run the same local Markdown
+link and heading-anchor check used by CI:
+
+```bash
+lychee --verbose --no-progress --offline \
+  --exclude-path graphify-out \
+  --exclude-path .cache \
+  "**/*.md"

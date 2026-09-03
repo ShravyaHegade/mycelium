@@ -186,3 +186,20 @@ jobs:
       - name: Ruff
         working-directory: sdk
         run: ruff check mycelium tests
+
+  markdown-links:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check Markdown links and heading anchors
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: >-
+            --verbose
+            --no-progress
+            --offline
+            --exclude-path graphify-out
+            --exclude-path .cache
+            "**/*.md"
+          fail: true
