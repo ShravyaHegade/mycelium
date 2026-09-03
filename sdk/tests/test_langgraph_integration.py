@@ -93,8 +93,8 @@ def test_config_parses_langgraph_integration() -> None:
             "'integrations.langgraph.enabled' must be a boolean",
         ),
         (
-            "integrations: {crewai: true}",
-            "unsupported integration(s): crewai",
+            "integrations: {unknown: true}",
+            "unsupported integration(s): unknown",
         ),
     ],
 )
