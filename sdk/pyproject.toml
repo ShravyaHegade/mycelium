@@ -85,3 +85,22 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
+
+# Keep repository-development material out of source archives. The sdist still
+# contains the README, build metadata, and the complete runtime package.
+[tool.hatch.build.targets.sdist]
+exclude = [
+  ".hypothesis/",
+  ".pytest_cache/",
+  ".ruff_cache/",
+  ".venv/",
+  "dist/",
+  "tests/",
+  "docs/",
+  "examples/",
+  "scripts/",
+  "api-snapshot.json",
+  "uv.lock",
+  "**/__pycache__/",
+  "**/*.pyc",
+]
