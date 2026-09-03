@@ -37,6 +37,7 @@ _SCOPE_MISSING_WARNED = False
 
 COMPLETION_WRAPPED_MARK = "_mycelium_completion_wrapped"
 TERMINAL_ADAPTER_LANGGRAPH = "langgraph"
+TERMINAL_ADAPTER_CREWAI = "crewai"
 TERMINAL_ADAPTER_FINAL_MESSAGE = "final_message"
 TERMINAL_ADAPTER_GRAPH_END = "graph_end"
 TERMINAL_ADAPTER_MANUAL = "manual"
@@ -54,6 +55,7 @@ _MYCELIUM_WRAPPER_MARKERS = (
     "_mycelium_scope_guarded",
     "_mycelium_state_authority",
     "_mycelium_langgraph_integration",
+    "_mycelium_crewai_integration",
 )
 
 _active_completion_contract: CompletionContract | None = None

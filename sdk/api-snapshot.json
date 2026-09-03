@@ -399,10 +399,13 @@
     ],
     "mycelium.experimental": [],
     "mycelium.integrations": [
+      "CrewAIIntegrationError",
       "LangGraphIntegrationError",
       "completion_gate_end",
+      "install_crewai_runtime",
       "install_langgraph_completion_terminal",
       "instrument_crewai_llm",
+      "instrument_crewai_tool",
       "instrument_langgraph_llm",
       "instrument_langgraph_tool"
     ],

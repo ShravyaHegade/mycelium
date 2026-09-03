@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Mycelium sits on the execution boundary for payments and external mutations. A small behavioral change can alter whether an operation runs, retries, or fails closed. 
+        Mycelium sits on the execution boundary for payments and external mutations. A small behavioral change can alter whether an operation runs, retries, or fails closed.
         Before proposing a change, ensure you have read the [CONTRIBUTING.md](https://github.com/mycelium-labs/mycelium/blob/main/CONTRIBUTING.md) guide on reliability guarantees.
   - type: textarea
     id: proposal

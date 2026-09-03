@@ -128,6 +128,7 @@ specific host-owned input that genuinely cannot be derived.
 ```bash
 pip install mycelium-runtime
 pip install 'mycelium-runtime[langgraph]'  # automatic LangGraph runtime IDs
+pip install 'mycelium-runtime[crewai]'     # automatic CrewAI runtime IDs + terminal
 pip install 'mycelium-runtime[redis]'      # multi-worker / cloud ledger
 pip install 'mycelium-runtime[postgres]'   # Postgres ledger backend
 mycelium demo --slow       # feature tour, paced for screen recording
